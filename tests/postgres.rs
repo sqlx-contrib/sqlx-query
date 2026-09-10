@@ -14,6 +14,9 @@
 //! DATABASE_URL=postgres://localhost/sqlx_query_test cargo test --test postgres
 //! ```
 
+use std::str::FromStr as _;
+
+use sqlx::postgres::PgConnectOptions;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use sqlx_query::{placeholder_count, shift, splice};
 
@@ -48,7 +51,7 @@ async fn pool(schema: &str) -> Option<PgPool> {
         return None;
     };
 
-    let pool = PgPool::connect(&url)
+    let admin = PgPool::connect(&url)
         .await
         .expect("DATABASE_URL must connect");
 
@@ -57,37 +60,37 @@ async fn pool(schema: &str) -> Option<PgPool> {
     for statement in [
         format!("DROP SCHEMA IF EXISTS {schema} CASCADE"),
         format!("CREATE SCHEMA {schema}"),
-        format!("SET search_path TO {schema}"),
-        "CREATE TABLE volumes (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, read_count INT NOT NULL)".to_owned(),
-        "INSERT INTO volumes (title, read_count) VALUES ('Dune', 9), ('Emma', 3), ('Ulysses', 12)"
-            .to_owned(),
     ] {
         sqlx::query(AssertSqlSafe(statement))
+            .execute(&admin)
+            .await
+            .expect("create the schema");
+    }
+    admin.close().await;
+
+    // `search_path` goes on the *connection options*, so every connection the
+    // pool opens has it. A `SET search_path` statement would apply to whichever
+    // pooled connection happened to run it, and the next statement -- taken
+    // from a different connection -- would create its table in `public`, where
+    // it collides with every other test doing the same.
+    let options = PgConnectOptions::from_str(&url)
+        .expect("DATABASE_URL must parse")
+        .options([("search_path", schema)]);
+    let pool = PgPool::connect_with(options)
+        .await
+        .expect("connect to the schema");
+
+    for statement in [
+        "CREATE TABLE volumes (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, read_count INT NOT NULL)",
+        "INSERT INTO volumes (title, read_count) VALUES ('Dune', 9), ('Emma', 3), ('Ulysses', 12)",
+    ] {
+        sqlx::query(statement)
             .execute(&pool)
             .await
             .expect("seed the schema");
     }
 
-    // `SET` above applies to one pooled connection; this applies to every
-    // connection the pool hands out for the rest of the test.
-    sqlx::query(AssertSqlSafe(format!(
-        "ALTER ROLE CURRENT_USER IN DATABASE {} SET search_path TO {schema}",
-        database(&url)
-    )))
-    .execute(&pool)
-    .await
-    .ok();
-
     Some(pool)
-}
-
-/// The database name in `url`, for the `ALTER ROLE … IN DATABASE` above.
-fn database(url: &str) -> String {
-    url.rsplit('/')
-        .next()
-        .and_then(|tail| tail.split('?').next())
-        .unwrap_or("postgres")
-        .to_owned()
 }
 
 #[tokio::test]
