@@ -1,0 +1,99 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      # Brings up .devcontainer/docker-compose.yml -- including the Postgres
+      # tests/postgres.rs runs against -- and tears it down in a post-step even
+      # if the job is cancelled. DATABASE_URL is not set here: the shell hook
+      # gets it from `devcontainer-env export`, so it is defined once, in
+      # devcontainer.json.
+      #
+      # Nix then runs on the runner itself rather than inside the container.
+      # Building the devcontainer anyway is what keeps its definition honest --
+      # a broken one fails CI instead of only failing the next contributor.
+      - name: Setup Devcontainer
+        uses: devcontainer-env/devcontainer-ci@v1
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-flakehub: disabled
+          use-gha-cache: enabled
+      - name: Check Formatting
+        run: nix develop --command cargo fmt --check
+      - name: Lint
+        run: nix develop --command cargo clippy --all-targets
+      - name: Run Tests
+        run: nix develop --command cargo test
+      - name: Check Documentation
+        run: nix develop --command cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+  release:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    timeout-minutes: 15
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Create Release PR
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          manifest-file: .github/config/release-please-manifest.json
+          config-file: .github/config/release-please-config.json
+          target-branch: main
+  # No `build` job: this is a library crate with no binary, so there is nothing
+  # to `nix build` and no asset to attach to the release. The crate itself is
+  # the artifact, and it goes to crates.io below.
+  publish:
+    needs: release
+    if: ${{ needs.release.outputs.release_created }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-flakehub: disabled
+          use-gha-cache: enabled
+      - name: Authenticate with Crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish to Crates.io
+        run: nix develop --command cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

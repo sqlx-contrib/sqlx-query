@@ -1,0 +1,40 @@
+[package]
+name = "sqlx-query"
+version = "0.0.0"
+edition = "2024"
+# Not a choice: sqlx 0.9 declares it, and the tests build against it. The
+# library itself would compile on far older, but a crate in this set that
+# claimed a lower MSRV than its siblings would be a promise nothing checks.
+rust-version = "1.94"
+license = "MIT"
+description = "Splices SQL fragments into the sentinel comments of a query, for sqlx."
+repository = "https://github.com/sqlx-contrib/sqlx-query"
+keywords = ["sql", "sqlx", "postgres", "query", "filter"]
+categories = ["database"]
+
+# Denied rather than warned, because several consumers in this ecosystem deny
+# pedantic at the workspace level: a lint this crate tolerates is a lint they
+# cannot.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+# No dependencies, deliberately. This crate takes a `&str` and returns a
+# `String`; it does not need sqlx to do that, and a caller splicing into a
+# hand-written query should not acquire a database driver for the privilege.
+# The name says where it belongs, not what it links against.
+[dependencies]
+
+[dev-dependencies]
+# For tests/postgres.rs alone -- the round trip is the only thing here that
+# needs a database, and it is the only thing text assertions cannot stand in
+# for.
+sqlx = { version = "0.9", default-features = false, features = [
+  "postgres",
+  "runtime-tokio",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

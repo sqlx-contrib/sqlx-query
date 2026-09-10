@@ -1,0 +1,27 @@
+services:
+  workspace:
+    image: mcr.microsoft.com/devcontainers/base:bookworm
+    command: sleep infinity
+    volumes:
+      - ..:/home/vscode/workspace:cached
+
+  # What tests/postgres.rs runs against. `trust` auth is safe only because this
+  # is never reachable off the machine -- see the port note below.
+  postgres:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vscode
+      POSTGRES_DB: sqlx_query_test
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+    # Bare `5432`, not "5432:5432": Docker assigns a random host port, so two
+    # projects can run at once without colliding. `devcontainer-env export`
+    # finds the assigned port and rewrites DATABASE_URL to match, which is what
+    # lets the flake and CI share one definition of it.
+    ports:
+      - 5432
