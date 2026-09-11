@@ -4,7 +4,10 @@ use std::borrow::Cow;
 use std::fmt;
 use std::marker::PhantomData;
 
+use sqlx::database::Database;
+
 use crate::error::Error;
+use crate::splice::Splice;
 
 /// The marker that makes a comment a sentinel rather than a comment.
 const MARKER: &str = "query.";
@@ -104,6 +107,14 @@ impl<DB> QueryTemplate<DB> {
 
     pub(crate) fn pieces(&self) -> &[Piece] {
         &self.pieces
+    }
+}
+
+impl<DB: Database> QueryTemplate<DB> {
+    /// Start filling this template in.
+    #[must_use]
+    pub fn splice(&self) -> Splice<'_, DB> {
+        Splice::new(self)
     }
 }
 
