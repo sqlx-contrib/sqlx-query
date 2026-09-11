@@ -97,7 +97,7 @@ impl Keyset {
             return Predicate::empty();
         }
 
-        Predicate::seek(self.sort.clone(), self.cursor.keys().to_vec())
+        Predicate::cursor(self.cursor.keys().to_vec())
     }
 }
 

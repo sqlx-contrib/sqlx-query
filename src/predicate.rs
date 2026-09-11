@@ -29,7 +29,11 @@ enum Kind {
     /// Nothing to say.
     Empty,
     /// Rows after a keyset position.
-    Seek { sort: Sort, keys: Vec<CursorKey> },
+    ///
+    /// The keys carry their own sort keys, so the ordering is not stored
+    /// beside them -- two copies could disagree, and only one of them would be
+    /// the one the comparison is built from.
+    Cursor(Vec<CursorKey>),
     /// A filter a client sent.
     #[cfg(feature = "cel")]
     Cel(cel::common::ast::IdedExpr),
@@ -71,7 +75,7 @@ impl Predicate {
     pub fn is_empty(&self) -> bool {
         match &self.kind {
             Kind::Empty => true,
-            Kind::Seek { keys, .. } => keys.is_empty(),
+            Kind::Cursor(keys) => keys.is_empty(),
             #[cfg(feature = "cel")]
             Kind::Cel(_) => false,
         }
@@ -89,15 +93,15 @@ impl Predicate {
     ) -> Result<QueryFragment<DB, Value>, Error> {
         match &self.kind {
             Kind::Empty => Ok(QueryFragment::new()),
-            Kind::Seek { sort, keys } => seek(sort, keys, schema),
+            Kind::Cursor(keys) => seek(keys, schema),
             #[cfg(feature = "cel")]
             Kind::Cel(expr) => crate::cel::render(expr, schema),
         }
     }
 
-    pub(crate) fn seek(sort: Sort, keys: Vec<CursorKey>) -> Self {
+    pub(crate) fn cursor(keys: Vec<CursorKey>) -> Self {
         Self {
-            kind: Kind::Seek { sort, keys },
+            kind: Kind::Cursor(keys),
         }
     }
 }
@@ -117,7 +121,6 @@ impl Predicate {
 /// A positional `?` cannot point back at an earlier bind, so the repetition is
 /// unavoidable on those drivers regardless.
 fn seek<DB: Dialect, S: Schema>(
-    sort: &Sort,
     keys: &[CursorKey],
     schema: &S,
 ) -> Result<QueryFragment<DB, Value>, Error> {
@@ -148,6 +151,8 @@ fn seek<DB: Dialect, S: Schema>(
     }
 
     if !total {
+        let sort: Sort = keys.iter().map(|key| key.key.clone()).collect();
+
         return Err(Error::NotUnique(format!(
             "`{sort}` names no unique column, so a page token cannot identify a \
              row: add one with `Sort::tiebreak`, and declare it with `Table::key`"
