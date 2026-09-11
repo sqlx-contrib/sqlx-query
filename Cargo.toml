@@ -1,0 +1,42 @@
+[package]
+name = "sqlx-query"
+version = "0.0.0"
+edition = "2024"
+# Not a choice: sqlx 0.9 declares it. 0.9 is the floor because `SqlStr` is what
+# makes a rewritten query expressible at all -- in 0.8 `Execute::sql()` returned
+# `&'q str`, so spliced SQL had nowhere to live.
+rust-version = "1.94"
+license = "MIT"
+description = "Splices SQL fragments into the sentinel comments of a query you already wrote, for sqlx."
+repository = "https://github.com/sqlx-contrib/sqlx-query"
+keywords = ["sqlx", "sql", "query", "postgres", "pagination"]
+categories = ["database"]
+
+# Denied rather than warned, to match the rest of this ecosystem: a lint this
+# crate tolerates is a lint its consumers cannot.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+[dependencies]
+sqlx = { version = "0.9", default-features = false }
+
+[features]
+default = ["postgres"]
+
+# Driver support. At least one is required: without a driver there is no
+# `Arguments` impl to splice against.
+postgres = ["sqlx/postgres"]
+sqlite = ["sqlx/sqlite"]
+mysql = ["sqlx/mysql"]
+
+[dev-dependencies]
+sqlx = { version = "0.9", default-features = false, features = [
+  "postgres",
+  "sqlite",
+  "mysql",
+] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
