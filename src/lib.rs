@@ -25,6 +25,8 @@ compile_error!(
 
 mod error;
 mod fragment;
+mod template;
 
 pub use error::Error;
 pub use fragment::QueryFragment;
+pub use template::QueryTemplate;
