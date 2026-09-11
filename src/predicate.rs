@@ -34,9 +34,9 @@ enum Kind {
     /// beside them -- two copies could disagree, and only one of them would be
     /// the one the comparison is built from.
     Cursor(Vec<CursorKey>),
-    /// A filter expression a client sent.
+    /// A filter a client sent.
     #[cfg(feature = "cel")]
-    Expression(cel::common::ast::IdedExpr),
+    Filter(cel::common::ast::IdedExpr),
 }
 
 impl Predicate {
@@ -66,7 +66,7 @@ impl Predicate {
     #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
     pub fn parse(source: &str) -> Result<Self, Error> {
         Ok(Self {
-            kind: Kind::Expression(crate::cel::parse(source)?),
+            kind: Kind::Filter(crate::cel::parse(source)?),
         })
     }
 
@@ -77,7 +77,7 @@ impl Predicate {
             Kind::Empty => true,
             Kind::Cursor(keys) => keys.is_empty(),
             #[cfg(feature = "cel")]
-            Kind::Expression(_) => false,
+            Kind::Filter(_) => false,
         }
     }
 
@@ -95,7 +95,7 @@ impl Predicate {
             Kind::Empty => Ok(QueryFragment::new()),
             Kind::Cursor(keys) => seek(keys, schema),
             #[cfg(feature = "cel")]
-            Kind::Expression(expr) => crate::cel::render(expr, schema),
+            Kind::Filter(expr) => crate::cel::render(expr, schema),
         }
     }
 
