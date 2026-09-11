@@ -33,9 +33,9 @@ holes can do.
 
 ## Status
 
-Early. The splicing core is here: templates, the scanner, fragments and
-splices. The schema, dialects, filters, sorting and keyset pagination are not
-yet. The rationale lives with the code — `cargo doc --open` — rather than here.
+Early. The splicing core is here -- templates, the scanner, fragments and
+splices -- along with the schema, bind values and dialects. Sorting, keyset
+pagination and filters are not yet. The rationale lives with the code — `cargo doc --open` — rather than here.
 
 ## Two things worth knowing
 
@@ -58,8 +58,8 @@ sqlx 0.9 declares `rust-version = "1.94"`, so this crate does too.
 the right one even when the machine's default stable is older than the MSRV.
 
 ```sh
-cargo test
-cargo clippy --all-targets
+cargo test --features sqlite,mysql
+cargo clippy --all-targets --features sqlite,mysql
 ```
 
 `clippy::all` and `clippy::pedantic` are denied rather than warned, because

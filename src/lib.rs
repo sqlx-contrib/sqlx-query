@@ -71,14 +71,18 @@ compile_error!(
      Without one there is no `Arguments` implementation to splice against."
 );
 
+mod dialect;
 mod error;
 mod fragment;
 mod schema;
 mod splice;
 mod template;
+mod value;
 
+pub use dialect::Dialect;
 pub use error::Error;
 pub use fragment::QueryFragment;
 pub use schema::{Column, ColumnType, Schema, Table};
 pub use splice::{Slot, Splice};
 pub use template::QueryTemplate;
+pub use value::Value;

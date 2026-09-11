@@ -19,6 +19,10 @@ all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 
 [dependencies]
+# Not optional: `Value::Timestamp` is unconditional, and there is no build of
+# this crate that avoids it -- a cursor over a `created_at` column is the
+# common case, not an edge one.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false }
 
 [features]
@@ -26,15 +30,16 @@ default = ["postgres"]
 
 # Driver support. At least one is required: without a driver there is no
 # `Arguments` impl to splice against.
-postgres = ["sqlx/postgres"]
-sqlite = ["sqlx/sqlite"]
-mysql = ["sqlx/mysql"]
+postgres = ["sqlx/postgres", "sqlx/chrono"]
+sqlite = ["sqlx/sqlite", "sqlx/chrono"]
+mysql = ["sqlx/mysql", "sqlx/chrono"]
 
 [dev-dependencies]
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",
   "sqlite",
   "mysql",
+  "chrono",
 ] }
 
 [package.metadata.docs.rs]
