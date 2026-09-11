@@ -101,6 +101,10 @@ impl<DB, T> QueryFragment<DB, T> {
     ///
     /// Not what gets executed -- the driver decides the placeholder at splice
     /// time -- but the only way to look at a fragment on its own.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests render a fragment on its own")
+    )]
     pub(crate) fn preview(&self) -> String {
         self.segments.join("?")
     }

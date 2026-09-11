@@ -22,6 +22,10 @@ pedantic = { level = "deny", priority = -1 }
 # Not optional: `Value::Timestamp` is unconditional, and there is no build of
 # this crate that avoids it -- a cursor over a `created_at` column is the
 # common case, not an edge one.
+# Page tokens travel in URLs, so they are base64url with no padding: `+`, `/`
+# and `=` all need escaping somewhere along the way, and something in the chain
+# eventually forgets.
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false }
 

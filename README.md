@@ -34,8 +34,8 @@ holes can do.
 ## Status
 
 Early. The splicing core is here -- templates, the scanner, fragments and
-splices -- along with the schema, bind values and dialects. Sorting, keyset
-pagination and filters are not yet. The rationale lives with the code — `cargo doc --open` — rather than here.
+splices -- along with the schema, bind values, dialects, sorting and keyset
+pagination. CEL filters and the `sql!` macro are not yet. The rationale lives with the code — `cargo doc --open` — rather than here.
 
 ## Two things worth knowing
 

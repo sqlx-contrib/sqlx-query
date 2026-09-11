@@ -42,6 +42,15 @@ pub enum Error {
     /// no idea what the latter is, and telling them would export the schema.
     UnknownColumn(String),
 
+    /// A page token was malformed, or does not belong to this request.
+    Cursor(String),
+
+    /// A keyset was asked to page through an ordering that is not total.
+    ///
+    /// Without a unique column among its keys, a cursor cannot name an exact
+    /// row, and pagination silently skips or repeats rows that tie.
+    NotUnique(String),
+
     /// A splice that only numbered placeholders can express was attempted on a
     /// driver that numbers them positionally.
     ///
@@ -77,6 +86,8 @@ impl fmt::Display for Error {
             Self::UnknownColumn(field) => {
                 write!(f, "no such sortable or filterable field: `{field}`")
             }
+            Self::Cursor(message) => write!(f, "invalid page token: {message}"),
+            Self::NotUnique(message) => write!(f, "cannot paginate: {message}"),
             Self::Positional(message) => {
                 write!(f, "this driver uses positional `?` placeholders: {message}")
             }

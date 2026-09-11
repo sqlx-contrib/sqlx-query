@@ -71,18 +71,22 @@ compile_error!(
      Without one there is no `Arguments` implementation to splice against."
 );
 
+mod cursor;
 mod dialect;
 mod error;
 mod fragment;
+mod keyset;
 mod schema;
 mod sort;
 mod splice;
 mod template;
 mod value;
 
+pub use cursor::{Cursor, CursorKey};
 pub use dialect::Dialect;
 pub use error::Error;
 pub use fragment::QueryFragment;
+pub use keyset::{Keyset, Predicate};
 pub use schema::{Column, ColumnType, Schema, Table};
 pub use sort::{Direction, Sort, SortKey};
 pub use splice::{Slot, Splice};
