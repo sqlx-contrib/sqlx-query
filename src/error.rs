@@ -33,6 +33,15 @@ pub enum Error {
         available: Vec<String>,
     },
 
+    /// An `order_by` string could not be parsed.
+    Sort(String),
+
+    /// A request named a column the schema does not expose.
+    ///
+    /// Carries the request-facing path, not the database name: the caller has
+    /// no idea what the latter is, and telling them would export the schema.
+    UnknownColumn(String),
+
     /// A splice that only numbered placeholders can express was attempted on a
     /// driver that numbers them positionally.
     ///
@@ -63,6 +72,10 @@ impl fmt::Display for Error {
                         .collect::<Vec<_>>()
                         .join(", ")
                 })
+            }
+            Self::Sort(message) => write!(f, "invalid order_by: {message}"),
+            Self::UnknownColumn(field) => {
+                write!(f, "no such sortable or filterable field: `{field}`")
             }
             Self::Positional(message) => {
                 write!(f, "this driver uses positional `?` placeholders: {message}")

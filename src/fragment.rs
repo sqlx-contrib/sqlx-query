@@ -96,6 +96,14 @@ impl<DB, T> QueryFragment<DB, T> {
     pub(crate) fn parts(&self) -> (&[String], &[T]) {
         (&self.segments, &self.values)
     }
+
+    /// The SQL with `?` where each bind will go.
+    ///
+    /// Not what gets executed -- the driver decides the placeholder at splice
+    /// time -- but the only way to look at a fragment on its own.
+    pub(crate) fn preview(&self) -> String {
+        self.segments.join("?")
+    }
 }
 
 impl<DB, T> Default for QueryFragment<DB, T> {
