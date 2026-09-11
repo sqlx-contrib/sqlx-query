@@ -71,6 +71,8 @@ compile_error!(
      Without one there is no `Arguments` implementation to splice against."
 );
 
+#[cfg(feature = "cel")]
+mod cel;
 mod cursor;
 mod dialect;
 mod error;

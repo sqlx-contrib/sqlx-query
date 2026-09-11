@@ -30,6 +30,9 @@ enum Kind {
     Empty,
     /// Rows after a keyset position.
     Seek { sort: Sort, keys: Vec<CursorKey> },
+    /// A filter a client sent.
+    #[cfg(feature = "cel")]
+    Cel(cel::common::ast::IdedExpr),
 }
 
 impl Predicate {
@@ -39,12 +42,38 @@ impl Predicate {
         Self { kind: Kind::Empty }
     }
 
+    /// Parse a [CEL] expression.
+    ///
+    /// The expression is plain CEL, not the [AIP-160] grammar -- AIP is one
+    /// caller with a CEL expression and a table, not a requirement.
+    ///
+    /// Nothing is type-checked here, because cel-rust has no checking phase:
+    /// `1 > 'tuesday'` parses perfectly well. The [`Schema`] is what catches it,
+    /// at [`to_fragment`](Self::to_fragment), which is why the allow-list and
+    /// the type checker are the same object.
+    ///
+    /// [CEL]: https://cel.dev
+    /// [AIP-160]: https://google.aip.dev/160
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parse`] for anything the CEL grammar rejects.
+    #[cfg(feature = "cel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
+    pub fn parse(source: &str) -> Result<Self, Error> {
+        Ok(Self {
+            kind: Kind::Cel(crate::cel::parse(source)?),
+        })
+    }
+
     /// Whether this condition would contribute anything.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         match &self.kind {
             Kind::Empty => true,
             Kind::Seek { keys, .. } => keys.is_empty(),
+            #[cfg(feature = "cel")]
+            Kind::Cel(_) => false,
         }
     }
 
@@ -61,6 +90,8 @@ impl Predicate {
         match &self.kind {
             Kind::Empty => Ok(QueryFragment::new()),
             Kind::Seek { sort, keys } => seek(sort, keys, schema),
+            #[cfg(feature = "cel")]
+            Kind::Cel(expr) => crate::cel::render(expr, schema),
         }
     }
 

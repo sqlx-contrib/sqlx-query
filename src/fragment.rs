@@ -97,6 +97,12 @@ impl<DB, T> QueryFragment<DB, T> {
         (&self.segments, &self.values)
     }
 
+    /// The segments and values, for tests in sibling modules.
+    #[cfg(test)]
+    pub(crate) fn parts_for_test(&self) -> (&[String], &[T]) {
+        self.parts()
+    }
+
     /// The SQL with `?` where each bind will go.
     ///
     /// Not what gets executed -- the driver decides the placeholder at splice

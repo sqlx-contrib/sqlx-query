@@ -26,6 +26,17 @@ pedantic = { level = "deny", priority = -1 }
 # and `=` all need escaping somewhere along the way, and something in the chain
 # eventually forgets.
 base64 = "0.22"
+# Optional: only `Predicate::parse` needs a CEL parser, and a caller who
+# paginates without filtering should not compile one.
+#
+# `chrono` is the only cel feature wanted here, and not for the parser --
+# nothing under cel's parser is gated. It is what lets `timestamp('...')` fold
+# into a bind value. `regex` is deliberately off: `matches()` always has a
+# column on one side, so it never folds, and it lowers to the dialect's own
+# operator instead.
+cel = { version = "0.14", default-features = false, features = [
+  "chrono",
+], optional = true }
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false }
 
@@ -37,6 +48,9 @@ default = ["postgres"]
 postgres = ["sqlx/postgres", "sqlx/chrono"]
 sqlite = ["sqlx/sqlite", "sqlx/chrono"]
 mysql = ["sqlx/mysql", "sqlx/chrono"]
+
+# CEL filters.
+cel = ["dep:cel"]
 
 [dev-dependencies]
 sqlx = { version = "0.9", default-features = false, features = [

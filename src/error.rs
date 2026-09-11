@@ -33,6 +33,18 @@ pub enum Error {
         available: Vec<String>,
     },
 
+    /// A CEL filter, or a constant inside one, could not be parsed.
+    Parse(String),
+
+    /// A comparison the schema says cannot work.
+    TypeMismatch(String),
+
+    /// A construct with no faithful SQL lowering.
+    ///
+    /// Rejected rather than approximated: a filter that quietly means something
+    /// else is worse than one that does not run.
+    Unsupported(String),
+
     /// An `order_by` string could not be parsed.
     Sort(String),
 
@@ -86,6 +98,9 @@ impl fmt::Display for Error {
             Self::UnknownColumn(field) => {
                 write!(f, "no such sortable or filterable field: `{field}`")
             }
+            Self::Parse(message) => write!(f, "invalid filter: {message}"),
+            Self::TypeMismatch(message) => write!(f, "type mismatch: {message}"),
+            Self::Unsupported(message) => write!(f, "unsupported filter: {message}"),
             Self::Cursor(message) => write!(f, "invalid page token: {message}"),
             Self::NotUnique(message) => write!(f, "cannot paginate: {message}"),
             Self::Positional(message) => {
