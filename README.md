@@ -13,8 +13,8 @@ holes can do.
 ## The whole API
 
 ```rust
-use sqlx::Postgres;
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, Value};
+use sqlx::{FromRow, Postgres};
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table};
 
 // The query you already wrote. A slot is named for the kind of SQL it holds,
 // not for whoever fills it: one slot takes fragments from several sources,
@@ -46,27 +46,30 @@ let cursor = Cursor::parse(&request.page_token)?;
 // otherwise hand back rows the client has already seen, with no error anywhere.
 cursor.validate(&sort)?;
 
-let rows: Vec<Volume> = volumes
+let rows = volumes
     .splice()
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
     .fill("predicate", &filter.to_fragment(&schema)?)
     .fill("predicate", &cursor.to_fragment(&schema)?)
     .fill("order", &sort.to_fragment(&schema)?)
-    .build_query_as::<Volume>()?
+    .build()?
     .fetch_all(&pool)
     .await?;
 
-// The token for the next page, from the last row of this one. The field names
-// and directions come from the sort, so a token cannot record an ordering the
-// query did not run under.
-let last = rows.last().unwrap();
-let next = Cursor::new(&sort).after(&[
-    Value::Text(last.title.clone()),
-    Value::Int(last.id),
-])?;
+// Your own `FromRow`, applied by hand, so the raw rows stay available for the
+// cursor below.
+let page: Vec<Volume> = rows.iter().map(Volume::from_row).collect::<Result<_, _>>()?;
 
-response.next_page_token = next.as_str().to_owned();
+// The token for the next page, read out of the last row by the schema's own
+// field-to-column mapping — so there is no second mapping to keep in step, and
+// the ordering may be one the client chose at runtime.
+if let Some(last) = rows.last() {
+    response.next_page_token = Cursor::new(&sort)
+        .after_row(&schema, last)?
+        .as_str()
+        .to_owned();
+}
 ```
 
 The first page, with an empty token:
@@ -119,10 +122,12 @@ same object.
 
 ## Status
 
-Early. Everything above works and is tested, but **nothing has been run against
-a real database** — the tests assert on generated SQL, which proves shape and
-not that pagination visits every row exactly once. The `sql!` macro, which would
-turn a mistyped sentinel into a compile error, is not written yet.
+Early, but the core is exercised against a real database: `tests/sqlite.rs`
+pages through a table in memory and checks that every row is visited exactly
+once, including rows that tie on the sort column, under ascending, descending
+and mixed orderings. PostgreSQL and MySQL are still only covered by
+SQL-shape assertions, and the `sql!` macro — which would turn a mistyped
+sentinel into a compile error — is not written yet.
 
 The rationale lives with the code — `cargo doc --open` — rather than here.
 

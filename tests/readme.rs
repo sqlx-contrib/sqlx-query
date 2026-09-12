@@ -57,7 +57,7 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
          AND (\"read_count\" > $3 AND \"title\" LIKE $4 ESCAPE '!')\n      \
          ORDER BY \"title\" DESC, \"id\" ASC\n      LIMIT $2"
     );
-    let _ = query.build_query_as::<Volume>()?;
+    let _ = query.build()?;
 
     // Second page: the token above.
     let rows = [Volume {

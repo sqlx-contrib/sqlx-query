@@ -10,6 +10,7 @@ use crate::fragment::QueryFragment;
 use crate::schema::Schema;
 use crate::sort::{Direction, Sort, SortKey, resolve};
 use crate::value::Value;
+use sqlx::Row;
 
 /// The format this build writes.
 ///
@@ -142,6 +143,39 @@ impl Cursor {
             keys,
             token,
         })
+    }
+
+    /// The position after `row`.
+    ///
+    /// Each sort key's value is read from the column the schema maps it to, so
+    /// there is no second field-to-column mapping to keep in step -- and the
+    /// ordering may be one the client chose at runtime, which
+    /// [`after`](Self::after) cannot serve, since a positional slice needs a
+    /// key list known when the code was written.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownColumn`] for a key the schema does not expose, and
+    /// [`Error::Column`] if a key's column is not in the row -- usually because
+    /// it was left out of the `SELECT` list.
+    pub fn after_row<R, S>(&self, schema: &S, row: &R) -> Result<Self, Error>
+    where
+        R: Row,
+        R::Database: Dialect,
+        S: Schema,
+    {
+        let mut values = Vec::with_capacity(self.sort.keys().len());
+
+        for key in self.sort.keys() {
+            let column = resolve(schema, &key.field)?;
+            values.push(<R::Database as Dialect>::value(
+                row,
+                &column.name,
+                column.ty,
+            )?);
+        }
+
+        self.after(&values)
     }
 
     /// Read a page token.

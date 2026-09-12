@@ -63,6 +63,12 @@ pub enum Error {
     /// row, and pagination silently skips or repeats rows that tie.
     NotUnique(String),
 
+    /// A column could not be read from a row.
+    ///
+    /// Usually because it was not in the `SELECT` list: a sort key's column has
+    /// to come back with the row for a page token to be built from it.
+    Column(String),
+
     /// A splice that only numbered placeholders can express was attempted on a
     /// driver that numbers them positionally.
     ///
@@ -101,6 +107,7 @@ impl fmt::Display for Error {
             Self::Parse(message) => write!(f, "invalid filter: {message}"),
             Self::TypeMismatch(message) => write!(f, "type mismatch: {message}"),
             Self::Unsupported(message) => write!(f, "unsupported filter: {message}"),
+            Self::Column(message) => write!(f, "cannot read column: {message}"),
             Self::Cursor(message) => write!(f, "invalid page token: {message}"),
             Self::NotUnique(message) => write!(f, "cannot paginate: {message}"),
             Self::Positional(message) => {

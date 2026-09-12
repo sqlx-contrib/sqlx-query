@@ -58,7 +58,9 @@ sqlx = { version = "0.9", default-features = false, features = [
   "sqlite",
   "mysql",
   "chrono",
+  "runtime-tokio",
 ] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [package.metadata.docs.rs]
 all-features = true
