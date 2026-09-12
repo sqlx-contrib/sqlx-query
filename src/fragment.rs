@@ -150,9 +150,9 @@ impl<DB, T: Clone> Clone for QueryFragment<DB, T> {
 
 /// Something a slot can be filled with.
 ///
-/// Implemented by [`Filter`] and by a [`QueryFragment`] built by hand, so
-/// [`QueryBuilder::fill`] can take the producer itself rather than a rendered
-/// fragment -- which keeps the builder chain free of `?`.
+/// Implemented by `Filter` (with the `cel` feature) and by a [`QueryFragment`]
+/// built by hand, so [`QueryBuilder::fill`] can take the producer itself rather
+/// than a rendered fragment -- which keeps the builder chain free of `?`.
 ///
 /// Deliberately not implemented for [`Sort`] or [`Cursor`]. Those go in through
 /// [`order`] and [`seek`], which is what lets the builder see both and refuse a
@@ -161,13 +161,19 @@ impl<DB, T: Clone> Clone for QueryFragment<DB, T> {
 /// Nothing here mentions a mapping: by the time something renders, it has
 /// already been resolved.
 ///
-/// [`Filter`]: crate::Filter
+/// # `to_`, not `into_`
+///
+/// The method borrows, and has to: one `Filter` renders once per page, and a
+/// consuming `into_fragment` would mean cloning it for every page after the
+/// first. `ToX`/`to_x` is what the standard library names that shape --
+/// [`ToOwned`], [`ToString`].
+///
 /// [`Sort`]: crate::Sort
 /// [`Cursor`]: crate::Cursor
 /// [`QueryBuilder::fill`]: crate::QueryBuilder::fill
 /// [`order`]: crate::QueryBuilder::order
 /// [`seek`]: crate::QueryBuilder::seek
-pub trait Render<DB: Dialect> {
+pub trait ToFragment<DB: Dialect> {
     /// Render into a fragment.
     ///
     /// # Errors
@@ -182,7 +188,7 @@ pub trait Render<DB: Dialect> {
 ///
 /// Cloning, because `fill` needs one it can consume and this is the rare path
 /// -- everything else here is a producer that renders fresh.
-impl<DB: Dialect> Render<DB> for QueryFragment<DB, Value> {
+impl<DB: Dialect> ToFragment<DB> for QueryFragment<DB, Value> {
     fn to_fragment(&self) -> Result<QueryFragment<DB, Value>, Error> {
         Ok(self.clone())
     }

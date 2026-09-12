@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::dialect::Dialect;
 use crate::error::Error;
-use crate::fragment::{QueryFragment, Render};
+use crate::fragment::{QueryFragment, ToFragment};
 use crate::mapping::{Column, Mapping};
 use crate::value::Value;
 
@@ -121,7 +121,7 @@ impl Filter {
     }
 }
 
-impl<DB: Dialect> Render<DB> for Filter {
+impl<DB: Dialect> ToFragment<DB> for Filter {
     fn to_fragment(&self) -> Result<QueryFragment<DB, Value>, Error> {
         Filter::to_fragment(self)
     }

@@ -13,7 +13,7 @@ use crate::template::Slot;
 use crate::cursor::Cursor;
 use crate::dialect::Dialect;
 use crate::error::Error;
-use crate::fragment::Render;
+use crate::fragment::ToFragment;
 use crate::sort::Sort;
 use crate::template::QueryTemplate;
 
@@ -112,7 +112,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     /// filter and a cursor condition and read correctly. An empty fragment
     /// contributes nothing at all, not even the joiner.
     #[must_use]
-    pub fn fill(mut self, slot: &str, item: &impl Render<DB>) -> Self
+    pub fn fill(mut self, slot: &str, item: &impl ToFragment<DB>) -> Self
     where
         DB: Dialect,
     {
@@ -183,7 +183,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     /// Seek past a position, into the `filter` slot.
     ///
     /// A seek condition is a predicate, so it shares that slot's joiner with
-    /// whatever [`filter`](Self::filter) put there.
+    /// whatever `filter` put there.
     ///
     /// Refused if the token was issued under an ordering other than the one
     /// [`order`](Self::order) declared. That is the whole reason a token

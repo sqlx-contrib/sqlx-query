@@ -111,7 +111,7 @@ pub use error::Error;
 #[cfg(feature = "cel")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
 pub use filter::Filter;
-pub use fragment::{QueryFragment, Render};
+pub use fragment::{QueryFragment, ToFragment};
 pub use mapping::{Column, ColumnType, Mapping, QueryMapping};
 pub use sort::{Direction, Sort, SortKey};
 pub use template::QueryTemplate;
