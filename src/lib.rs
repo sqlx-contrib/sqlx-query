@@ -15,7 +15,8 @@
 //!      /* ORDER BY query.order */ LIMIT $2"
 //! );
 //!
-//! // The allow-list. A field not named here is rejected, not passed through.
+//! // What this query exposes, under what public name. A path not named here is
+//! // rejected, not passed through.
 //! let mapping = QueryMapping::new()
 //!     .key("id", ColumnType::Int)
 //!     .column("title", ColumnType::Text)
@@ -31,12 +32,12 @@
 //! cursor.validate(&sort)?;
 //!
 //! let query = VOLUMES
-//!     .builder()
+//!     .builder(&mapping)
 //!     .bind(7_i64)   // $1, the tenant
 //!     .bind(50_i64)  // $2, the page size
-//!     .fill("filter", &filter.to_fragment(&mapping)?)
-//!     .fill("filter", &cursor.to_fragment(&mapping)?)
-//!     .fill("order", &sort.to_fragment(&mapping)?);
+//!     .fill("filter", &filter)
+//!     .fill("filter", &cursor)
+//!     .fill("order", &sort);
 //!
 //! assert_eq!(
 //!     query.sql(),
@@ -102,6 +103,7 @@ mod error;
 mod filter;
 mod fragment;
 mod mapping;
+mod render;
 mod sort;
 mod template;
 mod value;
@@ -115,6 +117,7 @@ pub use error::Error;
 pub use filter::Filter;
 pub use fragment::QueryFragment;
 pub use mapping::{Column, ColumnType, Mapping, QueryMapping};
+pub use render::Render;
 pub use sort::{Direction, Sort, SortKey};
 /// Parse a skeleton at compile time, so a malformed sentinel is a compile
 /// error and a skeleton can live in a `static`.

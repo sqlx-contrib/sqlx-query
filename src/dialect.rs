@@ -33,6 +33,18 @@ pub trait Dialect: Database + sealed::Sealed {
     /// The identifier quote character. Doubled to escape itself.
     const QUOTE: char;
 
+    /// Append a [`Value`] to an argument list.
+    ///
+    /// The mirror of [`value`](Self::value), and here for the same reason: it
+    /// keeps `Value: Encode<DB> + Type<DB>` inside the three driver impls,
+    /// where it holds by inspection, rather than on every signature that binds
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the driver's encoder returns.
+    fn bind(arguments: &mut Self::Arguments, value: Value) -> Result<(), sqlx::error::BoxDynError>;
+
     /// Read a value of `ty` out of `row`'s `column`.
     ///
     /// Exists so that the six `Decode` bounds one per [`Value`] variant stay
@@ -91,6 +103,12 @@ impl sealed::Sealed for sqlx::Postgres {}
 impl Dialect for sqlx::Postgres {
     const QUOTE: char = '"';
 
+    fn bind(arguments: &mut Self::Arguments, value: Value) -> Result<(), sqlx::error::BoxDynError> {
+        use sqlx::Arguments as _;
+
+        arguments.add(value)
+    }
+
     fn value(row: &Self::Row, column: &str, ty: ColumnType) -> Result<Value, Error> {
         value_from_row(row, column, ty)
     }
@@ -104,6 +122,12 @@ impl sealed::Sealed for sqlx::Sqlite {}
 impl Dialect for sqlx::Sqlite {
     const QUOTE: char = '"';
 
+    fn bind(arguments: &mut Self::Arguments, value: Value) -> Result<(), sqlx::error::BoxDynError> {
+        use sqlx::Arguments as _;
+
+        arguments.add(value)
+    }
+
     fn value(row: &Self::Row, column: &str, ty: ColumnType) -> Result<Value, Error> {
         value_from_row(row, column, ty)
     }
@@ -116,6 +140,12 @@ impl sealed::Sealed for sqlx::MySql {}
 #[cfg_attr(docsrs, doc(cfg(feature = "mysql")))]
 impl Dialect for sqlx::MySql {
     const QUOTE: char = '`';
+
+    fn bind(arguments: &mut Self::Arguments, value: Value) -> Result<(), sqlx::error::BoxDynError> {
+        use sqlx::Arguments as _;
+
+        arguments.add(value)
+    }
 
     fn value(row: &Self::Row, column: &str, ty: ColumnType) -> Result<Value, Error> {
         value_from_row(row, column, ty)

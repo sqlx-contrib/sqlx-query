@@ -153,11 +153,10 @@ impl Cursor {
     /// [`Error::UnknownColumn`] for a key the mapping does not expose, and
     /// [`Error::Column`] if a key's column is not in the row -- usually because
     /// it was left out of the `SELECT` list.
-    pub fn after<R, S>(&self, row: &R, mapping: &S) -> Result<Self, Error>
+    pub fn after<R>(&self, row: &R, mapping: &dyn Mapping) -> Result<Self, Error>
     where
         R: Row,
         R::Database: Dialect,
-        S: Mapping,
     {
         let mut values = Vec::with_capacity(self.sort.keys().len());
 
@@ -291,9 +290,9 @@ impl Cursor {
     /// [`Error::UnknownColumn`] for a key the mapping does not expose,
     /// [`Error::NotUnique`] if no key is a unique column, and [`Error::Cursor`]
     /// if a value's type does not match its column's.
-    pub fn to_fragment<DB: Dialect, S: Mapping>(
+    pub fn to_fragment<DB: Dialect>(
         &self,
-        mapping: &S,
+        mapping: &dyn Mapping,
     ) -> Result<QueryFragment<DB, Value>, Error> {
         seek(&self.keys, mapping)
     }
@@ -321,9 +320,9 @@ impl Cursor {
 /// few repeated binds and buys one shape to test and no driver-specific branch.
 /// A positional `?` cannot point back at an earlier bind, so the repetition is
 /// unavoidable on those drivers regardless.
-fn seek<DB: Dialect, S: Mapping>(
+fn seek<DB: Dialect>(
     keys: &[CursorKey],
-    mapping: &S,
+    mapping: &dyn Mapping,
 ) -> Result<QueryFragment<DB, Value>, Error> {
     let mut fragment = QueryFragment::new();
     if keys.is_empty() {
@@ -541,6 +540,12 @@ fn truncated() -> Error {
     Error::Cursor("ends in the middle of a value".to_owned())
 }
 
+impl<DB: Dialect> crate::render::Render<DB> for Cursor {
+    fn to_fragment(&self, mapping: &dyn Mapping) -> Result<QueryFragment<DB, Value>, Error> {
+        Cursor::to_fragment(self, mapping)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,7 +664,7 @@ mod tests {
     #[test]
     fn the_first_page_has_no_condition() {
         let fragment = Cursor::empty()
-            .to_fragment::<sqlx::Postgres, _>(&crate::mapping::QueryMapping::new())
+            .to_fragment::<sqlx::Postgres>(&crate::mapping::QueryMapping::new())
             .unwrap();
 
         assert!(fragment.is_empty());

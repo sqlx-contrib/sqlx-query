@@ -53,13 +53,15 @@ let cursor = Cursor::parse(&request.page_token)?;
 // otherwise hand back rows the client has already seen, with no error anywhere.
 cursor.validate(&sort)?;
 
+// The mapping goes in once. `fill` takes the producer itself, so the chain has
+// no `?` in it and the first failure comes back from `build`.
 let rows = VOLUMES
-    .builder()
+    .builder(&*VOLUMES_MAPPING)
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
-    .fill("filter", &filter.to_fragment(&*VOLUMES_MAPPING)?)
-    .fill("filter", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
-    .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?)
+    .fill("filter", &filter)
+    .fill("filter", &cursor)
+    .fill("order", &sort)
     .build()?
     .fetch_all(&pool)
     .await?;

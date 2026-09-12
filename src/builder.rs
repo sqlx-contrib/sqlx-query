@@ -8,10 +8,12 @@ use sqlx::query::{Query, QueryAs, QueryScalar};
 use sqlx::types::Type;
 use sqlx::{Arguments, AssertSqlSafe, FromRow, IntoArguments};
 
-use crate::error::Error;
-use crate::fragment::QueryFragment;
 use sqlx_query_core::Slot;
 
+use crate::dialect::Dialect;
+use crate::error::Error;
+use crate::mapping::Mapping;
+use crate::render::Render;
 use crate::template::QueryTemplate;
 
 /// A template being filled in.
@@ -43,6 +45,9 @@ use crate::template::QueryTemplate;
 /// The first failure is kept and returned by the `build` methods.
 pub struct QueryBuilder<'t, DB: Database> {
     template: &'t QueryTemplate<DB>,
+    /// Resolves the request paths a producer names. Held here rather than
+    /// passed to each producer, so a query has one and the chain has no `?`.
+    mapping: &'t dyn Mapping,
     arguments: DB::Arguments,
     /// What has been put in each slot, indexed by the slot's position among
     /// slots rather than among pieces.
@@ -56,11 +61,12 @@ pub struct QueryBuilder<'t, DB: Database> {
 }
 
 impl<'t, DB: Database> QueryBuilder<'t, DB> {
-    pub(crate) fn new(template: &'t QueryTemplate<DB>) -> Self {
+    pub(crate) fn new(template: &'t QueryTemplate<DB>, mapping: &'t dyn Mapping) -> Self {
         let slots = template.parts().1.len();
 
         Self {
             template,
+            mapping,
             arguments: DB::Arguments::default(),
             filled: vec![String::new(); slots],
             error: None,
@@ -96,13 +102,17 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     /// filter and a cursor condition and read correctly. An empty fragment
     /// contributes nothing at all, not even the joiner.
     #[must_use]
-    pub fn fill<'q, T: Encode<'q, DB> + Type<DB>>(
-        mut self,
-        slot: &str,
-        fragment: &QueryFragment<DB, T>,
-    ) -> Self {
+    pub fn fill(mut self, slot: &str, item: &impl Render<DB>) -> Self
+    where
+        DB: Dialect,
+    {
         let Some((index, spec)) = self.find(slot) else {
             return self.unknown(slot);
+        };
+
+        let fragment = match item.to_fragment(self.mapping) {
+            Ok(fragment) => fragment,
+            Err(error) => return self.fail(error),
         };
 
         if fragment.is_empty() {
@@ -118,7 +128,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
 
         for (segment, value) in segments.iter().zip(values) {
             body.push_str(segment);
-            if let Err(error) = self.arguments.add(value) {
+            if let Err(error) = DB::bind(&mut self.arguments, value.clone()) {
                 return self.fail(Error::Encode(error));
             }
             let _ = self.arguments.format_placeholder(&mut body);
@@ -386,6 +396,9 @@ mod tests {
 
     use super::*;
     use crate::QueryTemplate;
+    use crate::fragment::QueryFragment;
+    use crate::mapping::QueryMapping;
+    use crate::value::Value;
 
     /// Note `ORDER BY` sits *inside* the sentinel. A keyword that only makes
     /// sense with a non-empty slot has to be part of the joiner, or an unfilled
@@ -393,16 +406,23 @@ mod tests {
     const SKELETON: &str = "SELECT id FROM t WHERE tenant = $1 /* AND query.filter */ \
                             /* ORDER BY query.order */ LIMIT $2";
 
-    fn fragment<DB>(sql: &str, value: i64) -> QueryFragment<DB, i64> {
+    /// Producers are covered where they live; these exercise the builder, so
+    /// they use fragments built by hand and an empty mapping -- nothing here
+    /// resolves a field.
+    fn fragment<DB>(sql: &str, value: i64) -> QueryFragment<DB, Value> {
         let mut fragment = QueryFragment::new();
-        fragment.push(sql).push_bind(value);
+        fragment.push(sql).push_bind(Value::Int(value));
         fragment
     }
 
-    fn text<DB>(sql: &str) -> QueryFragment<DB, i64> {
+    fn text<DB>(sql: &str) -> QueryFragment<DB, Value> {
         let mut fragment = QueryFragment::new();
         fragment.push(sql);
         fragment
+    }
+
+    fn nothing() -> QueryMapping {
+        QueryMapping::new()
     }
 
     /// `sqlx::Query` is not `Debug`, so `unwrap_err` is unavailable.
@@ -424,7 +444,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(7_i64)
             .bind(50_i64)
             .fill("filter", &fragment("reads > ", 100))
@@ -444,10 +464,10 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(7_i64)
             .bind(50_i64)
-            .fill("filter", &QueryFragment::<Postgres, i64>::new())
+            .fill("filter", &QueryFragment::<Postgres, Value>::new())
             .fill("order", &text("id ASC"))
             .sql();
 
@@ -462,7 +482,10 @@ mod tests {
         let template =
             QueryTemplate::<Postgres>::parse("SELECT 1 ORDER BY /* query.order , */ id").unwrap();
 
-        let sql = template.builder().fill("order", &text("title DESC")).sql();
+        let sql = template
+            .builder(&nothing())
+            .fill("order", &text("title DESC"))
+            .sql();
 
         assert_eq!(sql, "SELECT 1 ORDER BY title DESC , id");
     }
@@ -472,7 +495,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(7_i64)
             .bind(50_i64)
             .slot("filter", |slot| {
@@ -490,7 +513,7 @@ mod tests {
     fn an_unknown_slot_names_the_ones_that_exist() {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
-        let error = build_error(template.builder().fill("predicate", &text("x")));
+        let error = build_error(template.builder(&nothing()).fill("predicate", &text("x")));
 
         let message = format!("{error}");
         assert!(message.contains("`predicate`"), "{message}");
@@ -507,7 +530,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder()
+                .builder(&nothing())
                 .fill("filter", &text("reads > 1"))
                 .bind(7_i64),
         );
@@ -521,7 +544,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder()
+                .builder(&nothing())
                 .fill("order", &text("id ASC"))
                 .fill("filter", &text("reads > 1")),
         );
@@ -539,7 +562,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder()
+                .builder(&nothing())
                 .bind(50_i64)
                 .fill("filter", &text("reads > 1")),
         );
@@ -554,7 +577,10 @@ mod tests {
         let template =
             QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ LIMIT ?").unwrap();
 
-        assert_eq!(template.builder().bind(50_i64).sql(), "SELECT 1  LIMIT ?");
+        assert_eq!(
+            template.builder(&nothing()).bind(50_i64).sql(),
+            "SELECT 1  LIMIT ?"
+        );
     }
 
     /// Numbered placeholders name a bound value, not a position, so the same
@@ -565,7 +591,7 @@ mod tests {
             QueryTemplate::<Postgres>::parse("SELECT 1 /* AND query.filter */ LIMIT $1").unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(50_i64)
             .fill("filter", &fragment("reads > ", 1))
             .sql();
@@ -580,7 +606,10 @@ mod tests {
         let template =
             QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ AND x = \'?\'").unwrap();
 
-        let sql = template.builder().fill("filter", &text("reads > 1")).sql();
+        let sql = template
+            .builder(&nothing())
+            .fill("filter", &text("reads > 1"))
+            .sql();
 
         assert_eq!(sql, "SELECT 1 AND reads > 1 AND x = \'?\'");
     }
@@ -592,7 +621,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .fill("order", &text("id ASC"))
             .fill("filter", &fragment("reads > ", 1))
             .bind(7_i64)

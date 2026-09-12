@@ -2,7 +2,7 @@
 #![cfg(all(feature = "macros", feature = "postgres"))]
 
 use sqlx::Postgres;
-use sqlx_query::{QueryFragment, QueryTemplate, sql};
+use sqlx_query::{QueryFragment, QueryMapping, QueryTemplate, Value, sql};
 
 /// The point of the macro: a skeleton in a `static`, with no run-time parse
 /// and no `unwrap` for a failure that cannot happen.
@@ -28,14 +28,14 @@ fn the_skeleton_is_the_statement_without_its_sentinels() {
 
 #[test]
 fn a_compiled_template_splices_like_a_parsed_one() {
-    let mut predicate = QueryFragment::<Postgres, i64>::new();
-    predicate.push("read_count > ").push_bind(100);
+    let mut predicate = QueryFragment::<Postgres, Value>::new();
+    predicate.push("read_count > ").push_bind(Value::Int(100));
 
-    let mut order = QueryFragment::<Postgres, i64>::new();
+    let mut order = QueryFragment::<Postgres, Value>::new();
     order.push("\"title\" DESC");
 
     let sql = VOLUMES
-        .builder()
+        .builder(&QueryMapping::new())
         .bind(7_i64)
         .fill("filter", &predicate)
         .fill("order", &order)

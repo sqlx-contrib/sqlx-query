@@ -51,12 +51,12 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     cursor.validate(&sort)?;
 
     let query = VOLUMES
-        .builder()
+        .builder(&*VOLUMES_MAPPING)
         .bind(tenant_id)
         .bind(page_size)
-        .fill("filter", &filter.to_fragment(&*VOLUMES_MAPPING)?)
-        .fill("filter", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
-        .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?);
+        .fill("filter", &filter)
+        .fill("filter", &cursor)
+        .fill("order", &sort);
 
     assert_eq!(
         query.sql(),
@@ -75,12 +75,12 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     resumed.validate(&sort)?;
 
     let second = VOLUMES
-        .builder()
+        .builder(&*VOLUMES_MAPPING)
         .bind(tenant_id)
         .bind(page_size)
-        .fill("filter", &filter.to_fragment(&*VOLUMES_MAPPING)?)
-        .fill("filter", &resumed.to_fragment(&*VOLUMES_MAPPING)?)
-        .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?);
+        .fill("filter", &filter)
+        .fill("filter", &resumed)
+        .fill("order", &sort);
 
     assert_eq!(
         second.sql(),

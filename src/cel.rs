@@ -33,9 +33,9 @@ pub(crate) fn parse(source: &str) -> Result<IdedExpr, Error> {
 ///
 /// [`Error::UnknownColumn`], [`Error::TypeMismatch`], or [`Error::Unsupported`]
 /// for a construct with no faithful SQL lowering.
-pub(crate) fn render<DB: Dialect, S: Mapping>(
+pub(crate) fn render<DB: Dialect>(
     expr: &IdedExpr,
-    mapping: &S,
+    mapping: &dyn Mapping,
 ) -> Result<QueryFragment<DB, Value>, Error> {
     let mut fragment = QueryFragment::new();
     condition(expr, mapping, &mut fragment)?;
@@ -43,9 +43,9 @@ pub(crate) fn render<DB: Dialect, S: Mapping>(
 }
 
 /// Write `expr` as a SQL boolean expression.
-fn condition<DB: Dialect, S: Mapping>(
+fn condition<DB: Dialect>(
     expr: &IdedExpr,
-    mapping: &S,
+    mapping: &dyn Mapping,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     match &expr.expr {
@@ -100,9 +100,9 @@ fn condition<DB: Dialect, S: Mapping>(
     }
 }
 
-fn call_condition<DB: Dialect, S: Mapping>(
+fn call_condition<DB: Dialect>(
     call: &cel::common::ast::CallExpr,
-    mapping: &S,
+    mapping: &dyn Mapping,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let name = call.func_name.as_str();
@@ -165,11 +165,11 @@ enum Operand {
     Null,
 }
 
-fn comparison<DB: Dialect, S: Mapping>(
+fn comparison<DB: Dialect>(
     operator: &str,
     left: &IdedExpr,
     right: &IdedExpr,
-    mapping: &S,
+    mapping: &dyn Mapping,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let left = operand(left, mapping)?;
@@ -238,10 +238,10 @@ fn comparison<DB: Dialect, S: Mapping>(
     }
 }
 
-fn membership<DB: Dialect, S: Mapping>(
+fn membership<DB: Dialect>(
     needle: &IdedExpr,
     haystack: &IdedExpr,
-    mapping: &S,
+    mapping: &dyn Mapping,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let Operand::Column(column, path) = operand(needle, mapping)? else {
@@ -280,10 +280,10 @@ fn membership<DB: Dialect, S: Mapping>(
     Ok(())
 }
 
-fn like<DB: Dialect, S: Mapping>(
+fn like<DB: Dialect>(
     call: &cel::common::ast::CallExpr,
     name: &str,
-    mapping: &S,
+    mapping: &dyn Mapping,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let target = call
@@ -326,7 +326,7 @@ fn like<DB: Dialect, S: Mapping>(
 }
 
 /// Resolve one side of a comparison.
-fn operand<S: Mapping>(expr: &IdedExpr, mapping: &S) -> Result<Operand, Error> {
+fn operand(expr: &IdedExpr, mapping: &dyn Mapping) -> Result<Operand, Error> {
     if let Some(path) = column_of(expr) {
         let column = resolve(mapping, &path)?;
         return Ok(Operand::Column(column, path));
@@ -388,7 +388,7 @@ fn walk(expr: &IdedExpr, into: &mut Vec<String>) -> Option<()> {
     }
 }
 
-fn resolve<S: Mapping>(mapping: &S, path: &str) -> Result<Column, Error> {
+fn resolve(mapping: &dyn Mapping, path: &str) -> Result<Column, Error> {
     let segments: Vec<&str> = path.split('.').collect();
 
     mapping
@@ -494,13 +494,13 @@ mod tests {
     }
 
     fn sql(source: &str) -> String {
-        render::<Postgres, _>(&parse(source).unwrap(), &volumes())
+        render::<Postgres>(&parse(source).unwrap(), &volumes())
             .unwrap()
             .preview()
     }
 
     fn error(source: &str) -> Error {
-        render::<Postgres, _>(&parse(source).unwrap(), &volumes()).unwrap_err()
+        render::<Postgres>(&parse(source).unwrap(), &volumes()).unwrap_err()
     }
 
     #[test]
@@ -557,8 +557,7 @@ mod tests {
     #[test]
     fn like_wildcards_in_the_needle_are_neutralised() {
         let fragment =
-            render::<Postgres, _>(&parse("title.startsWith('100%_x')").unwrap(), &volumes())
-                .unwrap();
+            render::<Postgres>(&parse("title.startsWith('100%_x')").unwrap(), &volumes()).unwrap();
 
         let (_, values) = fragment.parts_for_test();
         assert_eq!(values, [Value::Text("100!%!_x%".into())]);

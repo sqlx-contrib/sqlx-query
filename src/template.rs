@@ -126,10 +126,16 @@ impl<DB> QueryTemplate<DB> {
 }
 
 impl<DB: Database> QueryTemplate<DB> {
-    /// Start filling this template in.
+    /// Start filling this template in, resolving request paths through
+    /// `mapping`.
+    ///
+    /// The mapping is taken here rather than by each producer because it
+    /// belongs to the query, not to any one of them -- and because holding it
+    /// lets [`fill`](QueryBuilder::fill) take a producer directly, which keeps
+    /// the chain free of `?`.
     #[must_use]
-    pub fn builder(&self) -> QueryBuilder<'_, DB> {
-        QueryBuilder::new(self)
+    pub fn builder<'a>(&'a self, mapping: &'a dyn crate::mapping::Mapping) -> QueryBuilder<'a, DB> {
+        QueryBuilder::new(self, mapping)
     }
 }
 

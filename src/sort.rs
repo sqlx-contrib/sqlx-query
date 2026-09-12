@@ -205,9 +205,9 @@ impl Sort {
     /// # Errors
     ///
     /// [`Error::UnknownColumn`] for a field the mapping does not expose.
-    pub fn to_fragment<DB: Dialect, S: Mapping>(
+    pub fn to_fragment<DB: Dialect>(
         &self,
-        mapping: &S,
+        mapping: &dyn Mapping,
     ) -> Result<QueryFragment<DB, Value>, Error> {
         let mut fragment = QueryFragment::new();
         let mut sql = String::new();
@@ -241,10 +241,7 @@ impl Sort {
 }
 
 /// Resolve a dotted field path through a mapping.
-pub(crate) fn resolve<S: Mapping>(
-    mapping: &S,
-    field: &str,
-) -> Result<crate::mapping::Column, Error> {
+pub(crate) fn resolve(mapping: &dyn Mapping, field: &str) -> Result<crate::mapping::Column, Error> {
     let path: Vec<&str> = field.split('.').collect();
 
     mapping
@@ -294,6 +291,12 @@ impl fmt::Display for Sort {
             )?;
         }
         Ok(())
+    }
+}
+
+impl<DB: Dialect> crate::render::Render<DB> for Sort {
+    fn to_fragment(&self, mapping: &dyn Mapping) -> Result<QueryFragment<DB, Value>, Error> {
+        Sort::to_fragment(self, mapping)
     }
 }
 
@@ -374,7 +377,7 @@ mod tests {
     #[test]
     fn rendering_quotes_columns_and_maps_aliases() {
         let sort = Sort::parse("readCount desc, id").unwrap();
-        let fragment = sort.to_fragment::<Postgres, _>(&volumes()).unwrap();
+        let fragment = sort.to_fragment::<Postgres>(&volumes()).unwrap();
 
         assert_eq!(fragment.preview(), r#""read_count" DESC, "id" ASC"#);
     }
@@ -383,7 +386,7 @@ mod tests {
     fn an_unknown_field_is_rejected() {
         let error = Sort::parse("salary")
             .unwrap()
-            .to_fragment::<Postgres, _>(&volumes())
+            .to_fragment::<Postgres>(&volumes())
             .unwrap_err();
 
         assert!(matches!(error, Error::UnknownColumn(field) if field == "salary"));

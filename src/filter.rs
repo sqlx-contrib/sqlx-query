@@ -74,14 +74,20 @@ impl Filter {
     /// [`Error::UnknownColumn`] for a field the mapping does not expose,
     /// [`Error::TypeMismatch`] for a comparison that cannot work, and
     /// [`Error::Unsupported`] for a construct with no faithful SQL lowering.
-    pub fn to_fragment<DB: Dialect, S: Mapping>(
+    pub fn to_fragment<DB: Dialect>(
         &self,
-        mapping: &S,
+        mapping: &dyn Mapping,
     ) -> Result<QueryFragment<DB, Value>, Error> {
         match &self.expression {
             None => Ok(QueryFragment::new()),
             Some(expression) => crate::cel::render(expression, mapping),
         }
+    }
+}
+
+impl<DB: Dialect> crate::render::Render<DB> for Filter {
+    fn to_fragment(&self, mapping: &dyn Mapping) -> Result<QueryFragment<DB, Value>, Error> {
+        Filter::to_fragment(self, mapping)
     }
 }
 
@@ -108,7 +114,7 @@ mod tests {
             assert!(predicate.is_empty());
             assert!(
                 predicate
-                    .to_fragment::<Postgres, _>(&volumes())
+                    .to_fragment::<Postgres>(&volumes())
                     .unwrap()
                     .is_empty()
             );
@@ -124,7 +130,7 @@ mod tests {
     fn a_filter_renders_against_the_schema() {
         let fragment = Filter::parse("id > 21")
             .unwrap()
-            .to_fragment::<Postgres, _>(&volumes())
+            .to_fragment::<Postgres>(&volumes())
             .unwrap();
 
         assert_eq!(fragment.preview(), r#""id" > ?"#);
@@ -144,7 +150,7 @@ mod tests {
     fn a_type_error_is_rejected_at_render() {
         let error = Filter::parse("id > 'tuesday'")
             .unwrap()
-            .to_fragment::<Postgres, _>(&volumes())
+            .to_fragment::<Postgres>(&volumes())
             .unwrap_err();
 
         assert!(matches!(error, Error::TypeMismatch(_)), "{error}");

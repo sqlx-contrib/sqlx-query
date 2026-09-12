@@ -85,11 +85,11 @@ async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i6
         cursor.validate(&sort).unwrap();
 
         let rows = template
-            .builder()
+            .builder(&mapping)
             .bind(1_i64)
-            .fill("filter", &filter.to_fragment(&mapping).unwrap())
-            .fill("filter", &cursor.to_fragment(&mapping).unwrap())
-            .fill("order", &sort.to_fragment(&mapping).unwrap())
+            .fill("filter", &filter)
+            .fill("filter", &cursor)
+            .fill("order", &sort)
             .build()
             .unwrap()
             .fetch_all(pool)
@@ -234,10 +234,10 @@ async fn a_join_pages_by_a_qualified_and_aliased_column() {
         cursor.validate(&sort).unwrap();
 
         let rows = template
-            .builder()
+            .builder(&mapping)
             .bind(1_i64)
-            .fill("filter", &cursor.to_fragment(&mapping).unwrap())
-            .fill("order", &sort.to_fragment(&mapping).unwrap())
+            .fill("filter", &cursor)
+            .fill("order", &sort)
             .build()
             .unwrap()
             .fetch_all(&pool)
