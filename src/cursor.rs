@@ -4,7 +4,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
 use chrono::{TimeZone as _, Utc};
 
-use crate::dialect::{Dialect, quoted};
+use crate::dialect::{Dialect, reference};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
 use crate::mapping::Mapping;
@@ -165,7 +165,7 @@ impl Cursor {
             let column = resolve(mapping, &key.field)?;
             values.push(<R::Database as Dialect>::value(
                 row,
-                &column.name,
+                column.result_name(),
                 column.ty,
             )?);
         }
@@ -369,13 +369,13 @@ fn seek<DB: Dialect, S: Mapping>(
         fragment.push("(");
 
         for (before, earlier) in keys.iter().enumerate().take(at) {
-            fragment.push(&quoted::<DB>(&columns[before].name));
+            fragment.push(&reference::<DB>(&columns[before]));
             fragment.push(" = ");
             fragment.push_bind(earlier.value.clone());
             fragment.push(" AND ");
         }
 
-        fragment.push(&quoted::<DB>(&columns[at].name));
+        fragment.push(&reference::<DB>(&columns[at]));
         fragment.push(match key.key.direction {
             Direction::Asc => " > ",
             Direction::Desc => " < ",

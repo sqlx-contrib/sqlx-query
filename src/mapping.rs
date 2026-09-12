@@ -42,10 +42,23 @@ impl fmt::Display for ColumnType {
 /// One column a request is allowed to name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
+    /// The table or alias that qualifies it, for a query with more than one
+    /// source: `a` in `a.name`.
+    ///
+    /// Quoted separately from the name, so `a.name` renders as `"a"."name"`
+    /// rather than as one identifier containing a dot.
+    pub qualifier: Option<Cow<'static, str>>,
     /// The column name as the database spells it, *unquoted*. The dialect adds
     /// the quoting, so a name containing the quote character is escaped rather
     /// than becoming an injection point.
     pub name: Cow<'static, str>,
+    /// What the query's `SELECT` renames it to, when it does.
+    ///
+    /// Two names are needed because they are used in different places. A filter
+    /// renders `"a"."name"`, since SQL evaluates `WHERE` before `SELECT` and the
+    /// alias is not in scope there. A cursor reads `author_name`, because that
+    /// is what the returned row calls it.
+    pub alias: Option<Cow<'static, str>>,
     /// What the column holds.
     pub ty: ColumnType,
     /// Whether the column is unique.
@@ -62,10 +75,32 @@ impl Column {
     #[must_use]
     pub fn new(name: impl Into<Cow<'static, str>>, ty: ColumnType) -> Self {
         Self {
+            qualifier: None,
             name: name.into(),
+            alias: None,
             ty,
             unique: false,
         }
+    }
+
+    /// Qualify it: `"a"."name"` rather than `"name"`.
+    #[must_use]
+    pub fn qualified(mut self, qualifier: impl Into<Cow<'static, str>>) -> Self {
+        self.qualifier = Some(qualifier.into());
+        self
+    }
+
+    /// Name it as the result set does, for `SELECT a.name AS author_name`.
+    #[must_use]
+    pub fn aliased(mut self, alias: impl Into<Cow<'static, str>>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    /// What a returned row calls this column: the alias if there is one.
+    #[must_use]
+    pub fn result_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
     }
 
     /// A column that is unique, and so can end a sort.

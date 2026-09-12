@@ -7,7 +7,7 @@ use sqlx::types::Type;
 use sqlx::{Error as SqlxError, Row};
 
 use crate::error::Error;
-use crate::mapping::ColumnType;
+use crate::mapping::{Column, ColumnType};
 use crate::value::Value;
 
 mod sealed {
@@ -141,23 +141,58 @@ pub(crate) fn quote<DB: Dialect>(name: &str, out: &mut String) {
     out.push(DB::QUOTE);
 }
 
-/// Write `name` as a quoted identifier, returning it.
-pub(crate) fn quoted<DB: Dialect>(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 2);
-    quote::<DB>(name, &mut out);
+/// Write a column as a quoted, possibly qualified reference.
+///
+/// `"a"."name"` when qualified, `"name"` when not. Each part is quoted on its
+/// own, so a qualifier that came from configuration is escaped rather than
+/// splitting the identifier.
+pub(crate) fn reference<DB: Dialect>(column: &Column) -> String {
+    let mut out = String::with_capacity(column.name.len() + 2);
+
+    if let Some(qualifier) = &column.qualifier {
+        quote::<DB>(qualifier, &mut out);
+        out.push('.');
+    }
+
+    quote::<DB>(&column.name, &mut out);
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::ColumnType;
+
+    /// A join needs `"a"."name"`, not one identifier containing a dot.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_qualified_column_quotes_each_part() {
+        use sqlx::Postgres;
+
+        let column = Column::new("name", ColumnType::Text).qualified("a");
+
+        assert_eq!(reference::<Postgres>(&column), r#""a"."name""#);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_qualifier_from_configuration_is_escaped_too() {
+        use sqlx::Postgres;
+
+        let column = Column::new("name", ColumnType::Text).qualified(r#"a"."b"#);
+
+        assert_eq!(reference::<Postgres>(&column), r#""a"".""b"."name""#);
+    }
 
     #[cfg(feature = "postgres")]
     #[test]
     fn postgres_quotes_with_double_quotes() {
         use sqlx::Postgres;
 
-        assert_eq!(quoted::<Postgres>("read_count"), r#""read_count""#);
+        assert_eq!(
+            reference::<Postgres>(&Column::new("read_count", ColumnType::Text)),
+            r#""read_count""#
+        );
     }
 
     #[cfg(feature = "mysql")]
@@ -165,17 +200,24 @@ mod tests {
     fn mysql_quotes_with_backticks() {
         use sqlx::MySql;
 
-        assert_eq!(quoted::<MySql>("read_count"), "`read_count`");
+        assert_eq!(
+            reference::<MySql>(&Column::new("read_count", ColumnType::Text)),
+            "`read_count`"
+        );
     }
 
     /// A mapping built from configuration could carry anything. Doubling the
-    /// quote keeps it an identifier instead of an injection point.
+    /// quote keeps it an identifier instead of an injection point -- and the
+    /// qualifier is quoted on its own, so it cannot split the identifier
+    /// either.
     #[cfg(feature = "postgres")]
     #[test]
     fn a_quote_inside_a_name_is_escaped_not_honoured() {
         use sqlx::Postgres;
 
-        assert_eq!(quoted::<Postgres>(r#"a" OR 1=1 --"#), r#""a"" OR 1=1 --""#);
+        let column = Column::new(r#"a" OR 1=1 --"#, ColumnType::Text);
+
+        assert_eq!(reference::<Postgres>(&column), r#""a"" OR 1=1 --""#);
     }
 
     #[cfg(feature = "mysql")]
@@ -183,6 +225,9 @@ mod tests {
     fn a_backtick_inside_a_name_is_escaped_too() {
         use sqlx::MySql;
 
-        assert_eq!(quoted::<MySql>("a`b"), "`a``b`");
+        assert_eq!(
+            reference::<MySql>(&Column::new("a`b", ColumnType::Text)),
+            "`a``b`"
+        );
     }
 }

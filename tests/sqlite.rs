@@ -175,3 +175,94 @@ async fn like_wildcards_in_a_filter_are_escaped() {
 
     assert_eq!(paged, [11]);
 }
+
+// ---------------------------------------------------------------------------
+// Joins
+// ---------------------------------------------------------------------------
+
+/// A joined column needs `"a"."name"` in the `WHERE`, because SQL evaluates it
+/// before `SELECT` and the alias is not in scope there — while the cursor reads
+/// `author_name`, because that is what the returned row calls it. One field,
+/// two names, used in different places.
+const JOINED: &str = "SELECT v.id, v.title, a.name AS author_name \
+                      FROM volumes v JOIN authors a ON a.id = v.author_id \
+                      WHERE v.tenant_id = ? \
+                      /* AND query.predicate */ \
+                      /* ORDER BY query.order */ \
+                      LIMIT 2";
+
+fn joined_mapping() -> QueryMapping {
+    QueryMapping::new()
+        .add("id", Column::key("id", ColumnType::Int).qualified("v"))
+        .add(
+            "title",
+            Column::new("title", ColumnType::Text).qualified("v"),
+        )
+        .add(
+            "authorName",
+            Column::new("name", ColumnType::Text)
+                .qualified("a")
+                .aliased("author_name"),
+        )
+}
+
+async fn seed_authors(pool: &SqlitePool) {
+    sqlx::raw_sql(
+        "CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+         ALTER TABLE volumes ADD COLUMN author_id INTEGER NOT NULL DEFAULT 1;
+         INSERT INTO authors (id, name) VALUES (1, 'Herbert'), (2, 'Le Guin');
+         UPDATE volumes SET author_id = 2 WHERE id % 2 = 0;",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_join_pages_by_a_qualified_and_aliased_column() {
+    let pool = seed().await;
+    seed_authors(&pool).await;
+
+    let template = QueryTemplate::<Sqlite>::parse(JOINED).unwrap();
+    let mapping = joined_mapping();
+    let sort = Sort::parse("authorName desc").unwrap().asc("id");
+
+    let mut cursor = Cursor::parse("").unwrap();
+    let mut seen = Vec::new();
+
+    loop {
+        cursor.validate(&sort).unwrap();
+
+        let rows = template
+            .builder()
+            .bind(1_i64)
+            .fill("predicate", &cursor.to_fragment(&mapping).unwrap())
+            .fill("order", &sort.to_fragment(&mapping).unwrap())
+            .build()
+            .unwrap()
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+        let Some(last) = rows.last() else { break };
+
+        seen.extend(rows.iter().map(|row| row.get::<i64, _>("id")));
+
+        // Reads `author_name` from the row, not `a.name`.
+        cursor = Cursor::new(&sort).after(last, &mapping).unwrap();
+    }
+
+    let whole: Vec<i64> = sqlx::query(
+        "SELECT v.id FROM volumes v JOIN authors a ON a.id = v.author_id \
+         WHERE v.tenant_id = 1 ORDER BY a.name DESC, v.id ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| row.get::<i64, _>("id"))
+    .collect();
+
+    assert_eq!(seen, whole);
+    assert_eq!(seen.len(), 9);
+}

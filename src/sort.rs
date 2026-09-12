@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::dialect::{Dialect, quote};
+use crate::dialect::{Dialect, reference};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
 use crate::mapping::Mapping;
@@ -218,7 +218,7 @@ impl Sort {
             }
 
             let column = resolve(mapping, &key.field)?;
-            quote::<DB>(&column.name, &mut sql);
+            sql.push_str(&reference::<DB>(&column));
             sql.push(' ');
             sql.push_str(key.direction.keyword());
         }

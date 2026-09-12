@@ -3,7 +3,7 @@
 use cel::common::ast::{Expr, IdedExpr, LiteralValue, operators};
 use chrono::{DateTime, Utc};
 
-use crate::dialect::{Dialect, quoted};
+use crate::dialect::{Dialect, reference};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
 use crate::mapping::{Column, ColumnType, Mapping};
@@ -62,7 +62,7 @@ fn condition<DB: Dialect, S: Mapping>(
             .ok_or_else(|| unsupported("has() over something that is not a field"))?;
 
             let column = resolve(mapping, &column)?;
-            out.push(&quoted::<DB>(&column.name));
+            out.push(&reference::<DB>(&column));
             out.push(" IS NOT NULL");
             Ok(())
         }
@@ -87,7 +87,7 @@ fn condition<DB: Dialect, S: Mapping>(
                 )));
             }
 
-            out.push(&quoted::<DB>(&column.name));
+            out.push(&reference::<DB>(&column));
             Ok(())
         }
 
@@ -190,7 +190,7 @@ fn comparison<DB: Dialect, S: Mapping>(
                 }
             };
 
-            out.push(&quoted::<DB>(&column.name));
+            out.push(&reference::<DB>(&column));
             out.push(sql);
             Ok(())
         }
@@ -198,7 +198,7 @@ fn comparison<DB: Dialect, S: Mapping>(
         (Operand::Column(column, path), Operand::Value(value)) => {
             check(&column, &value, &path)?;
 
-            out.push(&quoted::<DB>(&column.name));
+            out.push(&reference::<DB>(&column));
             out.push(sql_operator(operator)?);
             out.push_bind(value);
             Ok(())
@@ -209,7 +209,7 @@ fn comparison<DB: Dialect, S: Mapping>(
         (Operand::Value(value), Operand::Column(column, path)) => {
             check(&column, &value, &path)?;
 
-            out.push(&quoted::<DB>(&column.name));
+            out.push(&reference::<DB>(&column));
             out.push(sql_operator(flip(operator))?);
             out.push_bind(value);
             Ok(())
@@ -223,9 +223,9 @@ fn comparison<DB: Dialect, S: Mapping>(
                 )));
             }
 
-            out.push(&quoted::<DB>(&left.name));
+            out.push(&reference::<DB>(&left));
             out.push(sql_operator(operator)?);
-            out.push(&quoted::<DB>(&right.name));
+            out.push(&reference::<DB>(&right));
             Ok(())
         }
 
@@ -260,7 +260,7 @@ fn membership<DB: Dialect, S: Mapping>(
         return Ok(());
     }
 
-    out.push(&quoted::<DB>(&column.name));
+    out.push(&reference::<DB>(&column));
     out.push(" IN (");
 
     for (at, element) in list.elements.iter().enumerate() {
@@ -318,7 +318,7 @@ fn like<DB: Dialect, S: Mapping>(
         _ => format!("%{escaped}%"),
     };
 
-    out.push(&quoted::<DB>(&column.name));
+    out.push(&reference::<DB>(&column));
     out.push(" LIKE ");
     out.push_bind(Value::Text(pattern));
     out.push(&format!(" ESCAPE '{LIKE_ESCAPE}'"));
