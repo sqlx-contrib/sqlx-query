@@ -138,12 +138,21 @@ same object.
 
 ## Status
 
-Early, but the core is exercised against a real database: `tests/sqlite.rs`
-pages through a table in memory and checks that every row is visited exactly
-once, including rows that tie on the sort column, under ascending, descending
-and mixed orderings. PostgreSQL and MySQL are still only covered by SQL-shape
-assertions — the numbering rules below are asserted against generated SQL, not
-against a live server.
+Early, but the core is exercised against all three servers. `tests/sqlite.rs`,
+`tests/postgres.rs` and `tests/mysql.rs` each page through a table and check
+that every row is visited exactly once, including rows that tie on the sort
+column, under ascending, descending and mixed orderings, with and without a
+filter, and by a timestamp key that has to survive the token codec and the
+driver's own wire format.
+
+The two numbering rules are checked where they differ rather than asserted
+against a string: PostgreSQL runs the skeleton with a `LIMIT $2` that four
+spliced placeholders are pushed in front of, MySQL runs one where seven values
+have to land on seven `?` in text order.
+
+SQLite runs in memory, so it needs nothing. PostgreSQL and MySQL read
+`SQLX_QUERY_POSTGRES_URL` and `SQLX_QUERY_MYSQL_URL` and **skip** when unset —
+see [Development](#development).
 
 The rationale lives with the code — `cargo doc --open` — rather than here.
 
@@ -153,10 +162,28 @@ sqlx 0.9 declares `rust-version = "1.94"`, so this crate does too.
 `rust-toolchain.toml` pins the dev toolchain to 1.95.0, so plain `cargo` picks
 the right one even when the machine's default stable is older than the MSRV.
 
+Open the repository in a Dev Container, or on the host:
+
 ```sh
-cargo test --features cel,sqlite,mysql
-cargo clippy --all-targets --features cel,sqlite,mysql
+nix develop
+make databases   # which servers the tests will reach
+make test
+make lint
 ```
+
+Either way you get PostgreSQL and MySQL. The Dev Container's
+`docker-compose.yml` runs both; `nix develop` runs
+[`devcontainer-env`](https://github.com/devcontainer-env/devcontainer-env) in
+its `shellHook`, which reads the same `devcontainer.json` and exports
+`SQLX_QUERY_POSTGRES_URL` and `SQLX_QUERY_MYSQL_URL` with the container
+hostnames rewritten to whichever ports Docker published — so one compose file
+serves the container and the host, and neither pins a port that the next
+project would collide with.
+
+With no stack running, both variables are unset and those tests skip rather
+than fail. That keeps `cargo test` green on a machine with no Docker, at the
+cost of making a skipped suite look exactly like a passing one — which is what
+`make databases` is for, and why CI prints it before running anything.
 
 One crate. There was briefly a `sql!` macro that scanned the skeleton at compile
 time, which forced two more — a proc-macro crate cannot export the scanner it
@@ -166,7 +193,10 @@ deliberately treating an unrecognised sentinel as prose, all `sql!` caught at
 build time was an unterminated comment or a duplicate slot name, neither of
 which survives the first test.
 
-Driver-specific tests are gated on their feature. `clippy::all` and
+Driver-specific tests are gated on their feature, and `make lint-features`
+builds each driver alone, with and without CEL: consumers take this crate with
+one driver and no default features, and that configuration has broken while the
+all-features build stayed green. `clippy::all` and
 `clippy::pedantic` are denied rather than warned, because several consumers in
 this ecosystem deny pedantic at the workspace level: a lint this crate tolerates
 is one they cannot.
