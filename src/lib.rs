@@ -4,7 +4,7 @@
 //! ```
 //! # #[cfg(all(feature = "postgres", feature = "cel"))] {
 //! use sqlx::Postgres;
-//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, Value};
+//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table};
 //!
 //! // The query you already wrote. The sentinels are comments, so this is a
 //! // statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
@@ -47,9 +47,9 @@
 //!
 //! // let rows = query.build_query_as::<Volume>()?.fetch_all(&pool).await?;
 //!
-//! // The token for the next page, from the last row of this one.
-//! let next = Cursor::new(&sort).after(&[Value::Text("Dune".into()), Value::Int(4711)])?;
-//! assert!(!next.as_str().is_empty());
+//! // The token for the next page is read out of the last row:
+//! //   Cursor::new(&sort).after(last, &schema)?
+//! // which needs a live row, so see `tests/sqlite.rs` for it end to end.
 //! # }
 //! # Ok::<_, sqlx_query::Error>(())
 //! ```

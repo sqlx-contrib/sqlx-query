@@ -102,21 +102,14 @@ impl Cursor {
         Self::default()
     }
 
-    /// A cursor positioned after a row.
+    /// A cursor positioned after a row whose key values are already in hand.
     ///
-    /// `key_values` are that row's values for each key of this cursor's
-    /// ordering, in the same order -- normally the last row of the page just
-    /// sent, making this the token for the next one.
-    ///
-    /// Named for the boundary: the next page holds rows strictly *after* this
-    /// row, which is excluded.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Cursor`] if the number of values does not match the number of
-    /// keys. Their *order* cannot be checked -- that is the caller's to get
-    /// right.
-    pub fn after(&self, key_values: &[Value]) -> Result<Self, Error> {
+    /// Not public: the values are positional, so nothing here can check that
+    /// they are in the ordering's key order -- only that there are the right
+    /// number of them. Transposing two of the same type would mint a token
+    /// that seeks somewhere the caller never was. [`after`](Self::after) reads
+    /// them by name instead, which cannot go wrong that way.
+    pub(crate) fn after_values(&self, key_values: &[Value]) -> Result<Self, Error> {
         if self.sort.keys().len() != key_values.len() {
             return Err(Error::Cursor(format!(
                 "the ordering has {} keys but {} values were given",
@@ -145,20 +138,22 @@ impl Cursor {
         })
     }
 
-    /// The position after `row`.
+    /// A cursor positioned after `row`.
     ///
-    /// Each sort key's value is read from the column the schema maps it to, so
-    /// there is no second field-to-column mapping to keep in step -- and the
-    /// ordering may be one the client chose at runtime, which
-    /// [`after`](Self::after) cannot serve, since a positional slice needs a
-    /// key list known when the code was written.
+    /// Named for the boundary: the next page holds rows strictly *after* this
+    /// one, which is excluded. Pass the last row of the page just sent and the
+    /// result is that page's token.
+    ///
+    /// Each key's value is read from the column `schema` maps it to, so there
+    /// is no second field-to-column mapping for a caller to keep in step, and
+    /// the ordering may be one the client chose at runtime.
     ///
     /// # Errors
     ///
     /// [`Error::UnknownColumn`] for a key the schema does not expose, and
     /// [`Error::Column`] if a key's column is not in the row -- usually because
     /// it was left out of the `SELECT` list.
-    pub fn after_row<R, S>(&self, schema: &S, row: &R) -> Result<Self, Error>
+    pub fn after<R, S>(&self, row: &R, schema: &S) -> Result<Self, Error>
     where
         R: Row,
         R::Database: Dialect,
@@ -175,7 +170,7 @@ impl Cursor {
             )?);
         }
 
-        self.after(&values)
+        self.after_values(&values)
     }
 
     /// Read a page token.
@@ -573,7 +568,7 @@ mod tests {
     #[test]
     fn a_position_round_trips_through_a_token() {
         let values = [Value::Text("Dune".into()), Value::Int(4711)];
-        let cursor = Cursor::new(&sort()).after(&values).unwrap();
+        let cursor = Cursor::new(&sort()).after_values(&values).unwrap();
 
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
@@ -593,7 +588,7 @@ mod tests {
             Value::Timestamp(Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap()),
         ];
 
-        let cursor = Cursor::new(&sort).after(&values).unwrap();
+        let cursor = Cursor::new(&sort).after_values(&values).unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         let round_tripped: Vec<Value> = parsed.keys().iter().map(|k| k.value.clone()).collect();
@@ -607,7 +602,9 @@ mod tests {
         let sort = Sort::parse("at").unwrap();
         let far = Utc.timestamp_opt(99_999_999_999, 0).unwrap();
 
-        let cursor = Cursor::new(&sort).after(&[Value::Timestamp(far)]).unwrap();
+        let cursor = Cursor::new(&sort)
+            .after_values(&[Value::Timestamp(far)])
+            .unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         assert_eq!(parsed.keys()[0].value, Value::Timestamp(far));
@@ -616,7 +613,7 @@ mod tests {
     #[test]
     fn the_recorded_direction_survives() {
         let cursor = Cursor::new(&sort())
-            .after(&[Value::Text("x".into()), Value::Int(1)])
+            .after_values(&[Value::Text("x".into()), Value::Int(1)])
             .unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
@@ -626,7 +623,9 @@ mod tests {
 
     #[test]
     fn a_value_count_that_does_not_match_the_sort_is_rejected() {
-        let error = Cursor::new(&sort()).after(&[Value::Int(1)]).unwrap_err();
+        let error = Cursor::new(&sort())
+            .after_values(&[Value::Int(1)])
+            .unwrap_err();
 
         assert!(
             format!("{error}").contains("2 keys but 1 values"),
@@ -639,7 +638,7 @@ mod tests {
     #[test]
     fn malformed_tokens_are_rejected() {
         let good = Cursor::new(&sort())
-            .after(&[Value::Text("x".into()), Value::Int(1)])
+            .after_values(&[Value::Text("x".into()), Value::Int(1)])
             .unwrap()
             .as_str()
             .to_owned();
@@ -672,7 +671,7 @@ mod tests {
     fn a_token_from_a_different_order_is_refused() {
         let issued = Sort::parse("title asc").unwrap().asc("id");
         let cursor = Cursor::new(&issued)
-            .after(&[Value::Text("Dune".into()), Value::Int(42)])
+            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
         let asked = Sort::parse("title desc").unwrap().asc("id");
@@ -689,7 +688,7 @@ mod tests {
     fn an_absent_order_by_is_refused_too() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
         let cursor = Cursor::new(&issued)
-            .after(&[Value::Text("Dune".into()), Value::Int(42)])
+            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
         assert!(cursor.validate(&Sort::new()).is_err());
@@ -701,7 +700,7 @@ mod tests {
     fn an_agreeing_order_passes() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
         let cursor = Cursor::new(&issued)
-            .after(&[Value::Text("Dune".into()), Value::Int(42)])
+            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
         assert!(cursor.validate(&issued).is_ok());
@@ -714,7 +713,7 @@ mod tests {
         let value = Value::Bytes((0..=255).collect());
 
         let token = Cursor::new(&sort)
-            .after(&[value])
+            .after_values(&[value])
             .unwrap()
             .as_str()
             .to_owned();

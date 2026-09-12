@@ -66,7 +66,7 @@ let page: Vec<Volume> = rows.iter().map(Volume::from_row).collect::<Result<_, _>
 // the ordering may be one the client chose at runtime.
 if let Some(last) = rows.last() {
     response.next_page_token = Cursor::new(&sort)
-        .after_row(&schema, last)?
+        .after(last, &schema)?
         .as_str()
         .to_owned();
 }

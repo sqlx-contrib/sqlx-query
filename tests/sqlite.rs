@@ -101,7 +101,7 @@ async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i6
 
         // The token for the next page, read out of the row by the schema's
         // own field-to-column mapping.
-        cursor = Cursor::new(&sort).after_row(&schema, last).unwrap();
+        cursor = Cursor::new(&sort).after(last, &schema).unwrap();
     }
 
     seen

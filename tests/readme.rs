@@ -2,17 +2,18 @@
 #![cfg(all(feature = "cel", feature = "postgres"))]
 
 use sqlx::Postgres;
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, Value};
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table};
 
 struct Request {
     filter: String,
     order_by: String,
     page_token: String,
 }
-struct Volume {
-    id: i64,
-    title: String,
-}
+/// A token issued by an earlier build for `title desc, id asc` at
+/// ("Dune", 4711). Pinned so a change to the encoding shows up here: clients
+/// persist these across deploys, and drifting silently would break live
+/// pagination rather than fail loudly.
+const TOKEN: &str = "AQEAAAAFdGl0bGUDAAAABER1bmUAAAAAAmlkAQAAAAAAABJn";
 
 #[test]
 fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
@@ -59,15 +60,12 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     );
     let _ = query.build()?;
 
-    // Second page: the token above.
-    let rows = [Volume {
-        id: 4711,
-        title: "Dune".into(),
-    }];
-    let last = rows.last().unwrap();
-    let next = Cursor::new(&sort).after(&[Value::Text(last.title.clone()), Value::Int(last.id)])?;
-
-    let resumed = Cursor::parse(next.as_str())?;
+    // Second page. Minting needs a live row, so `tests/sqlite.rs` covers that
+    // end to end. This token was issued by an earlier build for
+    // `title desc, id asc` at ("Dune", 4711), so it doubles as a guard on the
+    // format: clients keep these across deploys, and a silent change would
+    // break live pagination.
+    let resumed = Cursor::parse(TOKEN)?;
     resumed.validate(&sort)?;
 
     let second = volumes
@@ -87,14 +85,4 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     );
 
     Ok(())
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for Volume {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
-        use sqlx::Row as _;
-        Ok(Self {
-            id: row.try_get("id")?,
-            title: row.try_get("title")?,
-        })
-    }
 }
