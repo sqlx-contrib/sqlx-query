@@ -4,11 +4,12 @@ use std::borrow::Cow;
 use std::fmt;
 use std::marker::PhantomData;
 
+use crate::scan::Slot;
 use sqlx::database::Database;
-use sqlx_query_core::Slot;
 
 use crate::builder::QueryBuilder;
 use crate::error::Error;
+use crate::mapping::QueryMapping;
 
 /// A query you already wrote, with slots where fragments go.
 ///
@@ -45,6 +46,14 @@ pub struct QueryTemplate<DB> {
     texts: Cow<'static, [&'static str]>,
     slots: Cow<'static, [Slot]>,
     skeleton: Cow<'static, str>,
+    /// What requests may name, and which column each resolves to.
+    ///
+    /// Held here because the two have to agree: a `SELECT a.name AS
+    /// author_name` in the skeleton and a `with_alias("author_name")` in the
+    /// mapping describe the same column, and nothing else is in a position to
+    /// notice when they drift. Empty until declared, which is fail-closed --
+    /// every request path is rejected rather than exposed.
+    mapping: QueryMapping,
     /// Where the first `?` that follows a slot is, if there is one.
     ///
     /// Harmless where placeholders are numbered, and fatal where they are
@@ -66,40 +75,37 @@ impl<DB> QueryTemplate<DB> {
     /// [`Error::Template`] if a literal or comment is unterminated, a sentinel
     /// is malformed, or a slot name is declared twice.
     pub fn parse(sql: &'static str) -> Result<Self, Error> {
-        let skeleton = sqlx_query_core::scan(sql).map_err(|error| Error::Template {
-            message: error.message,
-            offset: error.offset,
-        })?;
+        let skeleton = crate::scan::scan(sql)?;
 
         Ok(Self {
             texts: Cow::Owned(skeleton.texts),
             slots: Cow::Owned(skeleton.slots),
             skeleton: Cow::Owned(skeleton.sql),
+            mapping: QueryMapping::new(),
             late_placeholder: skeleton.late_placeholder,
             database: PhantomData,
         })
     }
 
-    /// Assemble a template the [`sql!`](crate::sql) macro already scanned.
+    /// Declare what requests may name.
     ///
-    /// Not for hand use: the macro runs the same scanner at compile time and
-    /// emits its output, so a skeleton in a `static` costs nothing at run time
-    /// and a malformed one is a compile error rather than a first-request one.
-    #[doc(hidden)]
+    /// Until this is called the mapping is empty, so every path a filter or a
+    /// sort names is rejected. That is the right default: exposing a column is
+    /// a decision, and a missing declaration should fail loudly rather than
+    /// open the table up.
     #[must_use]
-    pub const fn from_parts(
-        skeleton: &'static str,
-        texts: &'static [&'static str],
-        slots: &'static [Slot],
-        late_placeholder: Option<usize>,
-    ) -> Self {
-        Self {
-            texts: Cow::Borrowed(texts),
-            slots: Cow::Borrowed(slots),
-            skeleton: Cow::Borrowed(skeleton),
-            late_placeholder,
-            database: PhantomData,
-        }
+    pub fn with_mapping(mut self, mapping: QueryMapping) -> Self {
+        self.mapping = mapping;
+        self
+    }
+
+    /// What requests may name.
+    ///
+    /// Pass this where a mapping is wanted outside the builder -- minting a
+    /// page token, for one.
+    #[must_use]
+    pub fn mapping(&self) -> &QueryMapping {
+        &self.mapping
     }
 
     /// The skeleton with every sentinel removed.
@@ -126,15 +132,24 @@ impl<DB> QueryTemplate<DB> {
 }
 
 impl<DB: Database> QueryTemplate<DB> {
-    /// Start filling this template in, resolving request paths through
-    /// `mapping`.
-    ///
-    /// The mapping is taken here rather than by each producer because it
-    /// belongs to the query, not to any one of them -- and because holding it
-    /// lets [`fill`](QueryBuilder::fill) take a producer directly, which keeps
-    /// the chain free of `?`.
+    /// Start filling this template in.
     #[must_use]
-    pub fn builder<'a>(&'a self, mapping: &'a dyn crate::mapping::Mapping) -> QueryBuilder<'a, DB> {
+    pub fn builder(&self) -> QueryBuilder<'_, DB> {
+        QueryBuilder::new(self, &self.mapping)
+    }
+
+    /// Start filling this template in, resolving paths through `mapping`
+    /// instead of the template's own.
+    ///
+    /// For visibility that depends on the caller rather than the query -- a
+    /// column only an administrator may sort on, say. A closure is a
+    /// [`Mapping`](crate::Mapping), so that decision can be made per request,
+    /// which a mapping declared in a `static` cannot do.
+    #[must_use]
+    pub fn builder_with<'a>(
+        &'a self,
+        mapping: &'a dyn crate::mapping::Mapping,
+    ) -> QueryBuilder<'a, DB> {
         QueryBuilder::new(self, mapping)
     }
 }
@@ -145,6 +160,7 @@ impl<DB> Clone for QueryTemplate<DB> {
             texts: self.texts.clone(),
             slots: self.slots.clone(),
             skeleton: self.skeleton.clone(),
+            mapping: self.mapping.clone(),
             late_placeholder: self.late_placeholder,
             database: PhantomData,
         }

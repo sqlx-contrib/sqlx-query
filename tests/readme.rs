@@ -4,30 +4,33 @@
 use sqlx::Postgres;
 use std::sync::LazyLock;
 
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort, sql};
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
 
 struct Request {
     filter: String,
     order_by: String,
     page_token: String,
 }
-/// What this query exposes, under what public name. Declared, not derived:
-/// the aliases and qualifiers are facts about this query's SELECT and FROM.
-static VOLUMES_MAPPING: LazyLock<QueryMapping> = LazyLock::new(|| {
-    QueryMapping::new()
-        .key("id", ColumnType::Int)
-        .column("title", ColumnType::Text)
-        .add("readCount", Column::new("read_count", ColumnType::Int))
-});
-
-static VOLUMES: QueryTemplate<Postgres> = sql!(
-    "SELECT id, title, read_count
+/// The query and what a request may ask of it, declared together -- the aliases
+/// and qualifiers in the mapping are facts about this skeleton's SELECT and
+/// FROM, so nothing else is in a position to notice when they drift.
+static VOLUMES: LazyLock<QueryTemplate<Postgres>> = LazyLock::new(|| {
+    QueryTemplate::parse(
+        "SELECT id, title, read_count
        FROM volumes
       WHERE tenant_id = $1
         /* AND query.filter */
       /* ORDER BY query.order */
-      LIMIT $2"
-);
+      LIMIT $2",
+    )
+    .expect("valid skeleton")
+    .with_mapping(
+        QueryMapping::new()
+            .key("id", ColumnType::Int)
+            .column("title", ColumnType::Text)
+            .add("readCount", Column::new("read_count", ColumnType::Int)),
+    )
+});
 
 /// A token issued by an earlier build for `title desc, id asc` at
 /// ("Dune", 4711). Pinned so a change to the encoding shows up here: clients
@@ -51,7 +54,7 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     cursor.validate(&sort)?;
 
     let query = VOLUMES
-        .builder(&*VOLUMES_MAPPING)
+        .builder()
         .bind(tenant_id)
         .bind(page_size)
         .fill("filter", &filter)
@@ -75,7 +78,7 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     resumed.validate(&sort)?;
 
     let second = VOLUMES
-        .builder(&*VOLUMES_MAPPING)
+        .builder()
         .bind(tenant_id)
         .bind(page_size)
         .fill("filter", &filter)

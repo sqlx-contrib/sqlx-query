@@ -1,12 +1,3 @@
-[workspace]
-members = ["core", "macros"]
-
-# Shared by both crates: a lint this one tolerates is a lint its consumers
-# cannot, and several in this ecosystem deny pedantic at the workspace level.
-[workspace.lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = { level = "deny", priority = -1 }
-
 [package]
 name = "sqlx-query"
 version = "0.0.0"
@@ -21,8 +12,11 @@ repository = "https://github.com/sqlx-contrib/sqlx-query"
 keywords = ["sqlx", "sql", "query", "postgres", "pagination"]
 categories = ["database"]
 
-[lints]
-workspace = true
+# Denied rather than warned, to match the rest of this ecosystem: a lint this
+# crate tolerates is a lint its consumers cannot.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
 
 [dependencies]
 # Not optional: `Value::Timestamp` is unconditional, and there is no build of
@@ -43,13 +37,11 @@ base64 = "0.22"
 cel = { version = "0.14", default-features = false, features = [
   "chrono",
 ], optional = true }
-sqlx-query-core = { version = "0.0.0", path = "core" }
-sqlx-query-macros = { version = "0.0.0", path = "macros", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false }
 
 [features]
-default = ["postgres", "macros"]
+default = ["postgres"]
 
 # Driver support. At least one is required: without a driver there is no
 # `Arguments` impl to splice against.
@@ -60,8 +52,6 @@ mysql = ["sqlx/mysql", "sqlx/chrono"]
 # CEL filters.
 cel = ["dep:cel"]
 
-# `sql!`, so a skeleton is scanned at compile time and lives in a `static`.
-macros = ["dep:sqlx-query-macros"]
 
 [dev-dependencies]
 sqlx = { version = "0.9", default-features = false, features = [

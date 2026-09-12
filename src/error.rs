@@ -118,6 +118,16 @@ impl fmt::Display for Error {
     }
 }
 
+impl Error {
+    /// Shorthand for the scanner.
+    pub(crate) fn template(message: impl Into<String>, offset: usize) -> Self {
+        Self::Template {
+            message: message.into(),
+            offset,
+        }
+    }
+}
+
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

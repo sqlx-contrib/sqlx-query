@@ -16,31 +16,32 @@ holes can do.
 use std::sync::LazyLock;
 
 use sqlx::Postgres;
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort, sql};
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
 
-// The query you already wrote. One slot takes fragments from several sources
-// -- here the client's filter and the cursor's seek condition -- joined by its
-// own `AND`.
+// The query you already wrote, and what a request may ask of it, declared
+// together. One slot takes fragments from several sources -- here the client's
+// filter and the cursor's seek condition -- joined by its own `AND`.
 //
-// `sql!` runs the scanner at compile time, so a mistyped sentinel is a compile
-// error and the skeleton costs nothing at run time.
-static VOLUMES: QueryTemplate<Postgres> = sql!(
-    "SELECT id, title, read_count
-       FROM volumes
-      WHERE tenant_id = $1
-        /* AND query.filter */
-      /* ORDER BY query.order */
-      LIMIT $2"
-);
-
-// What this query exposes, under what public name. Declared rather than
-// derived: the qualifiers and aliases are facts about *this* query's SELECT and
-// FROM, so two queries over one table can expose different surfaces.
-static VOLUMES_MAPPING: LazyLock<QueryMapping> = LazyLock::new(|| {
-    QueryMapping::new()
-        .key("id", ColumnType::Int)        // unique: a token can name one row
-        .column("title", ColumnType::Text)
-        .add("readCount", Column::new("read_count", ColumnType::Int))
+// The mapping lives with the skeleton because the two have to agree: an alias
+// in the SELECT and a `with_alias` in the mapping describe the same column, and
+// nothing else is in a position to notice when they drift.
+static VOLUMES: LazyLock<QueryTemplate<Postgres>> = LazyLock::new(|| {
+    QueryTemplate::parse(
+        "SELECT id, title, read_count
+           FROM volumes
+          WHERE tenant_id = $1
+            /* AND query.filter */
+          /* ORDER BY query.order */
+          LIMIT $2",
+    )
+    .expect("valid skeleton")
+    .with_mapping(
+        // A path not named here is rejected, not passed through.
+        QueryMapping::new()
+            .key("id", ColumnType::Int)        // unique: a token can name one row
+            .column("title", ColumnType::Text)
+            .add("readCount", Column::new("read_count", ColumnType::Int)),
+    )
 });
 
 // Request parameters, as the strings they arrive as. Each treats an empty
@@ -53,10 +54,10 @@ let cursor = Cursor::parse(&request.page_token)?;
 // otherwise hand back rows the client has already seen, with no error anywhere.
 cursor.validate(&sort)?;
 
-// The mapping goes in once. `fill` takes the producer itself, so the chain has
-// no `?` in it and the first failure comes back from `build`.
+// `fill` takes the producer itself, resolving through the template's mapping,
+// so the chain has no `?` in it and the first failure comes back from `build`.
 let rows = VOLUMES
-    .builder(&*VOLUMES_MAPPING)
+    .builder()
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
     .fill("filter", &filter)
@@ -75,7 +76,7 @@ let page: Vec<Volume> = rows.iter().map(Volume::from_row).collect::<Result<_, _>
 // the ordering may be one the client chose at runtime.
 if let Some(last) = rows.last() {
     response.next_page_token = Cursor::new(&sort)
-        .after(last, &*VOLUMES_MAPPING)?
+        .after(last, VOLUMES.mapping())?
         .as_str()
         .to_owned();
 }
@@ -161,12 +162,13 @@ cargo test --features cel,sqlite,mysql
 cargo clippy --all-targets --features cel,sqlite,mysql
 ```
 
-The workspace has three crates, and the shape is forced rather than chosen.
-Proc macros cannot live in the crate that exports the types they refer to, so
-`macros/` is separate; and `sql!` needs the same scanner `QueryTemplate::parse`
-runs, which cannot live in either — a proc-macro crate can export nothing but
-proc macros, and the macro crate cannot depend on the crate that depends on it.
-So `core/` holds that scanner and nothing else.
+One crate. There was briefly a `sql!` macro that scanned the skeleton at compile
+time, which forced two more — a proc-macro crate cannot export the scanner it
+needs, and the scanner could not stay here because the macro crate would then
+depend on the crate depending on it. It was dropped: with the scanner
+deliberately treating an unrecognised sentinel as prose, all `sql!` caught at
+build time was an unterminated comment or a duplicate slot name, neither of
+which survives the first test.
 
 Driver-specific tests are gated on their feature. `clippy::all` and
 `clippy::pedantic` are denied rather than warned, because several consumers in

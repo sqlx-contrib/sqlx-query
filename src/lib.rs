@@ -4,23 +4,24 @@
 //! ```
 //! # #[cfg(all(feature = "postgres", feature = "cel"))] {
 //! use sqlx::Postgres;
-//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, QueryMapping, sql};
+//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
 //!
-//! // The query you already wrote. The sentinels are comments, so this is a
-//! // statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
-//! // `sqlx::query!` to be checked against a live database.
-//! static VOLUMES: QueryTemplate<Postgres> = sql!(
+//! // The query you already wrote, and what a request may ask of it. The
+//! // sentinels are comments, so the skeleton is a statement: it runs in psql,
+//! // it EXPLAINs, and `skeleton()` hands it to `sqlx::query!` to be checked
+//! // against a live database.
+//! let volumes = QueryTemplate::<Postgres>::parse(
 //!     "SELECT id, title, read_count FROM volumes \
 //!      WHERE tenant_id = $1 /* AND query.filter */ \
-//!      /* ORDER BY query.order */ LIMIT $2"
+//!      /* ORDER BY query.order */ LIMIT $2",
+//! )?
+//! .with_mapping(
+//!     // A path not named here is rejected, not passed through.
+//!     QueryMapping::new()
+//!         .key("id", ColumnType::Int)
+//!         .column("title", ColumnType::Text)
+//!         .add("readCount", Column::new("read_count", ColumnType::Int)),
 //! );
-//!
-//! // What this query exposes, under what public name. A path not named here is
-//! // rejected, not passed through.
-//! let mapping = QueryMapping::new()
-//!     .key("id", ColumnType::Int)
-//!     .column("title", ColumnType::Text)
-//!     .add("readCount", Column::new("read_count", ColumnType::Int));
 //!
 //! // Request parameters, as the strings they arrive as. Each treats an empty
 //! // string as "not asked for" rather than as an error.
@@ -31,8 +32,8 @@
 //! let cursor = Cursor::parse("")?;
 //! cursor.validate(&sort)?;
 //!
-//! let query = VOLUMES
-//!     .builder(&mapping)
+//! let query = volumes
+//!     .builder()
 //!     .bind(7_i64)   // $1, the tenant
 //!     .bind(50_i64)  // $2, the page size
 //!     .fill("filter", &filter)
@@ -104,6 +105,7 @@ mod filter;
 mod fragment;
 mod mapping;
 mod render;
+mod scan;
 mod sort;
 mod template;
 mod value;
@@ -119,16 +121,5 @@ pub use fragment::QueryFragment;
 pub use mapping::{Column, ColumnType, Mapping, QueryMapping};
 pub use render::Render;
 pub use sort::{Direction, Sort, SortKey};
-/// Parse a skeleton at compile time, so a malformed sentinel is a compile
-/// error and a skeleton can live in a `static`.
-#[cfg(feature = "macros")]
-#[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
-pub use sqlx_query_macros::sql;
-
-/// Reached only by the [`sql!`] macro's output.
-#[doc(hidden)]
-pub mod __private {
-    pub use sqlx_query_core::Slot;
-}
 pub use template::QueryTemplate;
 pub use value::Value;

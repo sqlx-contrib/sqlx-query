@@ -1,29 +1,23 @@
-//! Reading a skeleton: the part `sqlx-query` and its macros both need.
-//!
-//! A proc-macro crate cannot export anything but proc macros, so the scanner
-//! cannot live beside the `sql!` macro that validates with it -- and it cannot
-//! live in `sqlx-query` either, because the macro crate would then have to
-//! depend on the crate that depends on it. Hence a third crate holding the one
-//! thing both need, and nothing else.
-//!
-//! No dependencies. It is string processing.
+//! Reading a skeleton: literal SQL and the gaps between it.
+
+use crate::error::Error;
 
 /// The marker that makes a comment a sentinel rather than a comment.
 const MARKER: &str = "query.";
 
 /// A named gap a fragment goes into, as a sentinel declared it.
 ///
-/// Borrowed throughout, so the `sql!` macro can build these in a `const` while
-/// [`scan`] builds the same ones at runtime.
+/// Borrowed from the skeleton, which is `&'static str`, so parsing allocates
+/// the two lists and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Slot {
+pub(crate) struct Slot {
     /// The identifier after `query.`.
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// Emitted with every fragment that fills this slot, so that repeated fills
     /// read as `a AND b` rather than needing a separate separator.
-    pub joiner: &'static str,
+    pub(crate) joiner: &'static str,
     /// Whether the joiner precedes the fragment or follows it.
-    pub before: bool,
+    pub(crate) before: bool,
 }
 
 /// What a skeleton turned out to be.
@@ -33,61 +27,27 @@ pub struct Slot {
 /// the same reason -- both are literal SQL around holes, and both render by
 /// walking the two together.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Skeleton {
+pub(crate) struct Skeleton {
     /// The literal SQL around the slots. Always `slots.len() + 1` of them.
-    pub texts: Vec<&'static str>,
+    pub(crate) texts: Vec<&'static str>,
     /// The gaps, in order.
-    pub slots: Vec<Slot>,
+    pub(crate) slots: Vec<Slot>,
     /// The same text with every sentinel removed: a legal statement.
-    pub sql: String,
+    pub(crate) sql: String,
     /// Where the first `?` that follows a slot is, if there is one.
     ///
     /// Harmless where placeholders are numbered, and fatal where they are
     /// positional: what a slot splices in front of such a placeholder shifts it
     /// onto the wrong value.
-    pub late_placeholder: Option<usize>,
+    pub(crate) late_placeholder: Option<usize>,
 }
 
-/// A skeleton that could not be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error {
-    /// What went wrong.
-    pub message: String,
-    /// Byte offset into the skeleton, pointing at the start of the construct
-    /// that went wrong rather than the character that proved it.
-    pub offset: usize,
-}
-
-impl Error {
-    fn new(message: impl Into<String>, offset: usize) -> Self {
-        Self {
-            message: message.into(),
-            offset,
-        }
-    }
-}
-
-impl core::fmt::Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "at byte {}: {}", self.offset, self.message)
-    }
-}
-
-impl std::error::Error for Error {}
-
-/// Split `sql` into pieces, and build the sentinel-free skeleton alongside.
-///
-/// The whole point of scanning rather than searching for `/*` is that a comment
-/// opener inside a string literal is not a comment, and a sentinel inside one is
-/// not a sentinel. Every construct that can contain a `/*` has to be skipped:
-/// quoted strings and identifiers, line comments, dollar-quoted bodies, and
-/// nested block comments.
 ///
 /// # Errors
 ///
-/// [`Error`] if a literal or comment is unterminated, or a slot name is
+/// [`Error::Template`] if a literal or comment is unterminated, or a slot name is
 /// declared twice.
-pub fn scan(sql: &'static str) -> Result<Skeleton, Error> {
+pub(crate) fn scan(sql: &'static str) -> Result<Skeleton, Error> {
     let bytes = sql.as_bytes();
     let mut texts = Vec::new();
     let mut slots = Vec::new();
@@ -123,7 +83,7 @@ pub fn scan(sql: &'static str) -> Result<Skeleton, Error> {
 
                 if let Some(slot) = sentinel(body) {
                     if names.contains(&slot.name) {
-                        return Err(Error::new(
+                        return Err(Error::template(
                             format!("slot `{}` is declared more than once", slot.name),
                             at,
                         ));
@@ -178,7 +138,7 @@ fn string_literal(sql: &str, start: usize) -> Result<usize, Error> {
         }
     }
 
-    Err(Error::new("unterminated string literal", start))
+    Err(Error::template("unterminated string literal", start))
 }
 
 /// Skip a `"..."` or `` `...` `` identifier. Doubling the delimiter escapes it.
@@ -198,7 +158,7 @@ fn delimited(sql: &str, start: usize, delimiter: u8) -> Result<usize, Error> {
         }
     }
 
-    Err(Error::new("unterminated quoted identifier", start))
+    Err(Error::template("unterminated quoted identifier", start))
 }
 
 /// Skip a `-- ...` comment, returning the index of the newline or the end.
@@ -233,7 +193,7 @@ fn dollar_quoted(sql: &str, start: usize) -> Result<Option<usize>, Error> {
     let tag = &sql[start..=at];
     sql[at + 1..].find(tag).map_or_else(
         || {
-            Err(Error::new(
+            Err(Error::template(
                 format!("unterminated dollar-quoted string opened with `{tag}`"),
                 start,
             ))
@@ -266,7 +226,7 @@ fn block_comment(sql: &'static str, start: usize) -> Result<(usize, &'static str
         }
     }
 
-    Err(Error::new("unterminated block comment", start))
+    Err(Error::template("unterminated block comment", start))
 }
 
 /// Read a comment body as a sentinel, or decide it is an ordinary comment.
