@@ -13,8 +13,10 @@ holes can do.
 ## The whole API
 
 ```rust
-use sqlx::{FromRow, Postgres};
-use sqlx_query::{Cursor, Filter, QueryTemplate, Schema, Sort, sql};
+use std::sync::LazyLock;
+
+use sqlx::Postgres;
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort, sql};
 
 // The query you already wrote. A slot is named for the kind of SQL it holds,
 // not for whoever fills it: one slot takes fragments from several sources,
@@ -31,18 +33,15 @@ static VOLUMES: QueryTemplate<Postgres> = sql!(
       LIMIT $2"
 );
 
-// The allow-list, and the whole of this crate's type system. Declared rather
-// than reflected: exposing every column in the table is what fail-closed exists
-// to prevent. `key` marks a unique column, which is what lets a page token
-// identify an exact row.
-#[derive(FromRow, Schema)]
-#[schema(rename_all = "camelCase")]
-struct Volume {
-    #[schema(key)]
-    id: i64,
-    title: String,
-    read_count: i64,   // exposed to requests as `readCount`
-}
+// What this query exposes, under what public name. Declared rather than
+// derived: the qualifiers and aliases are facts about *this* query's SELECT and
+// FROM, so two queries over one table can expose different surfaces.
+static VOLUMES_MAPPING: LazyLock<QueryMapping> = LazyLock::new(|| {
+    QueryMapping::new()
+        .key("id", ColumnType::Int)        // unique: a token can name one row
+        .column("title", ColumnType::Text)
+        .add("readCount", Column::new("read_count", ColumnType::Int))
+});
 
 // Request parameters, as the strings they arrive as. Each treats an empty
 // string as "not asked for" rather than as an error.
@@ -55,12 +54,12 @@ let cursor = Cursor::parse(&request.page_token)?;
 cursor.validate(&sort)?;
 
 let rows = VOLUMES
-    .splice()
+    .builder()
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
-    .fill("predicate", &filter.to_fragment(Volume::schema())?)
-    .fill("predicate", &cursor.to_fragment(Volume::schema())?)
-    .fill("order", &sort.to_fragment(Volume::schema())?)
+    .fill("predicate", &filter.to_fragment(&*VOLUMES_MAPPING)?)
+    .fill("predicate", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
+    .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?)
     .build()?
     .fetch_all(&pool)
     .await?;
@@ -69,12 +68,12 @@ let rows = VOLUMES
 // cursor below.
 let page: Vec<Volume> = rows.iter().map(Volume::from_row).collect::<Result<_, _>>()?;
 
-// The token for the next page, read out of the last row by the schema's own
+// The token for the next page, read out of the last row by the mapping's own
 // field-to-column mapping — so there is no second mapping to keep in step, and
 // the ordering may be one the client chose at runtime.
 if let Some(last) = rows.last() {
     response.next_page_token = Cursor::new(&sort)
-        .after(last, Volume::schema())?
+        .after(last, &*VOLUMES_MAPPING)?
         .as_str()
         .to_owned();
 }
@@ -123,13 +122,17 @@ bound value, so text spliced ahead of a `$2` leaves it alone — that is why
 after filling, filling slots out of order, or a skeleton whose own `?` sits
 after a slot — this crate returns an error rather than a wrong answer.
 
-**The schema is declared, not reflected.** `#[derive(Schema)]` puts the
-allow-list on the struct, so the field-to-column mapping cannot drift from the
-fields it describes — but what it exposes is still a choice. A schema generated
-from every column in the table would hand clients the ability to filter and sort
-on anything, which is the thing being guarded against.
+**The mapping belongs to the query, not the table.** Qualifiers and aliases are
+facts about one query's `SELECT` and `FROM` — a join needs `a.name`, and
+`SELECT a.name AS author_name` means filtering and reading the row use different
+strings. So two queries over one table can expose different surfaces, and the
+mapping is declared rather than derived from a row struct.
 
-**The schema is the type checker.** cel-rust parses without checking, so
+It is also an allow-list, not a description. One generated from every column
+would hand clients the ability to filter and sort on anything, which is what
+fail-closed exists to prevent.
+
+**The mapping is the type checker.** cel-rust parses without checking, so
 `id > 'tuesday'` is a perfectly good CEL program. The allow-list is the only
 thing that can reject it before the database does, which is why the two are the
 same object.

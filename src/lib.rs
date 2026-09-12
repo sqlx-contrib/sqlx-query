@@ -4,7 +4,7 @@
 //! ```
 //! # #[cfg(all(feature = "postgres", feature = "cel"))] {
 //! use sqlx::Postgres;
-//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, sql};
+//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, QueryMapping, sql};
 //!
 //! // The query you already wrote. The sentinels are comments, so this is a
 //! // statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
@@ -16,7 +16,7 @@
 //! );
 //!
 //! // The allow-list. A field not named here is rejected, not passed through.
-//! let schema = Table::new()
+//! let mapping = QueryMapping::new()
 //!     .key("id", ColumnType::Int)
 //!     .column("title", ColumnType::Text)
 //!     .add("readCount", Column::new("read_count", ColumnType::Int));
@@ -31,12 +31,12 @@
 //! cursor.validate(&sort)?;
 //!
 //! let query = VOLUMES
-//!     .splice()
+//!     .builder()
 //!     .bind(7_i64)   // $1, the tenant
 //!     .bind(50_i64)  // $2, the page size
-//!     .fill("predicate", &filter.to_fragment(&schema)?)
-//!     .fill("predicate", &cursor.to_fragment(&schema)?)
-//!     .fill("order", &sort.to_fragment(&schema)?);
+//!     .fill("predicate", &filter.to_fragment(&mapping)?)
+//!     .fill("predicate", &cursor.to_fragment(&mapping)?)
+//!     .fill("order", &sort.to_fragment(&mapping)?);
 //!
 //! assert_eq!(
 //!     query.sql(),
@@ -48,7 +48,7 @@
 //! // let rows = query.build_query_as::<Volume>()?.fetch_all(&pool).await?;
 //!
 //! // The token for the next page is read out of the last row:
-//! //   Cursor::new(&sort).after(last, &schema)?
+//! //   Cursor::new(&sort).after(last, &mapping)?
 //! // which needs a live row, so see `tests/sqlite.rs` for it end to end.
 //! # }
 //! # Ok::<_, sqlx_query::Error>(())
@@ -79,7 +79,7 @@
 //! `$2` leaves it alone. MySQL's and SQLite's `?` names the *N*th placeholder
 //! *in the text*, so splicing ahead of one shifts it. Where that distinction
 //! bites -- binding after filling, or filling slots out of order -- this crate
-//! returns [`Error::Positional`] rather than a wrong answer. See [`Splice`].
+//! returns [`Error::Positional`] rather than a wrong answer. See [`QueryBuilder`].
 //!
 //! [sqlx]: https://github.com/launchbadge/sqlx
 //! [`Arguments::format_placeholder`]: sqlx::Arguments::format_placeholder
@@ -92,6 +92,7 @@ compile_error!(
      Without one there is no `Arguments` implementation to splice against."
 );
 
+mod builder;
 #[cfg(feature = "cel")]
 mod cel;
 mod cursor;
@@ -100,12 +101,12 @@ mod error;
 #[cfg(feature = "cel")]
 mod filter;
 mod fragment;
-mod schema;
+mod mapping;
 mod sort;
-mod splice;
 mod template;
 mod value;
 
+pub use builder::{QueryBuilder, Slot};
 pub use cursor::{Cursor, CursorKey};
 pub use dialect::Dialect;
 pub use error::Error;
@@ -113,17 +114,8 @@ pub use error::Error;
 #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
 pub use filter::Filter;
 pub use fragment::QueryFragment;
-pub use schema::{Column, ColumnType, Schema, Table};
+pub use mapping::{Column, ColumnType, Mapping, QueryMapping};
 pub use sort::{Direction, Sort, SortKey};
-pub use splice::{Slot, Splice};
-/// Declare a table's allow-list on the struct that describes it.
-///
-/// Shares its name with the [`Schema`] trait, as `FromRow` does with its own
-/// derive -- but this one generates an inherent `schema()` returning a
-/// `&'static `[`Table`], rather than an impl.
-#[cfg(feature = "derive")]
-#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
-pub use sqlx_query_macros::Schema;
 /// Parse a skeleton at compile time, so a malformed sentinel is a compile
 /// error and a skeleton can live in a `static`.
 #[cfg(feature = "macros")]

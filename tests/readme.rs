@@ -2,22 +2,23 @@
 #![cfg(all(feature = "cel", feature = "postgres"))]
 
 use sqlx::Postgres;
-use sqlx_query::{Cursor, Filter, QueryTemplate, Sort, sql};
+use std::sync::LazyLock;
+
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort, sql};
 
 struct Request {
     filter: String,
     order_by: String,
     page_token: String,
 }
-#[allow(dead_code)]
-#[derive(sqlx_query::Schema)]
-#[schema(rename_all = "camelCase")]
-struct Volume {
-    #[schema(key)]
-    id: i64,
-    title: String,
-    read_count: i64,
-}
+/// What this query exposes, under what public name. Declared, not derived:
+/// the aliases and qualifiers are facts about this query's SELECT and FROM.
+static VOLUMES_MAPPING: LazyLock<QueryMapping> = LazyLock::new(|| {
+    QueryMapping::new()
+        .key("id", ColumnType::Int)
+        .column("title", ColumnType::Text)
+        .add("readCount", Column::new("read_count", ColumnType::Int))
+});
 
 static VOLUMES: QueryTemplate<Postgres> = sql!(
     "SELECT id, title, read_count
@@ -50,12 +51,12 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     cursor.validate(&sort)?;
 
     let query = VOLUMES
-        .splice()
+        .builder()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("predicate", &filter.to_fragment(Volume::schema())?)
-        .fill("predicate", &cursor.to_fragment(Volume::schema())?)
-        .fill("order", &sort.to_fragment(Volume::schema())?);
+        .fill("predicate", &filter.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("predicate", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?);
 
     assert_eq!(
         query.sql(),
@@ -74,12 +75,12 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     resumed.validate(&sort)?;
 
     let second = VOLUMES
-        .splice()
+        .builder()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("predicate", &filter.to_fragment(Volume::schema())?)
-        .fill("predicate", &resumed.to_fragment(Volume::schema())?)
-        .fill("order", &sort.to_fragment(Volume::schema())?);
+        .fill("predicate", &filter.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("predicate", &resumed.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?);
 
     assert_eq!(
         second.sql(),

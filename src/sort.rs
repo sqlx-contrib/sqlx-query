@@ -6,7 +6,7 @@ use std::str::FromStr;
 use crate::dialect::{Dialect, quote};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::schema::Schema;
+use crate::mapping::Mapping;
 use crate::value::Value;
 
 /// Which way a sort key runs.
@@ -204,10 +204,10 @@ impl Sort {
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownColumn`] for a field the schema does not expose.
-    pub fn to_fragment<DB: Dialect, S: Schema>(
+    /// [`Error::UnknownColumn`] for a field the mapping does not expose.
+    pub fn to_fragment<DB: Dialect, S: Mapping>(
         &self,
-        schema: &S,
+        mapping: &S,
     ) -> Result<QueryFragment<DB, Value>, Error> {
         let mut fragment = QueryFragment::new();
         let mut sql = String::new();
@@ -217,7 +217,7 @@ impl Sort {
                 sql.push_str(", ");
             }
 
-            let column = resolve(schema, &key.field)?;
+            let column = resolve(mapping, &key.field)?;
             quote::<DB>(&column.name, &mut sql);
             sql.push(' ');
             sql.push_str(key.direction.keyword());
@@ -240,11 +240,14 @@ impl Sort {
     }
 }
 
-/// Resolve a dotted field path through a schema.
-pub(crate) fn resolve<S: Schema>(schema: &S, field: &str) -> Result<crate::schema::Column, Error> {
+/// Resolve a dotted field path through a mapping.
+pub(crate) fn resolve<S: Mapping>(
+    mapping: &S,
+    field: &str,
+) -> Result<crate::mapping::Column, Error> {
     let path: Vec<&str> = field.split('.').collect();
 
-    schema
+    mapping
         .resolve(&path)
         .ok_or_else(|| Error::UnknownColumn(field.to_owned()))
 }
@@ -299,10 +302,10 @@ mod tests {
     use sqlx::Postgres;
 
     use super::*;
-    use crate::schema::{Column, ColumnType, Table};
+    use crate::mapping::{Column, ColumnType, QueryMapping};
 
-    fn volumes() -> Table {
-        Table::new()
+    fn volumes() -> QueryMapping {
+        QueryMapping::new()
             .key("id", ColumnType::Int)
             .column("title", ColumnType::Text)
             .add("readCount", Column::new("read_count", ColumnType::Int))

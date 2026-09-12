@@ -7,7 +7,7 @@ use sqlx::types::Type;
 use sqlx::{Error as SqlxError, Row};
 
 use crate::error::Error;
-use crate::schema::ColumnType;
+use crate::mapping::ColumnType;
 use crate::value::Value;
 
 mod sealed {
@@ -24,11 +24,11 @@ mod sealed {
 ///
 /// `$1` versus `?` is [`Arguments::format_placeholder`]'s job, and every
 /// fragment is rendered through it, so numbering and offsets cannot be got
-/// wrong here. [`Splice`] asks the driver directly when it needs to know
+/// wrong here. [`QueryBuilder`] asks the driver directly when it needs to know
 /// whether placeholders are numbered.
 ///
 /// [`Arguments::format_placeholder`]: sqlx::Arguments::format_placeholder
-/// [`Splice`]: crate::Splice
+/// [`QueryBuilder`]: crate::QueryBuilder
 pub trait Dialect: Database + sealed::Sealed {
     /// The identifier quote character. Doubled to escape itself.
     const QUOTE: char;
@@ -124,8 +124,8 @@ impl Dialect for sqlx::MySql {
 
 /// Write `name` as a quoted identifier.
 ///
-/// Column names reach here from a [`Schema`](crate::Schema), never from a
-/// request -- but quoting is what makes that separation hold even if a schema
+/// Column names reach here from a [`Mapping`](crate::Mapping), never from a
+/// request -- but quoting is what makes that separation hold even if a mapping
 /// is built from configuration, and doubling the quote character means a name
 /// containing one is escaped rather than ending the identifier early.
 pub(crate) fn quote<DB: Dialect>(name: &str, out: &mut String) {
@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(quoted::<MySql>("read_count"), "`read_count`");
     }
 
-    /// A schema built from configuration could carry anything. Doubling the
+    /// A mapping built from configuration could carry anything. Doubling the
     /// quote keeps it an identifier instead of an injection point.
     #[cfg(feature = "postgres")]
     #[test]

@@ -6,7 +6,7 @@ use sqlx::encode::{Encode, IsNull};
 use sqlx::error::BoxDynError;
 use sqlx::types::Type;
 
-use crate::schema::ColumnType;
+use crate::mapping::ColumnType;
 
 /// A value produced while rendering a fragment.
 ///
@@ -20,7 +20,7 @@ use crate::schema::ColumnType;
 /// # Closed on purpose
 ///
 /// Producers in this crate emit `Value` so that a fragment can be built without
-/// naming a driver, and so that a schema can type-check a comparison before the
+/// naming a driver, and so that a mapping can type-check a comparison before the
 /// database sees it. A caller who wants to bind something else can build a
 /// [`QueryFragment<DB, T>`](crate::QueryFragment) over their own type, or reach
 /// for [`Slot::push_bind`](crate::Slot::push_bind).

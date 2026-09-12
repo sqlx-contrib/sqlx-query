@@ -49,7 +49,7 @@ chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false }
 
 [features]
-default = ["postgres", "derive", "macros"]
+default = ["postgres", "macros"]
 
 # Driver support. At least one is required: without a driver there is no
 # `Arguments` impl to splice against.
@@ -59,9 +59,6 @@ mysql = ["sqlx/mysql", "sqlx/chrono"]
 
 # CEL filters.
 cel = ["dep:cel"]
-
-# `#[derive(Schema)]`, so a table's allow-list is declared once, on the struct.
-derive = ["dep:sqlx-query-macros"]
 
 # `sql!`, so a skeleton is scanned at compile time and lives in a `static`.
 macros = ["dep:sqlx-query-macros"]

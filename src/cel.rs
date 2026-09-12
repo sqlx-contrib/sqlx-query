@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use crate::dialect::{Dialect, quoted};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::schema::{Column, ColumnType, Schema};
+use crate::mapping::{Column, ColumnType, Mapping};
 use crate::value::Value;
 
 /// The character that escapes a `LIKE` wildcard.
@@ -33,19 +33,19 @@ pub(crate) fn parse(source: &str) -> Result<IdedExpr, Error> {
 ///
 /// [`Error::UnknownColumn`], [`Error::TypeMismatch`], or [`Error::Unsupported`]
 /// for a construct with no faithful SQL lowering.
-pub(crate) fn render<DB: Dialect, S: Schema>(
+pub(crate) fn render<DB: Dialect, S: Mapping>(
     expr: &IdedExpr,
-    schema: &S,
+    mapping: &S,
 ) -> Result<QueryFragment<DB, Value>, Error> {
     let mut fragment = QueryFragment::new();
-    condition(expr, schema, &mut fragment)?;
+    condition(expr, mapping, &mut fragment)?;
     Ok(fragment)
 }
 
 /// Write `expr` as a SQL boolean expression.
-fn condition<DB: Dialect, S: Schema>(
+fn condition<DB: Dialect, S: Mapping>(
     expr: &IdedExpr,
-    schema: &S,
+    mapping: &S,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     match &expr.expr {
@@ -61,13 +61,13 @@ fn condition<DB: Dialect, S: Schema>(
             })
             .ok_or_else(|| unsupported("has() over something that is not a field"))?;
 
-            let column = resolve(schema, &column)?;
+            let column = resolve(mapping, &column)?;
             out.push(&quoted::<DB>(&column.name));
             out.push(" IS NOT NULL");
             Ok(())
         }
 
-        Expr::Call(call) => call_condition(call, schema, out),
+        Expr::Call(call) => call_condition(call, mapping, out),
 
         Expr::Literal(LiteralValue::Boolean(value)) => {
             out.push(if **value { "TRUE" } else { "FALSE" });
@@ -78,7 +78,7 @@ fn condition<DB: Dialect, S: Schema>(
         // to take one directly.
         Expr::Ident(_) | Expr::Select(_) => {
             let path = column_of(expr).ok_or_else(|| unsupported("this expression"))?;
-            let column = resolve(schema, &path)?;
+            let column = resolve(mapping, &path)?;
 
             if column.ty != ColumnType::Bool {
                 return Err(Error::TypeMismatch(format!(
@@ -100,9 +100,9 @@ fn condition<DB: Dialect, S: Schema>(
     }
 }
 
-fn call_condition<DB: Dialect, S: Schema>(
+fn call_condition<DB: Dialect, S: Mapping>(
     call: &cel::common::ast::CallExpr,
-    schema: &S,
+    mapping: &S,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let name = call.func_name.as_str();
@@ -117,9 +117,9 @@ fn call_condition<DB: Dialect, S: Schema>(
             };
 
             out.push("(");
-            condition(left, schema, out)?;
+            condition(left, mapping, out)?;
             out.push(joiner);
-            condition(right, schema, out)?;
+            condition(right, mapping, out)?;
             out.push(")");
             Ok(())
         }
@@ -128,7 +128,7 @@ fn call_condition<DB: Dialect, S: Schema>(
             let [only] = single(&call.args, name)?;
 
             out.push("(NOT ");
-            condition(only, schema, out)?;
+            condition(only, mapping, out)?;
             out.push(")");
             Ok(())
         }
@@ -140,15 +140,15 @@ fn call_condition<DB: Dialect, S: Schema>(
         | operators::GREATER
         | operators::GREATER_EQUALS => {
             let [left, right] = pair(&call.args, name)?;
-            comparison(name, left, right, schema, out)
+            comparison(name, left, right, mapping, out)
         }
 
         operators::IN => {
             let [needle, haystack] = pair(&call.args, name)?;
-            membership(needle, haystack, schema, out)
+            membership(needle, haystack, mapping, out)
         }
 
-        "startsWith" | "endsWith" | "contains" => like(call, name, schema, out),
+        "startsWith" | "endsWith" | "contains" => like(call, name, mapping, out),
 
         operators::CONDITIONAL => Err(unsupported(
             "the ternary operator: write it as `(a && b) || (!a && c)`",
@@ -165,15 +165,15 @@ enum Operand {
     Null,
 }
 
-fn comparison<DB: Dialect, S: Schema>(
+fn comparison<DB: Dialect, S: Mapping>(
     operator: &str,
     left: &IdedExpr,
     right: &IdedExpr,
-    schema: &S,
+    mapping: &S,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
-    let left = operand(left, schema)?;
-    let right = operand(right, schema)?;
+    let left = operand(left, mapping)?;
+    let right = operand(right, mapping)?;
 
     match (left, right) {
         // `x == null` is `IS NULL`, which is both what the caller means and the
@@ -238,13 +238,13 @@ fn comparison<DB: Dialect, S: Schema>(
     }
 }
 
-fn membership<DB: Dialect, S: Schema>(
+fn membership<DB: Dialect, S: Mapping>(
     needle: &IdedExpr,
     haystack: &IdedExpr,
-    schema: &S,
+    mapping: &S,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
-    let Operand::Column(column, path) = operand(needle, schema)? else {
+    let Operand::Column(column, path) = operand(needle, mapping)? else {
         return Err(unsupported("`in` over something that is not a column"));
     };
 
@@ -268,7 +268,7 @@ fn membership<DB: Dialect, S: Schema>(
             out.push(", ");
         }
 
-        let Operand::Value(value) = operand(element, schema)? else {
+        let Operand::Value(value) = operand(element, mapping)? else {
             return Err(unsupported("a non-constant element in an `in` list"));
         };
 
@@ -280,10 +280,10 @@ fn membership<DB: Dialect, S: Schema>(
     Ok(())
 }
 
-fn like<DB: Dialect, S: Schema>(
+fn like<DB: Dialect, S: Mapping>(
     call: &cel::common::ast::CallExpr,
     name: &str,
-    schema: &S,
+    mapping: &S,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let target = call
@@ -291,7 +291,7 @@ fn like<DB: Dialect, S: Schema>(
         .as_deref()
         .ok_or_else(|| unsupported(&format!("`{name}` without a receiver")))?;
 
-    let Operand::Column(column, path) = operand(target, schema)? else {
+    let Operand::Column(column, path) = operand(target, mapping)? else {
         return Err(unsupported(&format!(
             "`{name}` on something that is not a column"
         )));
@@ -305,7 +305,7 @@ fn like<DB: Dialect, S: Schema>(
     }
 
     let [argument] = single(&call.args, name)?;
-    let Operand::Value(Value::Text(needle)) = operand(argument, schema)? else {
+    let Operand::Value(Value::Text(needle)) = operand(argument, mapping)? else {
         return Err(unsupported(&format!(
             "`{name}` with an argument that is not a string constant"
         )));
@@ -326,9 +326,9 @@ fn like<DB: Dialect, S: Schema>(
 }
 
 /// Resolve one side of a comparison.
-fn operand<S: Schema>(expr: &IdedExpr, schema: &S) -> Result<Operand, Error> {
+fn operand<S: Mapping>(expr: &IdedExpr, mapping: &S) -> Result<Operand, Error> {
     if let Some(path) = column_of(expr) {
-        let column = resolve(schema, &path)?;
+        let column = resolve(mapping, &path)?;
         return Ok(Operand::Column(column, path));
     }
 
@@ -388,10 +388,10 @@ fn walk(expr: &IdedExpr, into: &mut Vec<String>) -> Option<()> {
     }
 }
 
-fn resolve<S: Schema>(schema: &S, path: &str) -> Result<Column, Error> {
+fn resolve<S: Mapping>(mapping: &S, path: &str) -> Result<Column, Error> {
     let segments: Vec<&str> = path.split('.').collect();
 
-    schema
+    mapping
         .resolve(&segments)
         .ok_or_else(|| Error::UnknownColumn(path.to_owned()))
 }
@@ -481,10 +481,10 @@ mod tests {
     use sqlx::Postgres;
 
     use super::*;
-    use crate::schema::{ColumnType, Table};
+    use crate::mapping::{ColumnType, QueryMapping};
 
-    fn volumes() -> Table {
-        Table::new()
+    fn volumes() -> QueryMapping {
+        QueryMapping::new()
             .key("id", ColumnType::Int)
             .column("title", ColumnType::Text)
             .column("price", ColumnType::Float)
@@ -583,7 +583,7 @@ mod tests {
         );
     }
 
-    /// cel-rust parses without checking, so the schema is the only thing that
+    /// cel-rust parses without checking, so the mapping is the only thing that
     /// can catch this before the database does.
     #[test]
     fn a_type_mismatch_is_rejected() {

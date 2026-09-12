@@ -7,7 +7,7 @@ use chrono::{TimeZone as _, Utc};
 use crate::dialect::{Dialect, quoted};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::schema::Schema;
+use crate::mapping::Mapping;
 use crate::sort::{Direction, Sort, SortKey, resolve};
 use crate::value::Value;
 use sqlx::Row;
@@ -144,25 +144,25 @@ impl Cursor {
     /// one, which is excluded. Pass the last row of the page just sent and the
     /// result is that page's token.
     ///
-    /// Each key's value is read from the column `schema` maps it to, so there
+    /// Each key's value is read from the column `mapping` maps it to, so there
     /// is no second field-to-column mapping for a caller to keep in step, and
     /// the ordering may be one the client chose at runtime.
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownColumn`] for a key the schema does not expose, and
+    /// [`Error::UnknownColumn`] for a key the mapping does not expose, and
     /// [`Error::Column`] if a key's column is not in the row -- usually because
     /// it was left out of the `SELECT` list.
-    pub fn after<R, S>(&self, row: &R, schema: &S) -> Result<Self, Error>
+    pub fn after<R, S>(&self, row: &R, mapping: &S) -> Result<Self, Error>
     where
         R: Row,
         R::Database: Dialect,
-        S: Schema,
+        S: Mapping,
     {
         let mut values = Vec::with_capacity(self.sort.keys().len());
 
         for key in self.sort.keys() {
-            let column = resolve(schema, &key.field)?;
+            let column = resolve(mapping, &key.field)?;
             values.push(<R::Database as Dialect>::value(
                 row,
                 &column.name,
@@ -288,14 +288,14 @@ impl Cursor {
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownColumn`] for a key the schema does not expose,
+    /// [`Error::UnknownColumn`] for a key the mapping does not expose,
     /// [`Error::NotUnique`] if no key is a unique column, and [`Error::Cursor`]
     /// if a value's type does not match its column's.
-    pub fn to_fragment<DB: Dialect, S: Schema>(
+    pub fn to_fragment<DB: Dialect, S: Mapping>(
         &self,
-        schema: &S,
+        mapping: &S,
     ) -> Result<QueryFragment<DB, Value>, Error> {
-        seek(&self.keys, schema)
+        seek(&self.keys, mapping)
     }
 
     /// The ordering this cursor pages by.
@@ -321,9 +321,9 @@ impl Cursor {
 /// few repeated binds and buys one shape to test and no driver-specific branch.
 /// A positional `?` cannot point back at an earlier bind, so the repetition is
 /// unavoidable on those drivers regardless.
-fn seek<DB: Dialect, S: Schema>(
+fn seek<DB: Dialect, S: Mapping>(
     keys: &[CursorKey],
-    schema: &S,
+    mapping: &S,
 ) -> Result<QueryFragment<DB, Value>, Error> {
     let mut fragment = QueryFragment::new();
     if keys.is_empty() {
@@ -334,7 +334,7 @@ fn seek<DB: Dialect, S: Schema>(
     let mut total = false;
 
     for key in keys {
-        let column = resolve(schema, &key.key.field)?;
+        let column = resolve(mapping, &key.key.field)?;
 
         // A token is client input. One carrying text for an integer column must
         // not reach the database as a comparison between the two.
@@ -356,7 +356,7 @@ fn seek<DB: Dialect, S: Schema>(
 
         return Err(Error::NotUnique(format!(
             "`{sort}` names no unique column, so a page token cannot identify a \
-             row: append one with `Sort::asc`, and declare it with `Table::key`"
+             row: append one with `Sort::asc`, and declare it with `QueryMapping::key`"
         )));
     }
 
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn the_first_page_has_no_condition() {
         let fragment = Cursor::empty()
-            .to_fragment::<sqlx::Postgres, _>(&crate::schema::Table::new())
+            .to_fragment::<sqlx::Postgres, _>(&crate::mapping::QueryMapping::new())
             .unwrap();
 
         assert!(fragment.is_empty());

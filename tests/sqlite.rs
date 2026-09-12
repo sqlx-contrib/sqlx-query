@@ -7,7 +7,7 @@
 #![cfg(all(feature = "sqlite", feature = "cel"))]
 
 use sqlx::{AssertSqlSafe, Row as _, Sqlite, SqlitePool};
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table};
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
 
 /// Note `LIMIT 3` is a literal, not a bind. SQLite numbers placeholders by
 /// their position in the text, so a `?` after a slot would be shifted by
@@ -19,8 +19,8 @@ const PAGE: &str = "SELECT id, title, read_count FROM volumes \
                     /* ORDER BY query.order */ \
                     LIMIT 3";
 
-fn schema() -> Table {
-    Table::new()
+fn mapping() -> QueryMapping {
+    QueryMapping::new()
         .key("id", ColumnType::Int)
         .column("title", ColumnType::Text)
         .add("readCount", Column::new("read_count", ColumnType::Int))
@@ -73,7 +73,7 @@ async fn seed() -> SqlitePool {
 /// same query run in one go.
 async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i64> {
     let template = QueryTemplate::<Sqlite>::parse(PAGE).unwrap();
-    let schema = schema();
+    let mapping = mapping();
 
     let filter = Filter::parse(filter).unwrap();
     let sort = Sort::parse(order_by).unwrap().asc("id");
@@ -85,11 +85,11 @@ async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i6
         cursor.validate(&sort).unwrap();
 
         let rows = template
-            .splice()
+            .builder()
             .bind(1_i64)
-            .fill("predicate", &filter.to_fragment(&schema).unwrap())
-            .fill("predicate", &cursor.to_fragment(&schema).unwrap())
-            .fill("order", &sort.to_fragment(&schema).unwrap())
+            .fill("predicate", &filter.to_fragment(&mapping).unwrap())
+            .fill("predicate", &cursor.to_fragment(&mapping).unwrap())
+            .fill("order", &sort.to_fragment(&mapping).unwrap())
             .build()
             .unwrap()
             .fetch_all(pool)
@@ -100,9 +100,9 @@ async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i6
 
         seen.extend(rows.iter().map(|row| row.get::<i64, _>("id")));
 
-        // The token for the next page, read out of the row by the schema's
+        // The token for the next page, read out of the row by the mapping's
         // own field-to-column mapping.
-        cursor = Cursor::new(&sort).after(last, &schema).unwrap();
+        cursor = Cursor::new(&sort).after(last, &mapping).unwrap();
     }
 
     seen

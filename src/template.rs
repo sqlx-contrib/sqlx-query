@@ -7,8 +7,8 @@ use std::marker::PhantomData;
 use sqlx::database::Database;
 use sqlx_query_core::Piece;
 
+use crate::builder::QueryBuilder;
 use crate::error::Error;
-use crate::splice::Splice;
 
 /// A query you already wrote, with slots where fragments go.
 ///
@@ -46,7 +46,7 @@ pub struct QueryTemplate<DB> {
     /// Where the first `?` that follows a slot is, if there is one.
     ///
     /// Harmless where placeholders are numbered, and fatal where they are
-    /// positional -- see [`Splice`](crate::Splice). Recorded here because the
+    /// positional -- see [`QueryBuilder`](crate::QueryBuilder). Recorded here because the
     /// scanner is the only thing that can tell a placeholder from a `?` inside
     /// a string literal.
     late_placeholder: Option<usize>,
@@ -126,8 +126,8 @@ impl<DB> QueryTemplate<DB> {
 impl<DB: Database> QueryTemplate<DB> {
     /// Start filling this template in.
     #[must_use]
-    pub fn splice(&self) -> Splice<'_, DB> {
-        Splice::new(self)
+    pub fn builder(&self) -> QueryBuilder<'_, DB> {
+        QueryBuilder::new(self)
     }
 }
 

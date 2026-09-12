@@ -3,7 +3,7 @@
 use crate::dialect::Dialect;
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::schema::Schema;
+use crate::mapping::Mapping;
 use crate::value::Value;
 
 /// A parsed filter expression.
@@ -39,7 +39,7 @@ impl Filter {
     /// caller with a CEL expression and a table, not a requirement.
     ///
     /// Nothing is type-checked here, because cel-rust has no checking phase:
-    /// `id > 'tuesday'` parses perfectly well. The [`Schema`] is what catches
+    /// `id > 'tuesday'` parses perfectly well. The [`Mapping`] is what catches
     /// it, at [`to_fragment`](Self::to_fragment), which is why the allow-list
     /// and the type checker are the same object.
     ///
@@ -67,20 +67,20 @@ impl Filter {
         self.expression.is_none()
     }
 
-    /// Render against a schema.
+    /// Render against a mapping.
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownColumn`] for a field the schema does not expose,
+    /// [`Error::UnknownColumn`] for a field the mapping does not expose,
     /// [`Error::TypeMismatch`] for a comparison that cannot work, and
     /// [`Error::Unsupported`] for a construct with no faithful SQL lowering.
-    pub fn to_fragment<DB: Dialect, S: Schema>(
+    pub fn to_fragment<DB: Dialect, S: Mapping>(
         &self,
-        schema: &S,
+        mapping: &S,
     ) -> Result<QueryFragment<DB, Value>, Error> {
         match &self.expression {
             None => Ok(QueryFragment::new()),
-            Some(expression) => crate::cel::render(expression, schema),
+            Some(expression) => crate::cel::render(expression, mapping),
         }
     }
 }
@@ -90,10 +90,10 @@ mod tests {
     use sqlx::Postgres;
 
     use super::*;
-    use crate::schema::{ColumnType, Table};
+    use crate::mapping::{ColumnType, QueryMapping};
 
-    fn volumes() -> Table {
-        Table::new()
+    fn volumes() -> QueryMapping {
+        QueryMapping::new()
             .key("id", ColumnType::Int)
             .column("title", ColumnType::Text)
     }
@@ -138,7 +138,7 @@ mod tests {
         ));
     }
 
-    /// cel-rust parses without checking, so the schema is the only thing that
+    /// cel-rust parses without checking, so the mapping is the only thing that
     /// can catch this before the database does.
     #[test]
     fn a_type_error_is_rejected_at_render() {

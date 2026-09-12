@@ -35,7 +35,7 @@ fn a_compiled_template_splices_like_a_parsed_one() {
     order.push("\"title\" DESC");
 
     let sql = VOLUMES
-        .splice()
+        .builder()
         .bind(7_i64)
         .fill("predicate", &predicate)
         .fill("order", &order)

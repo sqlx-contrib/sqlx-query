@@ -36,7 +36,7 @@ pub enum Error {
     /// A CEL filter, or a constant inside one, could not be parsed.
     Parse(String),
 
-    /// A comparison the schema says cannot work.
+    /// A comparison the mapping says cannot work.
     TypeMismatch(String),
 
     /// A construct with no faithful SQL lowering.
@@ -48,10 +48,10 @@ pub enum Error {
     /// An `order_by` string could not be parsed.
     Sort(String),
 
-    /// A request named a column the schema does not expose.
+    /// A request named a column the mapping does not expose.
     ///
     /// Carries the request-facing path, not the database name: the caller has
-    /// no idea what the latter is, and telling them would export the schema.
+    /// no idea what the latter is, and telling them would export the mapping.
     UnknownColumn(String),
 
     /// A page token was malformed, or does not belong to this request.

@@ -41,7 +41,7 @@ use crate::template::QueryTemplate;
 /// Neither [`bind`](Self::bind) nor [`fill`](Self::fill) returns a `Result`,
 /// because threading one through a builder chain costs more than it explains.
 /// The first failure is kept and returned by the `build` methods.
-pub struct Splice<'t, DB: Database> {
+pub struct QueryBuilder<'t, DB: Database> {
     template: &'t QueryTemplate<DB>,
     arguments: DB::Arguments,
     /// What has been put in each slot, indexed by the slot's position among
@@ -55,7 +55,7 @@ pub struct Splice<'t, DB: Database> {
     last_filled: usize,
 }
 
-impl<'t, DB: Database> Splice<'t, DB> {
+impl<'t, DB: Database> QueryBuilder<'t, DB> {
     pub(crate) fn new(template: &'t QueryTemplate<DB>) -> Self {
         let slots = template
             .pieces()
@@ -317,9 +317,9 @@ impl<'t, DB: Database> Splice<'t, DB> {
     }
 }
 
-impl<DB: Database> fmt::Debug for Splice<'_, DB> {
+impl<DB: Database> fmt::Debug for QueryBuilder<'_, DB> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Splice")
+        f.debug_struct("QueryBuilder")
             .field("sql", &self.sql())
             .field("error", &self.error)
             .finish_non_exhaustive()
@@ -329,7 +329,7 @@ impl<DB: Database> fmt::Debug for Splice<'_, DB> {
 /// A slot being built by hand.
 ///
 /// Binds go straight into the query's argument list, so placeholders continue
-/// its numbering. Obtained from [`Splice::slot`].
+/// its numbering. Obtained from [`QueryBuilder::slot`].
 pub struct Slot<'a, DB: Database> {
     sql: &'a mut String,
     arguments: &'a mut DB::Arguments,
@@ -412,13 +412,13 @@ mod tests {
     }
 
     /// `sqlx::Query` is not `Debug`, so `unwrap_err` is unavailable.
-    fn build_error<DB: Database>(splice: Splice<'_, DB>) -> Error
+    fn build_error<DB: Database>(builder: QueryBuilder<'_, DB>) -> Error
     where
         DB::Arguments: IntoArguments<DB>,
     {
-        match splice.build() {
+        match builder.build() {
             Err(error) => error,
-            Ok(_) => panic!("expected the splice to fail"),
+            Ok(_) => panic!("expected the build to fail"),
         }
     }
 
@@ -430,7 +430,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .splice()
+            .builder()
             .bind(7_i64)
             .bind(50_i64)
             .fill("predicate", &fragment("reads > ", 100))
@@ -450,7 +450,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .splice()
+            .builder()
             .bind(7_i64)
             .bind(50_i64)
             .fill("predicate", &QueryFragment::<Postgres, i64>::new())
@@ -468,7 +468,7 @@ mod tests {
         let template =
             QueryTemplate::<Postgres>::parse("SELECT 1 ORDER BY /* query.order , */ id").unwrap();
 
-        let sql = template.splice().fill("order", &text("title DESC")).sql();
+        let sql = template.builder().fill("order", &text("title DESC")).sql();
 
         assert_eq!(sql, "SELECT 1 ORDER BY title DESC , id");
     }
@@ -478,7 +478,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .splice()
+            .builder()
             .bind(7_i64)
             .bind(50_i64)
             .slot("predicate", |slot| {
@@ -496,7 +496,7 @@ mod tests {
     fn an_unknown_slot_names_the_ones_that_exist() {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
-        let error = build_error(template.splice().fill("filter", &text("x")));
+        let error = build_error(template.builder().fill("filter", &text("x")));
 
         let message = format!("{error}");
         assert!(message.contains("`filter`"), "{message}");
@@ -513,7 +513,7 @@ mod tests {
 
         let error = build_error(
             template
-                .splice()
+                .builder()
                 .fill("predicate", &text("reads > 1"))
                 .bind(7_i64),
         );
@@ -527,7 +527,7 @@ mod tests {
 
         let error = build_error(
             template
-                .splice()
+                .builder()
                 .fill("order", &text("id ASC"))
                 .fill("predicate", &text("reads > 1")),
         );
@@ -545,7 +545,7 @@ mod tests {
 
         let error = build_error(
             template
-                .splice()
+                .builder()
                 .bind(50_i64)
                 .fill("predicate", &text("reads > 1")),
         );
@@ -560,7 +560,7 @@ mod tests {
         let template =
             QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.predicate */ LIMIT ?").unwrap();
 
-        assert_eq!(template.splice().bind(50_i64).sql(), "SELECT 1  LIMIT ?");
+        assert_eq!(template.builder().bind(50_i64).sql(), "SELECT 1  LIMIT ?");
     }
 
     /// Numbered placeholders name a bound value, not a position, so the same
@@ -572,7 +572,7 @@ mod tests {
                 .unwrap();
 
         let sql = template
-            .splice()
+            .builder()
             .bind(50_i64)
             .fill("predicate", &fragment("reads > ", 1))
             .sql();
@@ -589,7 +589,7 @@ mod tests {
                 .unwrap();
 
         let sql = template
-            .splice()
+            .builder()
             .fill("predicate", &text("reads > 1"))
             .sql();
 
@@ -603,7 +603,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .splice()
+            .builder()
             .fill("order", &text("id ASC"))
             .fill("predicate", &fragment("reads > ", 1))
             .bind(7_i64)

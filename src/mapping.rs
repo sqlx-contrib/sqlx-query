@@ -81,18 +81,18 @@ impl Column {
 /// The allow-list.
 ///
 /// Fail-closed: a path this returns `None` for is rejected, so an unconfigured
-/// schema exposes nothing rather than everything.
+/// mapping exposes nothing rather than everything.
 ///
 /// `path` arrives already split on `.`, so a request naming `author.name` is
 /// asked about `["author", "name"]`. Flattening that to one column, mapping it
 /// to a JSON extraction, or refusing it are all yours to decide.
 ///
-/// [`Table`] covers the static case. Anything decided per request -- per-tenant
+/// [`QueryMapping`] covers the static case. Anything decided per request -- per-tenant
 /// visibility, a permission check, a column only some callers may sort on -- is
 /// a closure:
 ///
 /// ```
-/// use sqlx_query::{Column, ColumnType, Schema};
+/// use sqlx_query::{Column, ColumnType, Mapping};
 ///
 /// let admin = false;
 /// let visible = |path: &[&str]| match path {
@@ -104,43 +104,43 @@ impl Column {
 /// assert!(visible.resolve(&["id"]).is_some());
 /// assert!(visible.resolve(&["salary"]).is_none());
 /// ```
-pub trait Schema {
+pub trait Mapping {
     /// Resolve a request path to a column, or `None` to reject it.
     fn resolve(&self, path: &[&str]) -> Option<Column>;
 }
 
-/// Note this rules out a blanket `impl Schema for &S`: `&F` is itself `Fn` when
+/// Note this rules out a blanket `impl Mapping for &S`: `&F` is itself `Fn` when
 /// `F` is, so the two would overlap. Since the API takes `&S` everywhere, the
-/// forwarding impl only ever mattered to a caller holding a `&Table` who wanted
+/// forwarding impl only ever mattered to a caller holding a `&QueryMapping` who wanted
 /// `S` to be the reference itself.
-impl<F: Fn(&[&str]) -> Option<Column>> Schema for F {
+impl<F: Fn(&[&str]) -> Option<Column>> Mapping for F {
     fn resolve(&self, path: &[&str]) -> Option<Column> {
         self(path)
     }
 }
 
-/// A [`Schema`] built from an explicit list of columns.
+/// A [`Mapping`] built from an explicit list of columns.
 ///
 /// ```
-/// use sqlx_query::{Column, ColumnType, Table};
+/// use sqlx_query::{Column, ColumnType, QueryMapping};
 ///
-/// let volumes = Table::new()
+/// let volumes = QueryMapping::new()
 ///     .key("id", ColumnType::Int)
 ///     .column("title", ColumnType::Text)
 ///     .add("readCount", Column::new("read_count", ColumnType::Int));
 /// ```
 ///
 /// The request-facing name is on the left and the [`Column`] on the right,
-/// which is the same shape as [`Schema::resolve`] and leaves no doubt about
+/// which is the same shape as [`Mapping::resolve`] and leaves no doubt about
 /// which spelling is which. Attributes belong to the `Column`, so a key that is
 /// also aliased is `add("id", Column::key("volume_id", ..))` rather than a
 /// fourth method.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Table {
+pub struct QueryMapping {
     columns: BTreeMap<String, Column>,
 }
 
-impl Table {
+impl QueryMapping {
     /// An empty table. Every path is rejected until one is added.
     #[must_use]
     pub fn new() -> Self {
@@ -171,7 +171,7 @@ impl Table {
     }
 }
 
-impl Schema for Table {
+impl Mapping for QueryMapping {
     fn resolve(&self, path: &[&str]) -> Option<Column> {
         self.columns.get(&path.join(".")).cloned()
     }
@@ -183,12 +183,13 @@ mod tests {
 
     #[test]
     fn an_empty_table_resolves_nothing() {
-        assert!(Table::new().resolve(&["id"]).is_none());
+        assert!(QueryMapping::new().resolve(&["id"]).is_none());
     }
 
     #[test]
     fn a_field_may_be_spelled_differently_from_its_column() {
-        let table = Table::new().add("readCount", Column::new("read_count", ColumnType::Int));
+        let table =
+            QueryMapping::new().add("readCount", Column::new("read_count", ColumnType::Int));
 
         assert_eq!(table.resolve(&["readCount"]).unwrap().name, "read_count");
         assert!(table.resolve(&["read_count"]).is_none());
@@ -198,7 +199,7 @@ mod tests {
     /// spells differently from the database.
     #[test]
     fn a_key_may_also_be_aliased() {
-        let table = Table::new().add("id", Column::key("volume_id", ColumnType::Int));
+        let table = QueryMapping::new().add("id", Column::key("volume_id", ColumnType::Int));
         let column = table.resolve(&["id"]).unwrap();
 
         assert_eq!(column.name, "volume_id");
@@ -207,7 +208,8 @@ mod tests {
 
     #[test]
     fn a_nested_path_resolves_by_its_dotted_name() {
-        let table = Table::new().add("author.name", Column::new("author_name", ColumnType::Text));
+        let table =
+            QueryMapping::new().add("author.name", Column::new("author_name", ColumnType::Text));
 
         assert_eq!(
             table.resolve(&["author", "name"]).unwrap().name,
@@ -218,7 +220,7 @@ mod tests {
 
     #[test]
     fn only_key_marks_a_column_unique() {
-        let table = Table::new()
+        let table = QueryMapping::new()
             .key("id", ColumnType::Int)
             .column("title", ColumnType::Text);
 
