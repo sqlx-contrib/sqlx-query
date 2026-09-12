@@ -5,7 +5,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use sqlx::database::Database;
-use sqlx_query_core::Piece;
+use sqlx_query_core::Slot;
 
 use crate::builder::QueryBuilder;
 use crate::error::Error;
@@ -41,7 +41,9 @@ use crate::error::Error;
 /// [`skeleton`](Self::skeleton) gives you that statement with the sentinels
 /// removed, for exactly those uses.
 pub struct QueryTemplate<DB> {
-    pieces: Cow<'static, [Piece]>,
+    /// Literal SQL around the slots, always one longer than `slots`.
+    texts: Cow<'static, [&'static str]>,
+    slots: Cow<'static, [Slot]>,
     skeleton: Cow<'static, str>,
     /// Where the first `?` that follows a slot is, if there is one.
     ///
@@ -70,7 +72,8 @@ impl<DB> QueryTemplate<DB> {
         })?;
 
         Ok(Self {
-            pieces: Cow::Owned(skeleton.pieces),
+            texts: Cow::Owned(skeleton.texts),
+            slots: Cow::Owned(skeleton.slots),
             skeleton: Cow::Owned(skeleton.sql),
             late_placeholder: skeleton.late_placeholder,
             database: PhantomData,
@@ -86,11 +89,13 @@ impl<DB> QueryTemplate<DB> {
     #[must_use]
     pub const fn from_parts(
         skeleton: &'static str,
-        pieces: &'static [Piece],
+        texts: &'static [&'static str],
+        slots: &'static [Slot],
         late_placeholder: Option<usize>,
     ) -> Self {
         Self {
-            pieces: Cow::Borrowed(pieces),
+            texts: Cow::Borrowed(texts),
+            slots: Cow::Borrowed(slots),
             skeleton: Cow::Borrowed(skeleton),
             late_placeholder,
             database: PhantomData,
@@ -108,14 +113,11 @@ impl<DB> QueryTemplate<DB> {
 
     /// Every slot this skeleton declares, in the order they appear.
     pub fn slots(&self) -> impl Iterator<Item = &str> {
-        self.pieces.iter().filter_map(|piece| match piece {
-            Piece::Slot(slot) => Some(slot.name),
-            Piece::Text(_) => None,
-        })
+        self.slots.iter().map(|slot| slot.name)
     }
 
-    pub(crate) fn pieces(&self) -> &[Piece] {
-        &self.pieces
+    pub(crate) fn parts(&self) -> (&[&'static str], &[Slot]) {
+        (&self.texts, &self.slots)
     }
 
     pub(crate) fn late_placeholder(&self) -> Option<usize> {
@@ -134,7 +136,8 @@ impl<DB: Database> QueryTemplate<DB> {
 impl<DB> Clone for QueryTemplate<DB> {
     fn clone(&self) -> Self {
         Self {
-            pieces: self.pieces.clone(),
+            texts: self.texts.clone(),
+            slots: self.slots.clone(),
             skeleton: self.skeleton.clone(),
             late_placeholder: self.late_placeholder,
             database: PhantomData,
@@ -162,14 +165,10 @@ mod tests {
     fn slots_of(sql: &'static str) -> Vec<(String, String, bool)> {
         Template::parse(sql)
             .unwrap()
-            .pieces()
+            .parts()
+            .1
             .iter()
-            .filter_map(|piece| match piece {
-                Piece::Slot(slot) => {
-                    Some((slot.name.to_string(), slot.joiner.to_string(), slot.before))
-                }
-                Piece::Text(_) => None,
-            })
+            .map(|slot| (slot.name.to_owned(), slot.joiner.to_owned(), slot.before))
             .collect()
     }
 

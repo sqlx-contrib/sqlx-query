@@ -106,7 +106,7 @@ mod sort;
 mod template;
 mod value;
 
-pub use builder::{QueryBuilder, Slot};
+pub use builder::{QueryBuilder, SlotBuilder};
 pub use cursor::{Cursor, CursorKey};
 pub use dialect::Dialect;
 pub use error::Error;
@@ -125,7 +125,7 @@ pub use sqlx_query_macros::sql;
 /// Reached only by the [`sql!`] macro's output.
 #[doc(hidden)]
 pub mod __private {
-    pub use sqlx_query_core::{Piece, Slot};
+    pub use sqlx_query_core::Slot;
 }
 pub use template::QueryTemplate;
 pub use value::Value;

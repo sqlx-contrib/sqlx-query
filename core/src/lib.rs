@@ -11,19 +11,10 @@
 /// The marker that makes a comment a sentinel rather than a comment.
 const MARKER: &str = "query.";
 
-/// One piece of a parsed skeleton.
+/// A named gap a fragment goes into, as a sentinel declared it.
 ///
 /// Borrowed throughout, so the `sql!` macro can build these in a `const` while
 /// [`scan`] builds the same ones at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Piece {
-    /// Literal SQL, reproduced verbatim.
-    Text(&'static str),
-    /// A place a fragment goes.
-    Slot(Slot),
-}
-
-/// What a sentinel declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slot {
     /// The identifier after `query.`.
@@ -36,10 +27,17 @@ pub struct Slot {
 }
 
 /// What a skeleton turned out to be.
+///
+/// Text and gaps, interleaved: `texts[0]`, `slots[0]`, `texts[1]`, and so on,
+/// with `texts` always one longer. The same shape a `QueryFragment` has, for
+/// the same reason -- both are literal SQL around holes, and both render by
+/// walking the two together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skeleton {
-    /// The pieces, in order.
-    pub pieces: Vec<Piece>,
+    /// The literal SQL around the slots. Always `slots.len() + 1` of them.
+    pub texts: Vec<&'static str>,
+    /// The gaps, in order.
+    pub slots: Vec<Slot>,
     /// The same text with every sentinel removed: a legal statement.
     pub sql: String,
     /// Where the first `?` that follows a slot is, if there is one.
@@ -91,7 +89,8 @@ impl std::error::Error for Error {}
 /// declared twice.
 pub fn scan(sql: &'static str) -> Result<Skeleton, Error> {
     let bytes = sql.as_bytes();
-    let mut pieces = Vec::new();
+    let mut texts = Vec::new();
+    let mut slots = Vec::new();
     let mut skeleton = String::with_capacity(sql.len());
     let mut names: Vec<&'static str> = Vec::new();
 
@@ -131,12 +130,13 @@ pub fn scan(sql: &'static str) -> Result<Skeleton, Error> {
                     }
                     names.push(slot.name);
 
+                    // Pushed even when empty: the two lists are read in step,
+                    // so every slot needs the text that precedes it.
                     let text = &sql[text_start..at];
-                    if !text.is_empty() {
-                        pieces.push(Piece::Text(text));
-                        skeleton.push_str(text);
-                    }
-                    pieces.push(Piece::Slot(slot));
+                    texts.push(text);
+                    skeleton.push_str(text);
+
+                    slots.push(slot);
                     seen_slot = true;
                     text_start = end;
                 }
@@ -148,13 +148,12 @@ pub fn scan(sql: &'static str) -> Result<Skeleton, Error> {
     }
 
     let text = &sql[text_start..];
-    if !text.is_empty() {
-        pieces.push(Piece::Text(text));
-        skeleton.push_str(text);
-    }
+    texts.push(text);
+    skeleton.push_str(text);
 
     Ok(Skeleton {
-        pieces,
+        texts,
+        slots,
         sql: skeleton,
         late_placeholder,
     })

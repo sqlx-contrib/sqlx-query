@@ -10,7 +10,7 @@ use sqlx::{Arguments, AssertSqlSafe, FromRow, IntoArguments};
 
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use sqlx_query_core::{Piece, Slot as SlotSpec};
+use sqlx_query_core::Slot;
 
 use crate::template::QueryTemplate;
 
@@ -57,11 +57,7 @@ pub struct QueryBuilder<'t, DB: Database> {
 
 impl<'t, DB: Database> QueryBuilder<'t, DB> {
     pub(crate) fn new(template: &'t QueryTemplate<DB>) -> Self {
-        let slots = template
-            .pieces()
-            .iter()
-            .filter(|piece| matches!(piece, Piece::Slot(_)))
-            .count();
+        let slots = template.parts().1.len();
 
         Self {
             template,
@@ -137,11 +133,11 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
 
     /// Build a slot by hand, for SQL no producer makes.
     ///
-    /// The closure gets a [`Slot`], which binds straight into this query's
+    /// The closure gets a [`SlotBuilder`], which binds straight into this query's
     /// argument list -- so its placeholders continue the numbering rather than
     /// restarting.
     #[must_use]
-    pub fn slot(mut self, name: &str, build: impl FnOnce(&mut Slot<'_, DB>)) -> Self {
+    pub fn slot(mut self, name: &str, build: impl FnOnce(&mut SlotBuilder<'_, DB>)) -> Self {
         let Some((index, spec)) = self.find(name) else {
             return self.unknown(name);
         };
@@ -151,7 +147,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
         }
 
         let mut body = String::new();
-        build(&mut Slot {
+        build(&mut SlotBuilder {
             sql: &mut body,
             arguments: &mut self.arguments,
             error: &mut self.error,
@@ -167,17 +163,16 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     /// The SQL as it currently stands, for tests and tracing.
     #[must_use]
     pub fn sql(&self) -> String {
+        let (texts, _) = self.template.parts();
         let mut sql = String::with_capacity(self.template.skeleton().len());
-        let mut index = 0;
 
-        for piece in self.template.pieces() {
-            match piece {
-                Piece::Text(text) => sql.push_str(text),
-                Piece::Slot(_) => {
-                    sql.push_str(&self.filled[index]);
-                    index += 1;
-                }
-            }
+        for (text, filled) in texts.iter().zip(&self.filled) {
+            sql.push_str(text);
+            sql.push_str(filled);
+        }
+
+        if let Some(last) = texts.last() {
+            sql.push_str(last);
         }
 
         sql
@@ -235,17 +230,14 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     }
 
     /// Locate a slot by name, cloning its spec so the borrow ends here.
-    fn find(&self, name: &str) -> Option<(usize, SlotSpec)> {
+    fn find(&self, name: &str) -> Option<(usize, Slot)> {
         self.template
-            .pieces()
+            .parts()
+            .1
             .iter()
-            .filter_map(|piece| match piece {
-                Piece::Slot(spec) => Some(spec),
-                Piece::Text(_) => None,
-            })
             .enumerate()
-            .find(|(_, spec)| spec.name == name)
-            .map(|(index, spec)| (index, *spec))
+            .find(|(_, slot)| slot.name == name)
+            .map(|(index, slot)| (index, *slot))
     }
 
     /// A fill out of skeleton order is only safe where placeholders are
@@ -267,7 +259,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     /// Nothing is padded on the outside: the skeleton already has whatever
     /// whitespace surrounded the comment, and adding more would only show up in
     /// logs. Repeated fills are separated here, because nothing else will.
-    fn attach(&mut self, index: usize, spec: &SlotSpec, body: &str) {
+    fn attach(&mut self, index: usize, spec: &Slot, body: &str) {
         if !self.numbered
             && let Some(offset) = self.template.late_placeholder()
         {
@@ -330,13 +322,13 @@ impl<DB: Database> fmt::Debug for QueryBuilder<'_, DB> {
 ///
 /// Binds go straight into the query's argument list, so placeholders continue
 /// its numbering. Obtained from [`QueryBuilder::slot`].
-pub struct Slot<'a, DB: Database> {
+pub struct SlotBuilder<'a, DB: Database> {
     sql: &'a mut String,
     arguments: &'a mut DB::Arguments,
     error: &'a mut Option<Error>,
 }
 
-impl<DB: Database> Slot<'_, DB> {
+impl<DB: Database> SlotBuilder<'_, DB> {
     /// Append literal SQL. Not escaped: never pass untrusted input.
     pub fn push(&mut self, sql: impl fmt::Display) -> &mut Self {
         use fmt::Write;
@@ -368,9 +360,11 @@ impl<DB: Database> Slot<'_, DB> {
     }
 }
 
-impl<DB: Database> fmt::Debug for Slot<'_, DB> {
+impl<DB: Database> fmt::Debug for SlotBuilder<'_, DB> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Slot").field("sql", &self.sql).finish()
+        f.debug_struct("SlotBuilder")
+            .field("sql", &self.sql)
+            .finish()
     }
 }
 

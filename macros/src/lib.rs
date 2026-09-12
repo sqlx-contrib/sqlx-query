@@ -46,19 +46,16 @@ pub fn sql(input: TokenStream) -> TokenStream {
 }
 
 fn skeleton_tokens(skeleton: &sqlx_query_core::Skeleton) -> TokenStream2 {
-    let pieces = skeleton.pieces.iter().map(|piece| match piece {
-        sqlx_query_core::Piece::Text(text) => quote! {
-            ::sqlx_query::__private::Piece::Text(#text)
-        },
-        sqlx_query_core::Piece::Slot(slot) => {
-            let (name, joiner, before) = (slot.name, slot.joiner, slot.before);
+    let texts = skeleton.texts.iter();
 
-            quote! {
-                ::sqlx_query::__private::Piece::Slot(::sqlx_query::__private::Slot {
-                    name: #name,
-                    joiner: #joiner,
-                    before: #before,
-                })
+    let slots = skeleton.slots.iter().map(|slot| {
+        let (name, joiner, before) = (slot.name, slot.joiner, slot.before);
+
+        quote! {
+            ::sqlx_query::__private::Slot {
+                name: #name,
+                joiner: #joiner,
+                before: #before,
             }
         }
     });
@@ -71,6 +68,11 @@ fn skeleton_tokens(skeleton: &sqlx_query_core::Skeleton) -> TokenStream2 {
     };
 
     quote! {
-        ::sqlx_query::QueryTemplate::from_parts(#sql, &[#(#pieces),*], #late)
+        ::sqlx_query::QueryTemplate::from_parts(
+            #sql,
+            &[#(#texts),*],
+            &[#(#slots),*],
+            #late,
+        )
     }
 }
