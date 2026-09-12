@@ -34,8 +34,8 @@ holes can do.
 ## Status
 
 Early, but complete enough to use. Templates, the scanner, fragments and
-splices; the schema, bind values and dialects; sorting, keyset pagination, and
-CEL filters behind the `cel` feature. The `sql!` macro is not yet, and nothing
+splices; the schema, bind values and dialects; sorting, keyset pagination via
+`Cursor::seek`, and CEL filters behind the `cel` feature. The `sql!` macro is not yet, and nothing
 has been run against a real database. The rationale lives with the code — `cargo doc --open` — rather than here.
 
 ## Two things worth knowing

@@ -5,6 +5,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
 use chrono::{TimeZone as _, Utc};
 
 use crate::error::Error;
+use crate::predicate::Predicate;
 use crate::sort::{Direction, Sort, SortKey};
 use crate::value::Value;
 
@@ -155,8 +156,62 @@ impl Cursor {
         self.keys.is_empty()
     }
 
+    /// Reconcile this position with the ordering a request asks for.
+    ///
+    /// Returns the ordering to page by -- this cursor's, if the request asked
+    /// for none -- and the condition selecting rows after this position. Both
+    /// come out of one call so they cannot be derived from different orderings.
+    ///
+    /// # Why not `OFFSET`
+    ///
+    /// An offset counts rows the database has to produce and discard, so the
+    /// last page of a long list costs the most, and a row inserted or deleted
+    /// between pages shifts everything after it. Seeking asks for the rows
+    /// *after a specific row*, which is a range scan and is stable under
+    /// concurrent writes. The price is that the ordering has to be total: see
+    /// [`Sort::tiebreak`].
+    ///
+    /// # Four cases, one of them an error
+    ///
+    /// * No position -- the first page. The ordering is used as given, and the
+    ///   condition is empty, so the slot it would fill disappears.
+    /// * A position, and no ordering asked for. This cursor's is adopted: a
+    ///   client that sends `order_by` once and then only `page_token` has not
+    ///   asked for anything different.
+    /// * Both, and they agree.
+    /// * Both, and they disagree. Refused.
+    ///
+    /// That last case is why the ordering is in the token at all. Reusing a
+    /// token under a reversed `order_by` does not page backwards -- it flips
+    /// the comparison and hands back rows the client has already seen, with no
+    /// error anywhere. Refusing is the only outcome that says what to fix.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Cursor`] if this token was issued under a different ordering.
+    pub fn seek(&self, sort: Sort) -> Result<(Sort, Predicate), Error> {
+        if self.is_empty() {
+            return Ok((sort, Predicate::empty()));
+        }
+
+        let recorded = self.sort();
+        let predicate = Predicate::cursor(self.keys.clone());
+
+        if sort.is_empty() {
+            return Ok((recorded, predicate));
+        }
+
+        if sort != recorded {
+            return Err(Error::Cursor(format!(
+                "issued for `{recorded}`, but this request asks for `{sort}`"
+            )));
+        }
+
+        Ok((sort, predicate))
+    }
+
     /// The ordering this token was issued under.
-    pub(crate) fn sort(&self) -> Sort {
+    fn sort(&self) -> Sort {
         self.keys.iter().map(|key| key.key.clone()).collect()
     }
 }
@@ -418,6 +473,53 @@ mod tests {
         let wrong_version = BASE64.encode([99_u8, 0, 0, 0, 0, 1, b'a']);
         let error = Cursor::parse(&wrong_version).unwrap_err();
         assert!(format!("{error}").contains("version 99"), "{error}");
+    }
+
+    #[test]
+    fn the_first_page_has_no_condition() {
+        let (_, predicate) = Cursor::empty().seek(Sort::parse("title").unwrap()).unwrap();
+
+        assert!(predicate.is_empty());
+    }
+
+    /// A client that pages under one order and then asks for another gets an
+    /// error rather than a page of rows it has already seen.
+    #[test]
+    fn a_token_from_a_different_order_is_refused() {
+        let issued = Sort::parse("title asc").unwrap().tiebreak("id");
+        let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
+
+        let asked = Sort::parse("title desc").unwrap().tiebreak("id");
+        let error = cursor.seek(asked).unwrap_err();
+
+        let message = format!("{error}");
+        assert!(message.contains("title asc"), "{message}");
+        assert!(message.contains("title desc"), "{message}");
+    }
+
+    /// A client that sends `order_by` once and then only `page_token` has not
+    /// asked for anything different.
+    #[test]
+    fn an_absent_order_by_adopts_the_token_s_own() {
+        let issued = Sort::parse("title desc").unwrap().tiebreak("id");
+        let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
+
+        let (sort, predicate) = cursor.seek(Sort::new()).unwrap();
+
+        assert_eq!(sort, issued);
+        assert!(!predicate.is_empty());
+    }
+
+    /// The ordering that renders the ORDER BY and the one the condition is
+    /// built from come out of the same call, so they cannot disagree.
+    #[test]
+    fn an_agreeing_order_is_returned_unchanged() {
+        let issued = Sort::parse("title desc").unwrap().tiebreak("id");
+        let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
+
+        let (sort, _) = cursor.seek(issued.clone()).unwrap();
+
+        assert_eq!(sort, issued);
     }
 
     /// A URL is where these end up, so the alphabet matters.

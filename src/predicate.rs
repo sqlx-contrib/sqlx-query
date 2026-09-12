@@ -195,7 +195,6 @@ mod tests {
 
     use super::*;
     use crate::cursor::Cursor;
-    use crate::keyset::Keyset;
     use crate::schema::{Column, ColumnType, Table};
 
     fn volumes() -> Table {
@@ -209,7 +208,7 @@ mod tests {
         let sort = Sort::parse(order_by).unwrap().tiebreak("id");
         let cursor = Cursor::new(&sort, values).unwrap();
 
-        Keyset::new(sort, cursor).unwrap().predicate()
+        cursor.seek(sort).unwrap().1
     }
 
     #[test]
@@ -258,10 +257,11 @@ mod tests {
     fn a_sort_with_no_unique_column_cannot_paginate() {
         let sort = Sort::parse("title").unwrap();
         let cursor = Cursor::new(&sort, &[Value::Text("Dune".into())]).unwrap();
-        let keyset = Keyset::new(sort, cursor).unwrap();
 
-        let error = keyset
-            .predicate()
+        let error = cursor
+            .seek(sort)
+            .unwrap()
+            .1
             .to_fragment::<Postgres, _>(&volumes())
             .unwrap_err();
 
@@ -283,10 +283,11 @@ mod tests {
     fn a_value_of_the_wrong_type_for_its_column_is_rejected() {
         let sort = Sort::parse("id").unwrap();
         let cursor = Cursor::new(&sort, &[Value::Text("not an id".into())]).unwrap();
-        let keyset = Keyset::new(sort, cursor).unwrap();
 
-        let error = keyset
-            .predicate()
+        let error = cursor
+            .seek(sort)
+            .unwrap()
+            .1
             .to_fragment::<Postgres, _>(&volumes())
             .unwrap_err();
 
