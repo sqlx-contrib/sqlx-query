@@ -17,5 +17,6 @@ workspace = true
 
 [dependencies]
 proc-macro2 = "1"
+sqlx-query-core = { version = "0.0.0", path = "../core" }
 quote = "1"
 syn = { version = "2", features = ["full"] }

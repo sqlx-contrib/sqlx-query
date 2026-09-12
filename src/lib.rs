@@ -4,16 +4,16 @@
 //! ```
 //! # #[cfg(all(feature = "postgres", feature = "cel"))] {
 //! use sqlx::Postgres;
-//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table};
+//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, sql};
 //!
 //! // The query you already wrote. The sentinels are comments, so this is a
 //! // statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
 //! // `sqlx::query!` to be checked against a live database.
-//! let volumes = QueryTemplate::<Postgres>::parse(
+//! static VOLUMES: QueryTemplate<Postgres> = sql!(
 //!     "SELECT id, title, read_count FROM volumes \
 //!      WHERE tenant_id = $1 /* AND query.predicate */ \
-//!      /* ORDER BY query.order */ LIMIT $2",
-//! )?;
+//!      /* ORDER BY query.order */ LIMIT $2"
+//! );
 //!
 //! // The allow-list. A field not named here is rejected, not passed through.
 //! let schema = Table::new()
@@ -30,7 +30,7 @@
 //! let cursor = Cursor::parse("")?;
 //! cursor.validate(&sort)?;
 //!
-//! let query = volumes
+//! let query = VOLUMES
 //!     .splice()
 //!     .bind(7_i64)   // $1, the tenant
 //!     .bind(50_i64)  // $2, the page size
@@ -124,5 +124,16 @@ pub use splice::{Slot, Splice};
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use sqlx_query_macros::Schema;
+/// Parse a skeleton at compile time, so a malformed sentinel is a compile
+/// error and a skeleton can live in a `static`.
+#[cfg(feature = "macros")]
+#[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
+pub use sqlx_query_macros::sql;
+
+/// Reached only by the [`sql!`] macro's output.
+#[doc(hidden)]
+pub mod __private {
+    pub use sqlx_query_core::{Piece, Slot};
+}
 pub use template::QueryTemplate;
 pub use value::Value;

@@ -1,0 +1,15 @@
+[package]
+name = "sqlx-query-core"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+description = "Skeleton scanning shared by sqlx-query and its macros."
+repository = "https://github.com/sqlx-contrib/sqlx-query"
+keywords = ["sqlx", "sql", "query"]
+categories = ["database"]
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -126,13 +126,3 @@ impl std::error::Error for Error {
         }
     }
 }
-
-impl Error {
-    /// Shorthand for the common `Template` case.
-    pub(crate) fn template(message: impl Into<String>, offset: usize) -> Self {
-        Self::Template {
-            message: message.into(),
-            offset,
-        }
-    }
-}

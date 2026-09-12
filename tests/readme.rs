@@ -2,7 +2,7 @@
 #![cfg(all(feature = "cel", feature = "postgres"))]
 
 use sqlx::Postgres;
-use sqlx_query::{Cursor, Filter, QueryTemplate, Sort};
+use sqlx_query::{Cursor, Filter, QueryTemplate, Sort, sql};
 
 struct Request {
     filter: String,
@@ -19,6 +19,15 @@ struct Volume {
     read_count: i64,
 }
 
+static VOLUMES: QueryTemplate<Postgres> = sql!(
+    "SELECT id, title, read_count
+       FROM volumes
+      WHERE tenant_id = $1
+        /* AND query.predicate */
+      /* ORDER BY query.order */
+      LIMIT $2"
+);
+
 /// A token issued by an earlier build for `title desc, id asc` at
 /// ("Dune", 4711). Pinned so a change to the encoding shows up here: clients
 /// persist these across deploys, and drifting silently would break live
@@ -34,22 +43,13 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     };
     let (tenant_id, page_size) = (7_i64, 50_i64);
 
-    let volumes = QueryTemplate::<Postgres>::parse(
-        "SELECT id, title, read_count
-       FROM volumes
-      WHERE tenant_id = $1
-        /* AND query.predicate */
-      /* ORDER BY query.order */
-      LIMIT $2",
-    )?;
-
     let filter = Filter::parse(&request.filter)?;
     let sort = Sort::parse(&request.order_by)?.asc("id");
     let cursor = Cursor::parse(&request.page_token)?;
 
     cursor.validate(&sort)?;
 
-    let query = volumes
+    let query = VOLUMES
         .splice()
         .bind(tenant_id)
         .bind(page_size)
@@ -73,7 +73,7 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     let resumed = Cursor::parse(TOKEN)?;
     resumed.validate(&sort)?;
 
-    let second = volumes
+    let second = VOLUMES
         .splice()
         .bind(tenant_id)
         .bind(page_size)

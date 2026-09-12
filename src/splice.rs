@@ -10,7 +10,9 @@ use sqlx::{Arguments, AssertSqlSafe, FromRow, IntoArguments};
 
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::template::{Piece, QueryTemplate, SlotSpec};
+use sqlx_query_core::{Piece, Slot as SlotSpec};
+
+use crate::template::QueryTemplate;
 
 /// A template being filled in.
 ///
@@ -243,7 +245,7 @@ impl<'t, DB: Database> Splice<'t, DB> {
             })
             .enumerate()
             .find(|(_, spec)| spec.name == name)
-            .map(|(index, spec)| (index, spec.clone()))
+            .map(|(index, spec)| (index, *spec))
     }
 
     /// A fill out of skeleton order is only safe where placeholders are
@@ -288,13 +290,13 @@ impl<'t, DB: Database> Splice<'t, DB> {
         if spec.joiner.is_empty() {
             slot.push_str(body);
         } else if spec.before {
-            slot.push_str(&spec.joiner);
+            slot.push_str(spec.joiner);
             slot.push(' ');
             slot.push_str(body);
         } else {
             slot.push_str(body);
             slot.push(' ');
-            slot.push_str(&spec.joiner);
+            slot.push_str(spec.joiner);
         }
     }
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["macros"]
+members = ["core", "macros"]
 
 # Shared by both crates: a lint this one tolerates is a lint its consumers
 # cannot, and several in this ecosystem deny pedantic at the workspace level.
@@ -43,12 +43,13 @@ base64 = "0.22"
 cel = { version = "0.14", default-features = false, features = [
   "chrono",
 ], optional = true }
+sqlx-query-core = { version = "0.0.0", path = "core" }
 sqlx-query-macros = { version = "0.0.0", path = "macros", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false }
 
 [features]
-default = ["postgres", "derive"]
+default = ["postgres", "derive", "macros"]
 
 # Driver support. At least one is required: without a driver there is no
 # `Arguments` impl to splice against.
@@ -61,6 +62,9 @@ cel = ["dep:cel"]
 
 # `#[derive(Schema)]`, so a table's allow-list is declared once, on the struct.
 derive = ["dep:sqlx-query-macros"]
+
+# `sql!`, so a skeleton is scanned at compile time and lives in a `static`.
+macros = ["dep:sqlx-query-macros"]
 
 [dev-dependencies]
 sqlx = { version = "0.9", default-features = false, features = [

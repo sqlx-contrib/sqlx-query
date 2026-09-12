@@ -14,19 +14,22 @@ holes can do.
 
 ```rust
 use sqlx::{FromRow, Postgres};
-use sqlx_query::{Cursor, Filter, QueryTemplate, Schema, Sort};
+use sqlx_query::{Cursor, Filter, QueryTemplate, Schema, Sort, sql};
 
 // The query you already wrote. A slot is named for the kind of SQL it holds,
 // not for whoever fills it: one slot takes fragments from several sources,
 // joined by its own `AND`.
-let volumes = QueryTemplate::<Postgres>::parse(
+//
+// `sql!` runs the scanner at compile time, so a mistyped sentinel is a compile
+// error and the skeleton costs nothing at run time.
+static VOLUMES: QueryTemplate<Postgres> = sql!(
     "SELECT id, title, read_count
        FROM volumes
       WHERE tenant_id = $1
         /* AND query.predicate */
       /* ORDER BY query.order */
-      LIMIT $2",
-)?;
+      LIMIT $2"
+);
 
 // The allow-list, and the whole of this crate's type system. Declared rather
 // than reflected: exposing every column in the table is what fail-closed exists
@@ -51,7 +54,7 @@ let cursor = Cursor::parse(&request.page_token)?;
 // otherwise hand back rows the client has already seen, with no error anywhere.
 cursor.validate(&sort)?;
 
-let rows = volumes
+let rows = VOLUMES
     .splice()
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
@@ -81,11 +84,11 @@ The first page, with an empty token:
 
 ```sql
 SELECT id, title, read_count
-   FROM volumes
-  WHERE tenant_id = $1
-    AND ("read_count" > $3 AND "title" LIKE $4 ESCAPE '!')
-  ORDER BY "title" DESC, "id" ASC
-  LIMIT $2
+       FROM volumes
+      WHERE tenant_id = $1
+        AND ("read_count" > $3 AND "title" LIKE $4 ESCAPE '!')
+      ORDER BY "title" DESC, "id" ASC
+      LIMIT $2
 ```
 
 The second, with the token above. Note `LIMIT $2` still means the second bound
@@ -93,12 +96,12 @@ value, even though `$3`–`$7` are spliced ahead of it:
 
 ```sql
 SELECT id, title, read_count
-   FROM volumes
-  WHERE tenant_id = $1
-    AND ("read_count" > $3 AND "title" LIKE $4 ESCAPE '!')
-    AND (("title" < $5) OR ("title" = $6 AND "id" > $7))
-  ORDER BY "title" DESC, "id" ASC
-  LIMIT $2
+       FROM volumes
+      WHERE tenant_id = $1
+        AND ("read_count" > $3 AND "title" LIKE $4 ESCAPE '!')
+        AND (("title" < $5) OR ("title" = $6 AND "id" > $7))
+      ORDER BY "title" DESC, "id" ASC
+      LIMIT $2
 ```
 
 An unfilled or empty slot emits nothing — comment and joiner both — so the first
@@ -153,8 +156,12 @@ cargo test --features cel,sqlite,mysql
 cargo clippy --all-targets --features cel,sqlite,mysql
 ```
 
-The derive lives in `macros/`, a proc-macro crate in the same workspace — proc
-macros cannot live in the crate that exports the types they refer to.
+The workspace has three crates, and the shape is forced rather than chosen.
+Proc macros cannot live in the crate that exports the types they refer to, so
+`macros/` is separate; and `sql!` needs the same scanner `QueryTemplate::parse`
+runs, which cannot live in either — a proc-macro crate can export nothing but
+proc macros, and the macro crate cannot depend on the crate that depends on it.
+So `core/` holds that scanner and nothing else.
 
 Driver-specific tests are gated on their feature. `clippy::all` and
 `clippy::pedantic` are denied rather than warned, because several consumers in
