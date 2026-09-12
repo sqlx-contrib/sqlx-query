@@ -14,7 +14,7 @@ holes can do.
 
 ```rust
 use sqlx::{FromRow, Postgres};
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table};
+use sqlx_query::{Cursor, Filter, QueryTemplate, Schema, Sort};
 
 // The query you already wrote. A slot is named for the kind of SQL it holds,
 // not for whoever fills it: one slot takes fragments from several sources,
@@ -28,13 +28,18 @@ let volumes = QueryTemplate::<Postgres>::parse(
       LIMIT $2",
 )?;
 
-// The allow-list, and the whole of this crate's type system. A field not named
-// here is rejected rather than passed through. `key` marks a unique column,
-// which is what lets a page token identify an exact row.
-let schema = Table::new()
-    .key("id", ColumnType::Int)
-    .column("title", ColumnType::Text)
-    .add("readCount", Column::new("read_count", ColumnType::Int));
+// The allow-list, and the whole of this crate's type system. Declared rather
+// than reflected: exposing every column in the table is what fail-closed exists
+// to prevent. `key` marks a unique column, which is what lets a page token
+// identify an exact row.
+#[derive(FromRow, Schema)]
+#[schema(rename_all = "camelCase")]
+struct Volume {
+    #[schema(key)]
+    id: i64,
+    title: String,
+    read_count: i64,   // exposed to requests as `readCount`
+}
 
 // Request parameters, as the strings they arrive as. Each treats an empty
 // string as "not asked for" rather than as an error.
@@ -50,9 +55,9 @@ let rows = volumes
     .splice()
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
-    .fill("predicate", &filter.to_fragment(&schema)?)
-    .fill("predicate", &cursor.to_fragment(&schema)?)
-    .fill("order", &sort.to_fragment(&schema)?)
+    .fill("predicate", &filter.to_fragment(Volume::schema())?)
+    .fill("predicate", &cursor.to_fragment(Volume::schema())?)
+    .fill("order", &sort.to_fragment(Volume::schema())?)
     .build()?
     .fetch_all(&pool)
     .await?;
@@ -66,7 +71,7 @@ let page: Vec<Volume> = rows.iter().map(Volume::from_row).collect::<Result<_, _>
 // the ordering may be one the client chose at runtime.
 if let Some(last) = rows.last() {
     response.next_page_token = Cursor::new(&sort)
-        .after(last, &schema)?
+        .after(last, Volume::schema())?
         .as_str()
         .to_owned();
 }
@@ -115,6 +120,12 @@ bound value, so text spliced ahead of a `$2` leaves it alone — that is why
 after filling, filling slots out of order, or a skeleton whose own `?` sits
 after a slot — this crate returns an error rather than a wrong answer.
 
+**The schema is declared, not reflected.** `#[derive(Schema)]` puts the
+allow-list on the struct, so the field-to-column mapping cannot drift from the
+fields it describes — but what it exposes is still a choice. A schema generated
+from every column in the table would hand clients the ability to filter and sort
+on anything, which is the thing being guarded against.
+
 **The schema is the type checker.** cel-rust parses without checking, so
 `id > 'tuesday'` is a perfectly good CEL program. The allow-list is the only
 thing that can reject it before the database does, which is why the two are the
@@ -141,6 +152,9 @@ the right one even when the machine's default stable is older than the MSRV.
 cargo test --features cel,sqlite,mysql
 cargo clippy --all-targets --features cel,sqlite,mysql
 ```
+
+The derive lives in `macros/`, a proc-macro crate in the same workspace — proc
+macros cannot live in the crate that exports the types they refer to.
 
 Driver-specific tests are gated on their feature. `clippy::all` and
 `clippy::pedantic` are denied rather than warned, because several consumers in

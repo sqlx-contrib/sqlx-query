@@ -2,13 +2,23 @@
 #![cfg(all(feature = "cel", feature = "postgres"))]
 
 use sqlx::Postgres;
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table};
+use sqlx_query::{Cursor, Filter, QueryTemplate, Sort};
 
 struct Request {
     filter: String,
     order_by: String,
     page_token: String,
 }
+#[allow(dead_code)]
+#[derive(sqlx_query::Schema)]
+#[schema(rename_all = "camelCase")]
+struct Volume {
+    #[schema(key)]
+    id: i64,
+    title: String,
+    read_count: i64,
+}
+
 /// A token issued by an earlier build for `title desc, id asc` at
 /// ("Dune", 4711). Pinned so a change to the encoding shows up here: clients
 /// persist these across deploys, and drifting silently would break live
@@ -33,11 +43,6 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
       LIMIT $2",
     )?;
 
-    let schema = Table::new()
-        .key("id", ColumnType::Int)
-        .column("title", ColumnType::Text)
-        .add("readCount", Column::new("read_count", ColumnType::Int));
-
     let filter = Filter::parse(&request.filter)?;
     let sort = Sort::parse(&request.order_by)?.asc("id");
     let cursor = Cursor::parse(&request.page_token)?;
@@ -48,9 +53,9 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
         .splice()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("predicate", &filter.to_fragment(&schema)?)
-        .fill("predicate", &cursor.to_fragment(&schema)?)
-        .fill("order", &sort.to_fragment(&schema)?);
+        .fill("predicate", &filter.to_fragment(Volume::schema())?)
+        .fill("predicate", &cursor.to_fragment(Volume::schema())?)
+        .fill("order", &sort.to_fragment(Volume::schema())?);
 
     assert_eq!(
         query.sql(),
@@ -72,9 +77,9 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
         .splice()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("predicate", &filter.to_fragment(&schema)?)
-        .fill("predicate", &resumed.to_fragment(&schema)?)
-        .fill("order", &sort.to_fragment(&schema)?);
+        .fill("predicate", &filter.to_fragment(Volume::schema())?)
+        .fill("predicate", &resumed.to_fragment(Volume::schema())?)
+        .fill("order", &sort.to_fragment(Volume::schema())?);
 
     assert_eq!(
         second.sql(),

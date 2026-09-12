@@ -116,5 +116,13 @@ pub use fragment::QueryFragment;
 pub use schema::{Column, ColumnType, Schema, Table};
 pub use sort::{Direction, Sort, SortKey};
 pub use splice::{Slot, Splice};
+/// Declare a table's allow-list on the struct that describes it.
+///
+/// Shares its name with the [`Schema`] trait, as `FromRow` does with its own
+/// derive -- but this one generates an inherent `schema()` returning a
+/// `&'static `[`Table`], rather than an impl.
+#[cfg(feature = "derive")]
+#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
+pub use sqlx_query_macros::Schema;
 pub use template::QueryTemplate;
 pub use value::Value;
