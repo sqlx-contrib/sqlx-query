@@ -167,7 +167,7 @@ impl Cursor {
     /// between pages shifts everything after it. Seeking asks for the rows
     /// *after a specific row*, which is a range scan and is stable under
     /// concurrent writes. The price is that the ordering has to be total: see
-    /// [`Sort::tiebreak`].
+    /// [`Sort::asc`].
     ///
     /// # Four cases, one of them an error
     ///
@@ -279,7 +279,7 @@ fn seek<DB: Dialect, S: Schema>(
 
         return Err(Error::NotUnique(format!(
             "`{sort}` names no unique column, so a page token cannot identify a \
-             row: add one with `Sort::tiebreak`, and declare it with `Table::key`"
+             row: append one with `Sort::asc`, and declare it with `Table::key`"
         )));
     }
 
@@ -585,10 +585,10 @@ mod tests {
     /// error rather than a page of rows it has already seen.
     #[test]
     fn a_token_from_a_different_order_is_refused() {
-        let issued = Sort::parse("title asc").unwrap().tiebreak("id");
+        let issued = Sort::parse("title asc").unwrap().asc("id");
         let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
 
-        let asked = Sort::parse("title desc").unwrap().tiebreak("id");
+        let asked = Sort::parse("title desc").unwrap().asc("id");
         let error = cursor.resume(asked).unwrap_err();
 
         let message = format!("{error}");
@@ -600,7 +600,7 @@ mod tests {
     /// asked for anything different.
     #[test]
     fn an_absent_order_by_adopts_the_token_s_own() {
-        let issued = Sort::parse("title desc").unwrap().tiebreak("id");
+        let issued = Sort::parse("title desc").unwrap().asc("id");
         let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
 
         assert_eq!(cursor.resume(Sort::new()).unwrap(), issued);
@@ -610,7 +610,7 @@ mod tests {
     /// built from come out of the same call, so they cannot disagree.
     #[test]
     fn an_agreeing_order_is_returned_unchanged() {
-        let issued = Sort::parse("title desc").unwrap().tiebreak("id");
+        let issued = Sort::parse("title desc").unwrap().asc("id");
         let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
 
         assert_eq!(cursor.resume(issued.clone()).unwrap(), issued);

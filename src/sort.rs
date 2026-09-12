@@ -161,6 +161,22 @@ impl Sort {
     }
 
     /// Add an ascending key, unless the field is already one.
+    ///
+    /// Appending a unique column is also how a sort is made total, which keyset
+    /// pagination requires: a cursor can only name an exact row if the ordering
+    /// has no ties. Because a field already present is left alone, that append
+    /// is safe to make unconditionally -- a caller who asked for `id desc`
+    /// keeps their direction.
+    ///
+    /// ```
+    /// use sqlx_query::{Direction, Sort};
+    ///
+    /// let sort = Sort::parse("title asc, id desc")?.asc("id");
+    ///
+    /// assert_eq!(sort.keys().len(), 2);
+    /// assert_eq!(sort.keys()[1].direction, Direction::Desc);
+    /// # Ok::<_, sqlx_query::Error>(())
+    /// ```
     #[must_use]
     pub fn asc(self, field: impl Into<String>) -> Self {
         self.push(SortKey::asc(field))
@@ -170,30 +186,6 @@ impl Sort {
     #[must_use]
     pub fn desc(self, field: impl Into<String>) -> Self {
         self.push(SortKey::desc(field))
-    }
-
-    /// Ensure `field` is among the keys, ascending if it is not already there.
-    ///
-    /// This is how a sort is made total, which keyset pagination requires: a
-    /// cursor can only name an exact row if the ordering has no ties. Pass a
-    /// unique column -- the primary key, normally.
-    ///
-    /// Distinct from [`asc`](Self::asc) because the intent is different. `asc`
-    /// adds a key; this guarantees one is present and leaves an existing
-    /// direction alone, so a caller who already asked for `id desc` keeps it.
-    ///
-    /// ```
-    /// use sqlx_query::{Direction, Sort};
-    ///
-    /// let sort = Sort::parse("title asc, id desc")?.tiebreak("id");
-    ///
-    /// assert_eq!(sort.keys().len(), 2);
-    /// assert_eq!(sort.keys()[1].direction, Direction::Desc);
-    /// # Ok::<_, sqlx_query::Error>(())
-    /// ```
-    #[must_use]
-    pub fn tiebreak(self, field: impl Into<String>) -> Self {
-        self.push(SortKey::asc(field))
     }
 
     /// The keys, in order.
@@ -354,15 +346,15 @@ mod tests {
 
     /// The direction the caller asked for is the one they keep.
     #[test]
-    fn tiebreak_leaves_an_existing_direction_alone() {
-        let sort = Sort::parse("title asc, id desc").unwrap().tiebreak("id");
+    fn appending_a_present_field_leaves_its_direction_alone() {
+        let sort = Sort::parse("title asc, id desc").unwrap().asc("id");
 
         assert_eq!(sort.keys(), [SortKey::asc("title"), SortKey::desc("id")]);
     }
 
     #[test]
-    fn tiebreak_appends_when_the_field_is_absent() {
-        let sort = Sort::parse("title asc").unwrap().tiebreak("id");
+    fn appending_an_absent_field_adds_it() {
+        let sort = Sort::parse("title asc").unwrap().asc("id");
 
         assert_eq!(sort.keys(), [SortKey::asc("title"), SortKey::asc("id")]);
     }
