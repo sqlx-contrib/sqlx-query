@@ -98,7 +98,7 @@ impl<DB, T> QueryFragment<DB, T> {
     }
 
     /// The segments and values, for tests in sibling modules.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cel"))]
     pub(crate) fn parts_for_test(&self) -> (&[String], &[T]) {
         self.parts()
     }

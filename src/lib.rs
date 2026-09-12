@@ -77,6 +77,7 @@ mod cursor;
 mod dialect;
 mod error;
 mod fragment;
+#[cfg(feature = "cel")]
 mod predicate;
 mod schema;
 mod sort;
@@ -88,6 +89,8 @@ pub use cursor::{Cursor, CursorKey};
 pub use dialect::Dialect;
 pub use error::Error;
 pub use fragment::QueryFragment;
+#[cfg(feature = "cel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
 pub use predicate::Predicate;
 pub use schema::{Column, ColumnType, Schema, Table};
 pub use sort::{Direction, Sort, SortKey};

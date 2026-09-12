@@ -1,192 +1,88 @@
-//! Boolean expressions, whatever produced them.
+//! Filters a client sent.
 
-use crate::cursor::CursorKey;
-use crate::dialect::{Dialect, quoted};
+use crate::dialect::Dialect;
 use crate::error::Error;
 use crate::fragment::QueryFragment;
 use crate::schema::Schema;
-use crate::sort::{Direction, Sort, resolve};
 use crate::value::Value;
 
-/// A condition, suitable to drop after `WHERE`, after `AND`, into a `HAVING`,
-/// or into a `CHECK`.
+/// A parsed filter expression.
 ///
-/// One type rather than one per source, because everything that fills a
-/// predicate slot is the same kind of thing: a boolean expression over
-/// allow-listed columns. A keyset's seek condition and a filter a client sent
-/// are both this, which is why a `/* AND query.predicate */` slot takes them
-/// both and joins them with its own `AND`.
+/// Renders to a boolean expression, suitable to drop after `WHERE`, after
+/// `AND`, into a `HAVING`, or into a `CHECK` -- which is why a
+/// `/* AND query.predicate */` slot takes one of these and a [`Cursor`]'s seek
+/// condition together, joined by that slot's own `AND`.
 ///
-/// Empty predicates fill nothing at all -- not even the joiner -- so a first
-/// page and an absent filter both simply leave the query as it was written.
+/// [`Cursor`]: crate::Cursor
 #[derive(Debug, Clone)]
 pub struct Predicate {
-    kind: Kind,
-}
-
-#[derive(Debug, Clone)]
-enum Kind {
-    /// Nothing to say.
-    Empty,
-    /// Rows after a keyset position.
-    ///
-    /// The keys carry their own sort keys, so the ordering is not stored
-    /// beside them -- two copies could disagree, and only one of them would be
-    /// the one the comparison is built from.
-    Cursor(Vec<CursorKey>),
-    /// A filter a client sent.
-    #[cfg(feature = "cel")]
-    Filter(cel::common::ast::IdedExpr),
+    expression: Option<cel::common::ast::IdedExpr>,
 }
 
 impl Predicate {
-    /// A condition that contributes nothing.
+    /// A filter that constrains nothing.
+    ///
+    /// Renders to nothing at all, so the slot it fills -- and that slot's
+    /// joiner -- disappear from the query.
     #[must_use]
     pub fn empty() -> Self {
-        Self { kind: Kind::Empty }
+        Self { expression: None }
     }
 
     /// Parse a [CEL] expression.
+    ///
+    /// An empty or all-whitespace string is an empty filter, not an error, to
+    /// match [`Sort::parse`] and [`Cursor::parse`]: a request that did not ask
+    /// to filter should look like one that did not ask to sort.
     ///
     /// The expression is plain CEL, not the [AIP-160] grammar -- AIP is one
     /// caller with a CEL expression and a table, not a requirement.
     ///
     /// Nothing is type-checked here, because cel-rust has no checking phase:
-    /// `1 > 'tuesday'` parses perfectly well. The [`Schema`] is what catches it,
-    /// at [`to_fragment`](Self::to_fragment), which is why the allow-list and
-    /// the type checker are the same object.
+    /// `id > 'tuesday'` parses perfectly well. The [`Schema`] is what catches
+    /// it, at [`to_fragment`](Self::to_fragment), which is why the allow-list
+    /// and the type checker are the same object.
     ///
     /// [CEL]: https://cel.dev
     /// [AIP-160]: https://google.aip.dev/160
+    /// [`Sort::parse`]: crate::Sort::parse
+    /// [`Cursor::parse`]: crate::Cursor::parse
     ///
     /// # Errors
     ///
     /// [`Error::Parse`] for anything the CEL grammar rejects.
-    #[cfg(feature = "cel")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
     pub fn parse(source: &str) -> Result<Self, Error> {
+        if source.trim().is_empty() {
+            return Ok(Self::empty());
+        }
+
         Ok(Self {
-            kind: Kind::Filter(crate::cel::parse(source)?),
+            expression: Some(crate::cel::parse(source)?),
         })
     }
 
-    /// Whether this condition would contribute anything.
+    /// Whether this filter would constrain anything.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        match &self.kind {
-            Kind::Empty => true,
-            Kind::Cursor(keys) => keys.is_empty(),
-            #[cfg(feature = "cel")]
-            Kind::Filter(_) => false,
-        }
+        self.expression.is_none()
     }
 
     /// Render against a schema.
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownColumn`] for a field the schema does not expose, and
-    /// whatever else the particular condition can object to.
+    /// [`Error::UnknownColumn`] for a field the schema does not expose,
+    /// [`Error::TypeMismatch`] for a comparison that cannot work, and
+    /// [`Error::Unsupported`] for a construct with no faithful SQL lowering.
     pub fn to_fragment<DB: Dialect, S: Schema>(
         &self,
         schema: &S,
     ) -> Result<QueryFragment<DB, Value>, Error> {
-        match &self.kind {
-            Kind::Empty => Ok(QueryFragment::new()),
-            Kind::Cursor(keys) => seek(keys, schema),
-            #[cfg(feature = "cel")]
-            Kind::Filter(expr) => crate::cel::render(expr, schema),
+        match &self.expression {
+            None => Ok(QueryFragment::new()),
+            Some(expression) => crate::cel::render(expression, schema),
         }
     }
-
-    pub(crate) fn cursor(keys: Vec<CursorKey>) -> Self {
-        Self {
-            kind: Kind::Cursor(keys),
-        }
-    }
-}
-
-/// Render the rows-after-a-position condition.
-///
-/// Always an OR-chain, never a row-value comparison like `(a, b) > (x, y)`. A
-/// row value only works when every key runs the same way, so `title asc, id
-/// desc` has to be written out:
-///
-/// ```text
-/// (("title" > $1) OR ("title" = $2 AND "id" < $3))
-/// ```
-///
-/// Writing it out always, rather than only when directions are mixed, costs a
-/// few repeated binds and buys one shape to test and no driver-specific branch.
-/// A positional `?` cannot point back at an earlier bind, so the repetition is
-/// unavoidable on those drivers regardless.
-fn seek<DB: Dialect, S: Schema>(
-    keys: &[CursorKey],
-    schema: &S,
-) -> Result<QueryFragment<DB, Value>, Error> {
-    let mut fragment = QueryFragment::new();
-    if keys.is_empty() {
-        return Ok(fragment);
-    }
-
-    let mut columns = Vec::with_capacity(keys.len());
-    let mut total = false;
-
-    for key in keys {
-        let column = resolve(schema, &key.key.field)?;
-
-        // A token is client input. One carrying text for an integer column must
-        // not reach the database as a comparison between the two.
-        if column.ty != key.value.ty() {
-            return Err(Error::Cursor(format!(
-                "holds {} for `{}`, which is {}",
-                key.value.ty(),
-                key.key.field,
-                column.ty
-            )));
-        }
-
-        total |= column.unique;
-        columns.push(column);
-    }
-
-    if !total {
-        let sort: Sort = keys.iter().map(|key| key.key.clone()).collect();
-
-        return Err(Error::NotUnique(format!(
-            "`{sort}` names no unique column, so a page token cannot identify a \
-             row: add one with `Sort::tiebreak`, and declare it with `Table::key`"
-        )));
-    }
-
-    fragment.push("(");
-
-    for (at, key) in keys.iter().enumerate() {
-        if at > 0 {
-            fragment.push(" OR ");
-        }
-        fragment.push("(");
-
-        for (before, earlier) in keys.iter().enumerate().take(at) {
-            fragment.push(&quoted::<DB>(&columns[before].name));
-            fragment.push(" = ");
-            fragment.push_bind(earlier.value.clone());
-            fragment.push(" AND ");
-        }
-
-        fragment.push(&quoted::<DB>(&columns[at].name));
-        fragment.push(match key.key.direction {
-            Direction::Asc => " > ",
-            Direction::Desc => " < ",
-        });
-        fragment.push_bind(key.value.clone());
-
-        fragment.push(")");
-    }
-
-    fragment.push(")");
-
-    Ok(fragment)
 }
 
 #[cfg(test)]
@@ -194,103 +90,63 @@ mod tests {
     use sqlx::Postgres;
 
     use super::*;
-    use crate::cursor::Cursor;
-    use crate::schema::{Column, ColumnType, Table};
+    use crate::schema::{ColumnType, Table};
 
     fn volumes() -> Table {
         Table::new()
             .key("id", ColumnType::Int)
             .column("title", ColumnType::Text)
-            .add("readCount", Column::new("read_count", ColumnType::Int))
     }
 
-    fn seek_of(order_by: &str, values: &[Value]) -> Predicate {
-        let sort = Sort::parse(order_by).unwrap().tiebreak("id");
-        let cursor = Cursor::new(&sort, values).unwrap();
+    /// A request that did not ask to filter should look like one that did not
+    /// ask to sort: an empty string, not an error.
+    #[test]
+    fn an_absent_filter_is_empty_not_an_error() {
+        for source in ["", "   "] {
+            let predicate = Predicate::parse(source).unwrap();
 
-        cursor.seek(sort).unwrap().1
+            assert!(predicate.is_empty());
+            assert!(
+                predicate
+                    .to_fragment::<Postgres, _>(&volumes())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
-    fn an_empty_predicate_renders_nothing() {
-        let fragment = Predicate::empty()
-            .to_fragment::<Postgres, _>(&volumes())
-            .unwrap();
-
+    fn an_empty_filter_constrains_nothing() {
         assert!(Predicate::empty().is_empty());
-        assert!(fragment.is_empty());
     }
 
     #[test]
-    fn a_single_key_seeks_past_it() {
-        let fragment = seek_of("", &[Value::Int(42)])
-            .to_fragment::<Postgres, _>(&volumes())
-            .unwrap();
-
-        assert_eq!(fragment.preview(), r#"(("id" > ?))"#);
-    }
-
-    /// The chain, and why it exists: the directions differ, so no row-value
-    /// comparison expresses this.
-    #[test]
-    fn mixed_directions_expand_into_a_chain() {
-        let fragment = seek_of("title desc", &[Value::Text("Dune".into()), Value::Int(42)])
-            .to_fragment::<Postgres, _>(&volumes())
-            .unwrap();
-
-        assert_eq!(
-            fragment.preview(),
-            r#"(("title" < ?) OR ("title" = ? AND "id" > ?))"#
-        );
-    }
-
-    #[test]
-    fn an_ascending_sort_compares_upwards() {
-        let fragment = seek_of("title", &[Value::Text("Dune".into()), Value::Int(42)])
-            .to_fragment::<Postgres, _>(&volumes())
-            .unwrap();
-
-        assert!(fragment.preview().starts_with(r#"(("title" > ?)"#));
-    }
-
-    #[test]
-    fn a_sort_with_no_unique_column_cannot_paginate() {
-        let sort = Sort::parse("title").unwrap();
-        let cursor = Cursor::new(&sort, &[Value::Text("Dune".into())]).unwrap();
-
-        let error = cursor
-            .seek(sort)
+    fn a_filter_renders_against_the_schema() {
+        let fragment = Predicate::parse("id > 21")
             .unwrap()
-            .1
             .to_fragment::<Postgres, _>(&volumes())
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(error, Error::NotUnique(_)), "{error}");
+        assert_eq!(fragment.preview(), r#""id" > ?"#);
     }
 
     #[test]
-    fn an_unknown_field_is_rejected() {
-        let error = seek_of("salary", &[Value::Int(1), Value::Int(2)])
-            .to_fragment::<Postgres, _>(&volumes())
-            .unwrap_err();
-
-        assert!(matches!(error, Error::UnknownColumn(field) if field == "salary"));
+    fn a_syntax_error_is_rejected_at_parse() {
+        assert!(matches!(
+            Predicate::parse("id >").unwrap_err(),
+            Error::Parse(_)
+        ));
     }
 
-    /// Tokens are client input: a tampered one must not reach the database as a
-    /// comparison between a string and an integer column.
+    /// cel-rust parses without checking, so the schema is the only thing that
+    /// can catch this before the database does.
     #[test]
-    fn a_value_of_the_wrong_type_for_its_column_is_rejected() {
-        let sort = Sort::parse("id").unwrap();
-        let cursor = Cursor::new(&sort, &[Value::Text("not an id".into())]).unwrap();
-
-        let error = cursor
-            .seek(sort)
+    fn a_type_error_is_rejected_at_render() {
+        let error = Predicate::parse("id > 'tuesday'")
             .unwrap()
-            .1
             .to_fragment::<Postgres, _>(&volumes())
             .unwrap_err();
 
-        assert!(format!("{error}").contains("text"), "{error}");
+        assert!(matches!(error, Error::TypeMismatch(_)), "{error}");
     }
 }

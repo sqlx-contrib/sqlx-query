@@ -4,9 +4,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
 use chrono::{TimeZone as _, Utc};
 
+use crate::dialect::{Dialect, quoted};
 use crate::error::Error;
-use crate::predicate::Predicate;
-use crate::sort::{Direction, Sort, SortKey};
+use crate::fragment::QueryFragment;
+use crate::schema::Schema;
+use crate::sort::{Direction, Sort, SortKey, resolve};
 use crate::value::Value;
 
 /// The format this build writes.
@@ -156,11 +158,7 @@ impl Cursor {
         self.keys.is_empty()
     }
 
-    /// Reconcile this position with the ordering a request asks for.
-    ///
-    /// Returns the ordering to page by -- this cursor's, if the request asked
-    /// for none -- and the condition selecting rows after this position. Both
-    /// come out of one call so they cannot be derived from different orderings.
+    /// The ordering to page by, checked against the one this token records.
     ///
     /// # Why not `OFFSET`
     ///
@@ -173,9 +171,9 @@ impl Cursor {
     ///
     /// # Four cases, one of them an error
     ///
-    /// * No position -- the first page. The ordering is used as given, and the
-    ///   condition is empty, so the slot it would fill disappears.
-    /// * A position, and no ordering asked for. This cursor's is adopted: a
+    /// * No position -- the first page. The request's ordering is returned as
+    ///   given.
+    /// * A position, and no ordering asked for. This token's is returned: a
     ///   client that sends `order_by` once and then only `page_token` has not
     ///   asked for anything different.
     /// * Both, and they agree.
@@ -189,31 +187,130 @@ impl Cursor {
     /// # Errors
     ///
     /// [`Error::Cursor`] if this token was issued under a different ordering.
-    pub fn seek(&self, sort: Sort) -> Result<(Sort, Predicate), Error> {
+    pub fn resume(&self, requested: Sort) -> Result<Sort, Error> {
         if self.is_empty() {
-            return Ok((sort, Predicate::empty()));
+            return Ok(requested);
         }
 
         let recorded = self.sort();
-        let predicate = Predicate::cursor(self.keys.clone());
 
-        if sort.is_empty() {
-            return Ok((recorded, predicate));
+        if requested.is_empty() {
+            return Ok(recorded);
         }
 
-        if sort != recorded {
+        if requested != recorded {
             return Err(Error::Cursor(format!(
-                "issued for `{recorded}`, but this request asks for `{sort}`"
+                "issued for `{recorded}`, but this request asks for `{requested}`"
             )));
         }
 
-        Ok((sort, predicate))
+        Ok(requested)
+    }
+
+    /// The condition selecting rows after this position.
+    ///
+    /// Empty on the first page, so the slot it fills -- and that slot's joiner
+    /// -- disappear from the query entirely.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownColumn`] for a key the schema does not expose,
+    /// [`Error::NotUnique`] if no key is a unique column, and [`Error::Cursor`]
+    /// if a value's type does not match its column's.
+    pub fn to_fragment<DB: Dialect, S: Schema>(
+        &self,
+        schema: &S,
+    ) -> Result<QueryFragment<DB, Value>, Error> {
+        seek(&self.keys, schema)
     }
 
     /// The ordering this token was issued under.
     fn sort(&self) -> Sort {
         self.keys.iter().map(|key| key.key.clone()).collect()
     }
+}
+
+/// Render the rows-after-a-position condition.
+///
+/// Always an OR-chain, never a row-value comparison like `(a, b) > (x, y)`. A
+/// row value only works when every key runs the same way, so `title asc, id
+/// desc` has to be written out:
+///
+/// ```text
+/// (("title" > $1) OR ("title" = $2 AND "id" < $3))
+/// ```
+///
+/// Writing it out always, rather than only when directions are mixed, costs a
+/// few repeated binds and buys one shape to test and no driver-specific branch.
+/// A positional `?` cannot point back at an earlier bind, so the repetition is
+/// unavoidable on those drivers regardless.
+fn seek<DB: Dialect, S: Schema>(
+    keys: &[CursorKey],
+    schema: &S,
+) -> Result<QueryFragment<DB, Value>, Error> {
+    let mut fragment = QueryFragment::new();
+    if keys.is_empty() {
+        return Ok(fragment);
+    }
+
+    let mut columns = Vec::with_capacity(keys.len());
+    let mut total = false;
+
+    for key in keys {
+        let column = resolve(schema, &key.key.field)?;
+
+        // A token is client input. One carrying text for an integer column must
+        // not reach the database as a comparison between the two.
+        if column.ty != key.value.ty() {
+            return Err(Error::Cursor(format!(
+                "holds {} for `{}`, which is {}",
+                key.value.ty(),
+                key.key.field,
+                column.ty
+            )));
+        }
+
+        total |= column.unique;
+        columns.push(column);
+    }
+
+    if !total {
+        let sort: Sort = keys.iter().map(|key| key.key.clone()).collect();
+
+        return Err(Error::NotUnique(format!(
+            "`{sort}` names no unique column, so a page token cannot identify a \
+             row: add one with `Sort::tiebreak`, and declare it with `Table::key`"
+        )));
+    }
+
+    fragment.push("(");
+
+    for (at, key) in keys.iter().enumerate() {
+        if at > 0 {
+            fragment.push(" OR ");
+        }
+        fragment.push("(");
+
+        for (before, earlier) in keys.iter().enumerate().take(at) {
+            fragment.push(&quoted::<DB>(&columns[before].name));
+            fragment.push(" = ");
+            fragment.push_bind(earlier.value.clone());
+            fragment.push(" AND ");
+        }
+
+        fragment.push(&quoted::<DB>(&columns[at].name));
+        fragment.push(match key.key.direction {
+            Direction::Asc => " > ",
+            Direction::Desc => " < ",
+        });
+        fragment.push_bind(key.value.clone());
+
+        fragment.push(")");
+    }
+
+    fragment.push(")");
+
+    Ok(fragment)
 }
 
 fn encode(keys: &[CursorKey]) -> Vec<u8> {
@@ -477,9 +574,11 @@ mod tests {
 
     #[test]
     fn the_first_page_has_no_condition() {
-        let (_, predicate) = Cursor::empty().seek(Sort::parse("title").unwrap()).unwrap();
+        let fragment = Cursor::empty()
+            .to_fragment::<sqlx::Postgres, _>(&crate::schema::Table::new())
+            .unwrap();
 
-        assert!(predicate.is_empty());
+        assert!(fragment.is_empty());
     }
 
     /// A client that pages under one order and then asks for another gets an
@@ -490,7 +589,7 @@ mod tests {
         let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
 
         let asked = Sort::parse("title desc").unwrap().tiebreak("id");
-        let error = cursor.seek(asked).unwrap_err();
+        let error = cursor.resume(asked).unwrap_err();
 
         let message = format!("{error}");
         assert!(message.contains("title asc"), "{message}");
@@ -504,10 +603,7 @@ mod tests {
         let issued = Sort::parse("title desc").unwrap().tiebreak("id");
         let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
 
-        let (sort, predicate) = cursor.seek(Sort::new()).unwrap();
-
-        assert_eq!(sort, issued);
-        assert!(!predicate.is_empty());
+        assert_eq!(cursor.resume(Sort::new()).unwrap(), issued);
     }
 
     /// The ordering that renders the ORDER BY and the one the condition is
@@ -517,9 +613,7 @@ mod tests {
         let issued = Sort::parse("title desc").unwrap().tiebreak("id");
         let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
 
-        let (sort, _) = cursor.seek(issued.clone()).unwrap();
-
-        assert_eq!(sort, issued);
+        assert_eq!(cursor.resume(issued.clone()).unwrap(), issued);
     }
 
     /// A URL is where these end up, so the alphabet matters.
