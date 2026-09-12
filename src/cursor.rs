@@ -50,8 +50,8 @@ pub struct CursorKey {
 /// The key values, and the ordering they were taken under. The ordering is
 /// recorded because a client that changes `order_by` between pages and reuses
 /// the token would otherwise get a page that looks fine and is wrong -- rows
-/// already seen, rows never seen. [`Keyset::new`](crate::Keyset::new) compares
-/// the two and refuses.
+/// already seen, rows never seen. [`resume`](Self::resume) compares the two and
+/// refuses.
 ///
 /// # What it does not carry
 ///
@@ -66,6 +66,14 @@ pub struct CursorKey {
 /// version byte is where that would go.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Cursor {
+    /// The ordering this cursor pages by.
+    sort: Sort,
+    /// Where in that ordering, or empty for the start of the listing.
+    ///
+    /// When non-empty there is exactly one per key of `sort`, and they carry
+    /// the same keys: [`after`](Self::after) builds them by zipping against
+    /// `sort`, and [`parse`](Self::parse) derives `sort` from them, so neither
+    /// constructor can set the two independently.
     keys: Vec<CursorKey>,
     /// Kept alongside so [`as_str`](Self::as_str) can borrow rather than
     /// re-encode on every page.
@@ -73,26 +81,51 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// No position: the first page.
+    /// A cursor that pages by `sort`, at the start of the listing.
+    ///
+    /// The field names and directions come from `sort` rather than from the
+    /// caller, so a token cannot record an ordering the query did not run
+    /// under.
+    #[must_use]
+    pub fn new(sort: &Sort) -> Self {
+        Self {
+            sort: sort.clone(),
+            keys: Vec::new(),
+            token: String::new(),
+        }
+    }
+
+    /// No position and no ordering: what a request with no page token has.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// A position at the end of a page.
+    /// A cursor positioned after a row.
     ///
-    /// Reached through [`Sort::cursor`], which is the only caller that has the
-    /// key list this has to agree with.
-    pub(crate) fn new(sort: &Sort, key_values: &[Value]) -> Result<Self, Error> {
-        if sort.keys().len() != key_values.len() {
+    /// `key_values` are that row's values for each key of this cursor's
+    /// ordering, in the same order -- normally the last row of the page just
+    /// sent, making this the token for the next one.
+    ///
+    /// Named for the boundary: the next page holds rows strictly *after* this
+    /// row, which is excluded.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Cursor`] if the number of values does not match the number of
+    /// keys. Their *order* cannot be checked -- that is the caller's to get
+    /// right.
+    pub fn after(&self, key_values: &[Value]) -> Result<Self, Error> {
+        if self.sort.keys().len() != key_values.len() {
             return Err(Error::Cursor(format!(
-                "the sort has {} keys but {} values were given",
-                sort.keys().len(),
+                "the ordering has {} keys but {} values were given",
+                self.sort.keys().len(),
                 key_values.len()
             )));
         }
 
-        let keys: Vec<CursorKey> = sort
+        let keys: Vec<CursorKey> = self
+            .sort
             .keys()
             .iter()
             .zip(key_values)
@@ -104,7 +137,11 @@ impl Cursor {
 
         let token = BASE64.encode(encode(&keys));
 
-        Ok(Self { keys, token })
+        Ok(Self {
+            sort: self.sort.clone(),
+            keys,
+            token,
+        })
     }
 
     /// Read a page token.
@@ -125,8 +162,11 @@ impl Cursor {
             .decode(token)
             .map_err(|error| Error::Cursor(format!("not base64url: {error}")))?;
 
+        let keys = decode(&bytes)?;
+
         Ok(Self {
-            keys: decode(&bytes)?,
+            sort: keys.iter().map(|key| key.key.clone()).collect(),
+            keys,
             token: token.to_owned(),
         })
     }
@@ -186,7 +226,7 @@ impl Cursor {
             return Ok(requested);
         }
 
-        let recorded = self.sort();
+        let recorded = self.sort.clone();
 
         if requested.is_empty() {
             return Ok(recorded);
@@ -218,9 +258,12 @@ impl Cursor {
         seek(&self.keys, schema)
     }
 
-    /// The ordering this token was issued under.
-    fn sort(&self) -> Sort {
-        self.keys.iter().map(|key| key.key.clone()).collect()
+    /// The ordering this cursor pages by.
+    ///
+    /// For a parsed token, the ordering it was issued under.
+    #[must_use]
+    pub fn sort(&self) -> &Sort {
+        &self.sort
     }
 }
 
@@ -485,12 +528,12 @@ mod tests {
     #[test]
     fn a_position_round_trips_through_a_token() {
         let values = [Value::Text("Dune".into()), Value::Int(4711)];
-        let cursor = sort().cursor(&values).unwrap();
+        let cursor = Cursor::new(&sort()).after(&values).unwrap();
 
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         assert_eq!(parsed.keys(), cursor.keys());
-        assert_eq!(parsed.sort(), sort());
+        assert_eq!(parsed.sort(), &sort());
     }
 
     #[test]
@@ -505,7 +548,7 @@ mod tests {
             Value::Timestamp(Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap()),
         ];
 
-        let cursor = sort.cursor(&values).unwrap();
+        let cursor = Cursor::new(&sort).after(&values).unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         let round_tripped: Vec<Value> = parsed.keys().iter().map(|k| k.value.clone()).collect();
@@ -519,7 +562,7 @@ mod tests {
         let sort = Sort::parse("at").unwrap();
         let far = Utc.timestamp_opt(99_999_999_999, 0).unwrap();
 
-        let cursor = sort.cursor(&[Value::Timestamp(far)]).unwrap();
+        let cursor = Cursor::new(&sort).after(&[Value::Timestamp(far)]).unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         assert_eq!(parsed.keys()[0].value, Value::Timestamp(far));
@@ -527,8 +570,8 @@ mod tests {
 
     #[test]
     fn the_recorded_direction_survives() {
-        let cursor = sort()
-            .cursor(&[Value::Text("x".into()), Value::Int(1)])
+        let cursor = Cursor::new(&sort())
+            .after(&[Value::Text("x".into()), Value::Int(1)])
             .unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
@@ -538,7 +581,7 @@ mod tests {
 
     #[test]
     fn a_value_count_that_does_not_match_the_sort_is_rejected() {
-        let error = sort().cursor(&[Value::Int(1)]).unwrap_err();
+        let error = Cursor::new(&sort()).after(&[Value::Int(1)]).unwrap_err();
 
         assert!(
             format!("{error}").contains("2 keys but 1 values"),
@@ -550,8 +593,8 @@ mod tests {
     /// rather than read past the end of the buffer.
     #[test]
     fn malformed_tokens_are_rejected() {
-        let good = sort()
-            .cursor(&[Value::Text("x".into()), Value::Int(1)])
+        let good = Cursor::new(&sort())
+            .after(&[Value::Text("x".into()), Value::Int(1)])
             .unwrap()
             .as_str()
             .to_owned();
@@ -583,8 +626,8 @@ mod tests {
     #[test]
     fn a_token_from_a_different_order_is_refused() {
         let issued = Sort::parse("title asc").unwrap().asc("id");
-        let cursor = issued
-            .cursor(&[Value::Text("Dune".into()), Value::Int(42)])
+        let cursor = Cursor::new(&issued)
+            .after(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
         let asked = Sort::parse("title desc").unwrap().asc("id");
@@ -600,8 +643,8 @@ mod tests {
     #[test]
     fn an_absent_order_by_adopts_the_token_s_own() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
-        let cursor = issued
-            .cursor(&[Value::Text("Dune".into()), Value::Int(42)])
+        let cursor = Cursor::new(&issued)
+            .after(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
         assert_eq!(cursor.resume(Sort::new()).unwrap(), issued);
@@ -612,8 +655,8 @@ mod tests {
     #[test]
     fn an_agreeing_order_is_returned_unchanged() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
-        let cursor = issued
-            .cursor(&[Value::Text("Dune".into()), Value::Int(42)])
+        let cursor = Cursor::new(&issued)
+            .after(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
         assert_eq!(cursor.resume(issued.clone()).unwrap(), issued);
@@ -625,7 +668,11 @@ mod tests {
         let sort = Sort::parse("blob").unwrap();
         let value = Value::Bytes((0..=255).collect());
 
-        let token = sort.cursor(&[value]).unwrap().as_str().to_owned();
+        let token = Cursor::new(&sort)
+            .after(&[value])
+            .unwrap()
+            .as_str()
+            .to_owned();
 
         assert!(
             token

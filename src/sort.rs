@@ -3,7 +3,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::cursor::Cursor;
 use crate::dialect::{Dialect, quote};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
@@ -199,22 +198,6 @@ impl Sort {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
-    }
-
-    /// A cursor at a position in this ordering.
-    ///
-    /// `key_values` are the last row's values for each key, in the same order.
-    /// The field names and directions come from this sort rather than from the
-    /// caller, so a token cannot record an ordering the query did not run
-    /// under.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Cursor`] if the number of values does not match the number of
-    /// keys. Their *order* cannot be checked -- that is the caller's to get
-    /// right.
-    pub fn cursor(&self, key_values: &[Value]) -> Result<Cursor, Error> {
-        Cursor::new(self, key_values)
     }
 
     /// Render as the body of an `ORDER BY`.
