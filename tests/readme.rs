@@ -11,9 +11,6 @@ struct Request {
     order_by: String,
     page_token: String,
 }
-/// The query and what a request may ask of it, declared together -- the aliases
-/// and qualifiers in the mapping are facts about this skeleton's SELECT and
-/// FROM, so nothing else is in a position to notice when they drift.
 static VOLUMES: LazyLock<QueryTemplate<Postgres>> = LazyLock::new(|| {
     QueryTemplate::parse(
         "SELECT id, title, read_count
@@ -24,12 +21,15 @@ static VOLUMES: LazyLock<QueryTemplate<Postgres>> = LazyLock::new(|| {
       LIMIT $2",
     )
     .expect("valid skeleton")
-    .with_mapping(
-        QueryMapping::new()
-            .key("id", ColumnType::Int)
-            .column("title", ColumnType::Text)
-            .add("readCount", Column::new("read_count", ColumnType::Int)),
-    )
+});
+
+/// What this query exposes, under what public name. A path not named here is
+/// rejected, not passed through.
+static MAPPING: LazyLock<QueryMapping> = LazyLock::new(|| {
+    QueryMapping::new()
+        .key("id", ColumnType::Int)
+        .column("title", ColumnType::Text)
+        .add("readCount", Column::new("read_count", ColumnType::Int))
 });
 
 /// A token issued by an earlier build for `title desc, id asc` at
@@ -54,7 +54,7 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     cursor.validate(&sort)?;
 
     let query = VOLUMES
-        .builder()
+        .builder(&*MAPPING)
         .bind(tenant_id)
         .bind(page_size)
         .fill("filter", &filter)
@@ -78,7 +78,7 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     resumed.validate(&sort)?;
 
     let second = VOLUMES
-        .builder()
+        .builder(&*MAPPING)
         .bind(tenant_id)
         .bind(page_size)
         .fill("filter", &filter)

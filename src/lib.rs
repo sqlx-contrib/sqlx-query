@@ -6,22 +6,21 @@
 //! use sqlx::Postgres;
 //! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
 //!
-//! // The query you already wrote, and what a request may ask of it. The
-//! // sentinels are comments, so the skeleton is a statement: it runs in psql,
-//! // it EXPLAINs, and `skeleton()` hands it to `sqlx::query!` to be checked
-//! // against a live database.
+//! // The query you already wrote. The sentinels are comments, so the skeleton
+//! // is a statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
+//! // `sqlx::query!` to be checked against a live database.
 //! let volumes = QueryTemplate::<Postgres>::parse(
 //!     "SELECT id, title, read_count FROM volumes \
 //!      WHERE tenant_id = $1 /* AND query.filter */ \
 //!      /* ORDER BY query.order */ LIMIT $2",
-//! )?
-//! .with_mapping(
-//!     // A path not named here is rejected, not passed through.
-//!     QueryMapping::new()
-//!         .key("id", ColumnType::Int)
-//!         .column("title", ColumnType::Text)
-//!         .add("readCount", Column::new("read_count", ColumnType::Int)),
-//! );
+//! )?;
+//!
+//! // What a request may name, and which column each path resolves to. Anything
+//! // not named here is rejected, not passed through.
+//! let mapping = QueryMapping::new()
+//!     .key("id", ColumnType::Int)
+//!     .column("title", ColumnType::Text)
+//!     .add("readCount", Column::new("read_count", ColumnType::Int));
 //!
 //! // Request parameters, as the strings they arrive as. Each treats an empty
 //! // string as "not asked for" rather than as an error.
@@ -33,7 +32,7 @@
 //! cursor.validate(&sort)?;
 //!
 //! let query = volumes
-//!     .builder()
+//!     .builder(&mapping)
 //!     .bind(7_i64)   // $1, the tenant
 //!     .bind(50_i64)  // $2, the page size
 //!     .fill("filter", &filter)

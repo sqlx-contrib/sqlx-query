@@ -18,13 +18,9 @@ use std::sync::LazyLock;
 use sqlx::Postgres;
 use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
 
-// The query you already wrote, and what a request may ask of it, declared
-// together. One slot takes fragments from several sources -- here the client's
-// filter and the cursor's seek condition -- joined by its own `AND`.
-//
-// The mapping lives with the skeleton because the two have to agree: an alias
-// in the SELECT and a `with_alias` in the mapping describe the same column, and
-// nothing else is in a position to notice when they drift.
+// The query you already wrote. One slot takes fragments from several sources --
+// here the client's filter and the cursor's seek condition -- joined by its own
+// `AND`.
 static VOLUMES: LazyLock<QueryTemplate<Postgres>> = LazyLock::new(|| {
     QueryTemplate::parse(
         "SELECT id, title, read_count
@@ -35,13 +31,16 @@ static VOLUMES: LazyLock<QueryTemplate<Postgres>> = LazyLock::new(|| {
           LIMIT $2",
     )
     .expect("valid skeleton")
-    .with_mapping(
-        // A path not named here is rejected, not passed through.
-        QueryMapping::new()
-            .key("id", ColumnType::Int)        // unique: a token can name one row
-            .column("title", ColumnType::Text)
-            .add("readCount", Column::new("read_count", ColumnType::Int)),
-    )
+});
+
+// What a request may name, and which column each path resolves to. A template
+// is SQL with holes; this is policy, so it stays separate -- the same skeleton
+// can serve an administrator and a caller who may see less.
+static MAPPING: LazyLock<QueryMapping> = LazyLock::new(|| {
+    QueryMapping::new()
+        .key("id", ColumnType::Int)        // unique: a token can name one row
+        .column("title", ColumnType::Text)
+        .add("readCount", Column::new("read_count", ColumnType::Int))
 });
 
 // Request parameters, as the strings they arrive as. Each treats an empty
@@ -54,10 +53,10 @@ let cursor = Cursor::parse(&request.page_token)?;
 // otherwise hand back rows the client has already seen, with no error anywhere.
 cursor.validate(&sort)?;
 
-// `fill` takes the producer itself, resolving through the template's mapping,
-// so the chain has no `?` in it and the first failure comes back from `build`.
+// The mapping goes in once. `fill` takes the producer itself, so the chain has
+// no `?` in it and the first failure comes back from `build`.
 let rows = VOLUMES
-    .builder()
+    .builder(&*MAPPING)
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
     .fill("filter", &filter)
@@ -76,7 +75,7 @@ let page: Vec<Volume> = rows.iter().map(Volume::from_row).collect::<Result<_, _>
 // the ordering may be one the client chose at runtime.
 if let Some(last) = rows.last() {
     response.next_page_token = Cursor::new(&sort)
-        .after(last, VOLUMES.mapping())?
+        .after(last, &*MAPPING)?
         .as_str()
         .to_owned();
 }

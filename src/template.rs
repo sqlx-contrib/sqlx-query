@@ -9,7 +9,6 @@ use sqlx::database::Database;
 
 use crate::builder::QueryBuilder;
 use crate::error::Error;
-use crate::mapping::QueryMapping;
 
 /// A query you already wrote, with slots where fragments go.
 ///
@@ -46,14 +45,6 @@ pub struct QueryTemplate<DB> {
     texts: Cow<'static, [&'static str]>,
     slots: Cow<'static, [Slot]>,
     skeleton: Cow<'static, str>,
-    /// What requests may name, and which column each resolves to.
-    ///
-    /// Held here because the two have to agree: a `SELECT a.name AS
-    /// author_name` in the skeleton and a `with_alias("author_name")` in the
-    /// mapping describe the same column, and nothing else is in a position to
-    /// notice when they drift. Empty until declared, which is fail-closed --
-    /// every request path is rejected rather than exposed.
-    mapping: QueryMapping,
     /// Where the first `?` that follows a slot is, if there is one.
     ///
     /// Harmless where placeholders are numbered, and fatal where they are
@@ -81,31 +72,9 @@ impl<DB> QueryTemplate<DB> {
             texts: Cow::Owned(skeleton.texts),
             slots: Cow::Owned(skeleton.slots),
             skeleton: Cow::Owned(skeleton.sql),
-            mapping: QueryMapping::new(),
             late_placeholder: skeleton.late_placeholder,
             database: PhantomData,
         })
-    }
-
-    /// Declare what requests may name.
-    ///
-    /// Until this is called the mapping is empty, so every path a filter or a
-    /// sort names is rejected. That is the right default: exposing a column is
-    /// a decision, and a missing declaration should fail loudly rather than
-    /// open the table up.
-    #[must_use]
-    pub fn with_mapping(mut self, mapping: QueryMapping) -> Self {
-        self.mapping = mapping;
-        self
-    }
-
-    /// What requests may name.
-    ///
-    /// Pass this where a mapping is wanted outside the builder -- minting a
-    /// page token, for one.
-    #[must_use]
-    pub fn mapping(&self) -> &QueryMapping {
-        &self.mapping
     }
 
     /// The skeleton with every sentinel removed.
@@ -132,24 +101,21 @@ impl<DB> QueryTemplate<DB> {
 }
 
 impl<DB: Database> QueryTemplate<DB> {
-    /// Start filling this template in.
-    #[must_use]
-    pub fn builder(&self) -> QueryBuilder<'_, DB> {
-        QueryBuilder::new(self, &self.mapping)
-    }
-
-    /// Start filling this template in, resolving paths through `mapping`
-    /// instead of the template's own.
+    /// Start filling this template in, resolving request paths through
+    /// `mapping`.
     ///
-    /// For visibility that depends on the caller rather than the query -- a
-    /// column only an administrator may sort on, say. A closure is a
-    /// [`Mapping`](crate::Mapping), so that decision can be made per request,
-    /// which a mapping declared in a `static` cannot do.
+    /// Taken here rather than held by the template, because a template is SQL
+    /// with holes and a mapping is policy: which paths a request may name, and
+    /// what each resolves to. The same skeleton can serve an administrator and
+    /// a caller who may see less, and a closure is a
+    /// [`Mapping`](crate::Mapping), so that decision can be made per request.
+    ///
+    /// It is taken once here rather than by each producer because it belongs to
+    /// the query rather than to any one of them -- which also lets
+    /// [`fill`](QueryBuilder::fill) take a producer directly and keeps the
+    /// chain free of `?`.
     #[must_use]
-    pub fn builder_with<'a>(
-        &'a self,
-        mapping: &'a dyn crate::mapping::Mapping,
-    ) -> QueryBuilder<'a, DB> {
+    pub fn builder<'a>(&'a self, mapping: &'a dyn crate::mapping::Mapping) -> QueryBuilder<'a, DB> {
         QueryBuilder::new(self, mapping)
     }
 }
@@ -160,7 +126,6 @@ impl<DB> Clone for QueryTemplate<DB> {
             texts: self.texts.clone(),
             slots: self.slots.clone(),
             skeleton: self.skeleton.clone(),
-            mapping: self.mapping.clone(),
             late_placeholder: self.late_placeholder,
             database: PhantomData,
         }

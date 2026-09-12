@@ -397,6 +397,7 @@ mod tests {
     use super::*;
     use crate::QueryTemplate;
     use crate::fragment::QueryFragment;
+    use crate::mapping::QueryMapping;
     use crate::value::Value;
 
     /// Note `ORDER BY` sits *inside* the sentinel. A keyword that only makes
@@ -408,6 +409,10 @@ mod tests {
     /// Producers are covered where they live; these exercise the builder, so
     /// they use fragments built by hand and an empty mapping -- nothing here
     /// resolves a field.
+    fn nothing() -> QueryMapping {
+        QueryMapping::new()
+    }
+
     fn fragment<DB>(sql: &str, value: i64) -> QueryFragment<DB, Value> {
         let mut fragment = QueryFragment::new();
         fragment.push(sql).push_bind(Value::Int(value));
@@ -439,7 +444,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(7_i64)
             .bind(50_i64)
             .fill("filter", &fragment("reads > ", 100))
@@ -459,7 +464,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(7_i64)
             .bind(50_i64)
             .fill("filter", &QueryFragment::<Postgres, Value>::new())
@@ -477,7 +482,10 @@ mod tests {
         let template =
             QueryTemplate::<Postgres>::parse("SELECT 1 ORDER BY /* query.order , */ id").unwrap();
 
-        let sql = template.builder().fill("order", &text("title DESC")).sql();
+        let sql = template
+            .builder(&nothing())
+            .fill("order", &text("title DESC"))
+            .sql();
 
         assert_eq!(sql, "SELECT 1 ORDER BY title DESC , id");
     }
@@ -487,7 +495,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(7_i64)
             .bind(50_i64)
             .slot("filter", |slot| {
@@ -505,7 +513,7 @@ mod tests {
     fn an_unknown_slot_names_the_ones_that_exist() {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
-        let error = build_error(template.builder().fill("predicate", &text("x")));
+        let error = build_error(template.builder(&nothing()).fill("predicate", &text("x")));
 
         let message = format!("{error}");
         assert!(message.contains("`predicate`"), "{message}");
@@ -522,7 +530,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder()
+                .builder(&nothing())
                 .fill("filter", &text("reads > 1"))
                 .bind(7_i64),
         );
@@ -536,7 +544,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder()
+                .builder(&nothing())
                 .fill("order", &text("id ASC"))
                 .fill("filter", &text("reads > 1")),
         );
@@ -554,7 +562,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder()
+                .builder(&nothing())
                 .bind(50_i64)
                 .fill("filter", &text("reads > 1")),
         );
@@ -569,7 +577,10 @@ mod tests {
         let template =
             QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ LIMIT ?").unwrap();
 
-        assert_eq!(template.builder().bind(50_i64).sql(), "SELECT 1  LIMIT ?");
+        assert_eq!(
+            template.builder(&nothing()).bind(50_i64).sql(),
+            "SELECT 1  LIMIT ?"
+        );
     }
 
     /// Numbered placeholders name a bound value, not a position, so the same
@@ -580,7 +591,7 @@ mod tests {
             QueryTemplate::<Postgres>::parse("SELECT 1 /* AND query.filter */ LIMIT $1").unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .bind(50_i64)
             .fill("filter", &fragment("reads > ", 1))
             .sql();
@@ -595,7 +606,10 @@ mod tests {
         let template =
             QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ AND x = \'?\'").unwrap();
 
-        let sql = template.builder().fill("filter", &text("reads > 1")).sql();
+        let sql = template
+            .builder(&nothing())
+            .fill("filter", &text("reads > 1"))
+            .sql();
 
         assert_eq!(sql, "SELECT 1 AND reads > 1 AND x = \'?\'");
     }
@@ -607,7 +621,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder()
+            .builder(&nothing())
             .fill("order", &text("id ASC"))
             .fill("filter", &fragment("reads > ", 1))
             .bind(7_i64)
