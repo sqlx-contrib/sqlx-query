@@ -15,7 +15,7 @@ use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate
 /// rather than binding wrongly.
 const PAGE: &str = "SELECT id, title, read_count FROM volumes \
                     WHERE tenant_id = ? \
-                    /* AND query.predicate */ \
+                    /* AND query.filter */ \
                     /* ORDER BY query.order */ \
                     LIMIT 3";
 
@@ -87,8 +87,8 @@ async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i6
         let rows = template
             .builder()
             .bind(1_i64)
-            .fill("predicate", &filter.to_fragment(&mapping).unwrap())
-            .fill("predicate", &cursor.to_fragment(&mapping).unwrap())
+            .fill("filter", &filter.to_fragment(&mapping).unwrap())
+            .fill("filter", &cursor.to_fragment(&mapping).unwrap())
             .fill("order", &sort.to_fragment(&mapping).unwrap())
             .build()
             .unwrap()
@@ -187,7 +187,7 @@ async fn like_wildcards_in_a_filter_are_escaped() {
 const JOINED: &str = "SELECT v.id, v.title, a.name AS author_name \
                       FROM volumes v JOIN authors a ON a.id = v.author_id \
                       WHERE v.tenant_id = ? \
-                      /* AND query.predicate */ \
+                      /* AND query.filter */ \
                       /* ORDER BY query.order */ \
                       LIMIT 2";
 
@@ -236,7 +236,7 @@ async fn a_join_pages_by_a_qualified_and_aliased_column() {
         let rows = template
             .builder()
             .bind(1_i64)
-            .fill("predicate", &cursor.to_fragment(&mapping).unwrap())
+            .fill("filter", &cursor.to_fragment(&mapping).unwrap())
             .fill("order", &sort.to_fragment(&mapping).unwrap())
             .build()
             .unwrap()

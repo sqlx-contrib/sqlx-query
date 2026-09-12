@@ -9,13 +9,13 @@ use sqlx_query::{QueryFragment, QueryTemplate, sql};
 static VOLUMES: QueryTemplate<Postgres> = sql!(
     "SELECT id, title FROM volumes \
      WHERE tenant_id = $1 \
-     /* AND query.predicate */ \
+     /* AND query.filter */ \
      /* ORDER BY query.order */"
 );
 
 #[test]
 fn a_static_template_declares_its_slots() {
-    assert_eq!(VOLUMES.slots().collect::<Vec<_>>(), ["predicate", "order"]);
+    assert_eq!(VOLUMES.slots().collect::<Vec<_>>(), ["filter", "order"]);
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn a_compiled_template_splices_like_a_parsed_one() {
     let sql = VOLUMES
         .builder()
         .bind(7_i64)
-        .fill("predicate", &predicate)
+        .fill("filter", &predicate)
         .fill("order", &order)
         .sql();
 
@@ -53,7 +53,7 @@ fn a_compiled_template_splices_like_a_parsed_one() {
 fn the_macro_and_parse_produce_the_same_template() {
     const SOURCE: &str = "SELECT id, title FROM volumes \
                           WHERE tenant_id = $1 \
-                          /* AND query.predicate */ \
+                          /* AND query.filter */ \
                           /* ORDER BY query.order */";
 
     let parsed = QueryTemplate::<Postgres>::parse(SOURCE).unwrap();

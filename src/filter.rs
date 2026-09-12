@@ -10,7 +10,7 @@ use crate::value::Value;
 ///
 /// Renders to a boolean expression, suitable to drop after `WHERE`, after
 /// `AND`, into a `HAVING`, or into a `CHECK` -- which is why a
-/// `/* AND query.predicate */` slot takes one of these and a [`Cursor`]'s seek
+/// `/* AND query.filter */` slot takes one of these and a [`Cursor`]'s seek
 /// condition together, joined by that slot's own `AND`.
 ///
 /// [`Cursor`]: crate::Cursor

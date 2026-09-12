@@ -18,14 +18,14 @@ use crate::error::Error;
 /// one side:
 ///
 /// ```text
-/// /* AND query.predicate */      joiner before each fragment
+/// /* AND query.filter */      joiner before each fragment
 /// /* query.order , */            joiner after each fragment
 /// /* query.columns */            fragments concatenated
 /// ```
 ///
-/// The name must be an identifier, and names the *kind of SQL* the slot holds
-/// rather than whoever fills it -- one slot commonly takes fragments from
-/// several sources, joined by its joiner.
+/// The name must be an identifier. One slot commonly takes fragments from
+/// several sources, joined by its joiner: a `/* AND query.filter */` slot
+/// holds a client's filter and a cursor's seek condition together.
 ///
 /// A slot that is never filled, or filled only with empty fragments, emits
 /// nothing at all: the comment and its joiner both disappear. That is what lets
@@ -176,9 +176,9 @@ mod tests {
     #[test]
     fn a_joiner_may_lead_or_trail_or_be_absent() {
         assert_eq!(
-            slots_of("a /* AND query.predicate */ b /* query.order , */ c /* query.bare */"),
+            slots_of("a /* AND query.filter */ b /* query.order , */ c /* query.bare */"),
             [
-                ("predicate".into(), "AND".into(), true),
+                ("filter".into(), "AND".into(), true),
                 ("order".into(), ",".into(), false),
                 // `before` carries no meaning without a joiner to place.
                 ("bare".into(), String::new(), false),
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn the_skeleton_drops_sentinels_and_keeps_ordinary_comments() {
         let template = Template::parse(
-            "SELECT id FROM t /* a note */ WHERE x = $1 /* AND query.predicate */ ORDER BY id",
+            "SELECT id FROM t /* a note */ WHERE x = $1 /* AND query.filter */ ORDER BY id",
         )
         .unwrap();
 
@@ -204,11 +204,11 @@ mod tests {
     #[test]
     fn a_sentinel_inside_a_literal_is_just_text() {
         for sql in [
-            "SELECT '/* AND query.predicate */' FROM t",
-            "SELECT \"/* AND query.predicate */\" FROM t",
-            "SELECT $$/* AND query.predicate */$$ FROM t",
-            "SELECT $tag$/* AND query.predicate */$tag$ FROM t",
-            "SELECT 1 -- /* AND query.predicate */",
+            "SELECT '/* AND query.filter */' FROM t",
+            "SELECT \"/* AND query.filter */\" FROM t",
+            "SELECT $$/* AND query.filter */$$ FROM t",
+            "SELECT $tag$/* AND query.filter */$tag$ FROM t",
+            "SELECT 1 -- /* AND query.filter */",
         ] {
             assert_eq!(slots_of(sql), [], "found a slot in {sql}");
         }
@@ -217,7 +217,7 @@ mod tests {
     /// `$1` and `$$` both start with `$`, and only one of them opens a quote.
     #[test]
     fn placeholders_are_not_dollar_quotes() {
-        let sql = "SELECT $1, $2 FROM t WHERE x = $3 /* AND query.predicate */";
+        let sql = "SELECT $1, $2 FROM t WHERE x = $3 /* AND query.filter */";
         assert_eq!(slots_of(sql).len(), 1);
     }
 
@@ -270,7 +270,7 @@ mod tests {
     fn an_ambiguous_comment_is_prose_not_an_error() {
         for sql in [
             "a /* see query.rs for the parser */", // marker mid-sentence
-            "a /* AND query.predicate , */",       // a joiner on both sides
+            "a /* AND query.filter , */",          // a joiner on both sides
             "a /* query.x query.y */",             // two markers
             "a /* query.not-an-ident */",          // not an identifier
         ] {
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn slots_are_listed_in_order() {
-        let template = Template::parse("a /* AND query.predicate */ b /* query.order */").unwrap();
-        assert_eq!(template.slots().collect::<Vec<_>>(), ["predicate", "order"]);
+        let template = Template::parse("a /* AND query.filter */ b /* query.order */").unwrap();
+        assert_eq!(template.slots().collect::<Vec<_>>(), ["filter", "order"]);
     }
 }

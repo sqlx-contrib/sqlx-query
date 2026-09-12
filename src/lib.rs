@@ -11,7 +11,7 @@
 //! // `sqlx::query!` to be checked against a live database.
 //! static VOLUMES: QueryTemplate<Postgres> = sql!(
 //!     "SELECT id, title, read_count FROM volumes \
-//!      WHERE tenant_id = $1 /* AND query.predicate */ \
+//!      WHERE tenant_id = $1 /* AND query.filter */ \
 //!      /* ORDER BY query.order */ LIMIT $2"
 //! );
 //!
@@ -34,8 +34,8 @@
 //!     .builder()
 //!     .bind(7_i64)   // $1, the tenant
 //!     .bind(50_i64)  // $2, the page size
-//!     .fill("predicate", &filter.to_fragment(&mapping)?)
-//!     .fill("predicate", &cursor.to_fragment(&mapping)?)
+//!     .fill("filter", &filter.to_fragment(&mapping)?)
+//!     .fill("filter", &cursor.to_fragment(&mapping)?)
 //!     .fill("order", &sort.to_fragment(&mapping)?);
 //!
 //! assert_eq!(

@@ -18,9 +18,9 @@ use std::sync::LazyLock;
 use sqlx::Postgres;
 use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort, sql};
 
-// The query you already wrote. A slot is named for the kind of SQL it holds,
-// not for whoever fills it: one slot takes fragments from several sources,
-// joined by its own `AND`.
+// The query you already wrote. One slot takes fragments from several sources
+// -- here the client's filter and the cursor's seek condition -- joined by its
+// own `AND`.
 //
 // `sql!` runs the scanner at compile time, so a mistyped sentinel is a compile
 // error and the skeleton costs nothing at run time.
@@ -28,7 +28,7 @@ static VOLUMES: QueryTemplate<Postgres> = sql!(
     "SELECT id, title, read_count
        FROM volumes
       WHERE tenant_id = $1
-        /* AND query.predicate */
+        /* AND query.filter */
       /* ORDER BY query.order */
       LIMIT $2"
 );
@@ -57,8 +57,8 @@ let rows = VOLUMES
     .builder()
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
-    .fill("predicate", &filter.to_fragment(&*VOLUMES_MAPPING)?)
-    .fill("predicate", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
+    .fill("filter", &filter.to_fragment(&*VOLUMES_MAPPING)?)
+    .fill("filter", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
     .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?)
     .build()?
     .fetch_all(&pool)

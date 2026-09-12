@@ -96,7 +96,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     /// Put a fragment in a slot.
     ///
     /// Filling the same slot more than once appends, with the slot's joiner
-    /// between -- which is what makes a `/* AND query.predicate */` slot take a
+    /// between -- which is what makes a `/* AND query.filter */` slot take a
     /// filter and a cursor condition and read correctly. An empty fragment
     /// contributes nothing at all, not even the joiner.
     #[must_use]
@@ -396,7 +396,7 @@ mod tests {
     /// Note `ORDER BY` sits *inside* the sentinel. A keyword that only makes
     /// sense with a non-empty slot has to be part of the joiner, or an unfilled
     /// slot leaves it dangling.
-    const SKELETON: &str = "SELECT id FROM t WHERE tenant = $1 /* AND query.predicate */ \
+    const SKELETON: &str = "SELECT id FROM t WHERE tenant = $1 /* AND query.filter */ \
                             /* ORDER BY query.order */ LIMIT $2";
 
     fn fragment<DB>(sql: &str, value: i64) -> QueryFragment<DB, i64> {
@@ -433,8 +433,8 @@ mod tests {
             .builder()
             .bind(7_i64)
             .bind(50_i64)
-            .fill("predicate", &fragment("reads > ", 100))
-            .fill("predicate", &fragment("id > ", 4711))
+            .fill("filter", &fragment("reads > ", 100))
+            .fill("filter", &fragment("id > ", 4711))
             .fill("order", &text("title ASC"))
             .sql();
 
@@ -453,7 +453,7 @@ mod tests {
             .builder()
             .bind(7_i64)
             .bind(50_i64)
-            .fill("predicate", &QueryFragment::<Postgres, i64>::new())
+            .fill("filter", &QueryFragment::<Postgres, i64>::new())
             .fill("order", &text("id ASC"))
             .sql();
 
@@ -481,7 +481,7 @@ mod tests {
             .builder()
             .bind(7_i64)
             .bind(50_i64)
-            .slot("predicate", |slot| {
+            .slot("filter", |slot| {
                 slot.push("reads BETWEEN ")
                     .push_bind(1_i64)
                     .push(" AND ")
@@ -496,10 +496,10 @@ mod tests {
     fn an_unknown_slot_names_the_ones_that_exist() {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
-        let error = build_error(template.builder().fill("filter", &text("x")));
+        let error = build_error(template.builder().fill("predicate", &text("x")));
 
         let message = format!("{error}");
-        assert!(message.contains("`filter`"), "{message}");
+        assert!(message.contains("`predicate`"), "{message}");
         assert!(message.contains("`predicate`"), "{message}");
         assert!(message.contains("`order`"), "{message}");
     }
@@ -514,7 +514,7 @@ mod tests {
         let error = build_error(
             template
                 .builder()
-                .fill("predicate", &text("reads > 1"))
+                .fill("filter", &text("reads > 1"))
                 .bind(7_i64),
         );
 
@@ -529,7 +529,7 @@ mod tests {
             template
                 .builder()
                 .fill("order", &text("id ASC"))
-                .fill("predicate", &text("reads > 1")),
+                .fill("filter", &text("reads > 1")),
         );
 
         assert!(matches!(error, Error::Positional(_)), "{error}");
@@ -541,13 +541,13 @@ mod tests {
     #[test]
     fn a_positional_driver_refuses_a_placeholder_after_a_slot() {
         let template =
-            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.predicate */ LIMIT ?").unwrap();
+            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ LIMIT ?").unwrap();
 
         let error = build_error(
             template
                 .builder()
                 .bind(50_i64)
-                .fill("predicate", &text("reads > 1")),
+                .fill("filter", &text("reads > 1")),
         );
 
         assert!(matches!(error, Error::Positional(_)), "{error}");
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn a_late_placeholder_is_fine_while_the_slot_stays_empty() {
         let template =
-            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.predicate */ LIMIT ?").unwrap();
+            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ LIMIT ?").unwrap();
 
         assert_eq!(template.builder().bind(50_i64).sql(), "SELECT 1  LIMIT ?");
     }
@@ -568,13 +568,12 @@ mod tests {
     #[test]
     fn a_numbered_driver_allows_a_placeholder_after_a_slot() {
         let template =
-            QueryTemplate::<Postgres>::parse("SELECT 1 /* AND query.predicate */ LIMIT $1")
-                .unwrap();
+            QueryTemplate::<Postgres>::parse("SELECT 1 /* AND query.filter */ LIMIT $1").unwrap();
 
         let sql = template
             .builder()
             .bind(50_i64)
-            .fill("predicate", &fragment("reads > ", 1))
+            .fill("filter", &fragment("reads > ", 1))
             .sql();
 
         assert_eq!(sql, "SELECT 1 AND reads > $2 LIMIT $1");
@@ -585,13 +584,9 @@ mod tests {
     #[test]
     fn a_question_mark_in_a_literal_is_not_a_placeholder() {
         let template =
-            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.predicate */ AND x = \'?\'")
-                .unwrap();
+            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ AND x = \'?\'").unwrap();
 
-        let sql = template
-            .builder()
-            .fill("predicate", &text("reads > 1"))
-            .sql();
+        let sql = template.builder().fill("filter", &text("reads > 1")).sql();
 
         assert_eq!(sql, "SELECT 1 AND reads > 1 AND x = \'?\'");
     }
@@ -605,7 +600,7 @@ mod tests {
         let sql = template
             .builder()
             .fill("order", &text("id ASC"))
-            .fill("predicate", &fragment("reads > ", 1))
+            .fill("filter", &fragment("reads > ", 1))
             .bind(7_i64)
             .sql();
 

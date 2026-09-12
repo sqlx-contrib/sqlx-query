@@ -24,7 +24,7 @@ static VOLUMES: QueryTemplate<Postgres> = sql!(
     "SELECT id, title, read_count
        FROM volumes
       WHERE tenant_id = $1
-        /* AND query.predicate */
+        /* AND query.filter */
       /* ORDER BY query.order */
       LIMIT $2"
 );
@@ -54,8 +54,8 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
         .builder()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("predicate", &filter.to_fragment(&*VOLUMES_MAPPING)?)
-        .fill("predicate", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("filter", &filter.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("filter", &cursor.to_fragment(&*VOLUMES_MAPPING)?)
         .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?);
 
     assert_eq!(
@@ -78,8 +78,8 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
         .builder()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("predicate", &filter.to_fragment(&*VOLUMES_MAPPING)?)
-        .fill("predicate", &resumed.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("filter", &filter.to_fragment(&*VOLUMES_MAPPING)?)
+        .fill("filter", &resumed.to_fragment(&*VOLUMES_MAPPING)?)
         .fill("order", &sort.to_fragment(&*VOLUMES_MAPPING)?);
 
     assert_eq!(
