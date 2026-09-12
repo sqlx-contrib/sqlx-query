@@ -76,7 +76,7 @@ pub enum Error {
     /// spliced ahead of a `?` moves it onto the wrong value. PostgreSQL binds
     /// `$N` by index and is unaffected, which is why this is a driver-specific
     /// error rather than a rule everywhere.
-    Positional(&'static str),
+    Positional(String),
 
     /// A driver refused to encode a bind value.
     Encode(BoxDynError),

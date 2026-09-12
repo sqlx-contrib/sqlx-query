@@ -65,6 +65,13 @@ pub(crate) struct SlotSpec {
 pub struct QueryTemplate<DB> {
     pieces: Cow<'static, [Piece]>,
     skeleton: Cow<'static, str>,
+    /// Where the first `?` that follows a slot is, if there is one.
+    ///
+    /// Harmless where placeholders are numbered, and fatal where they are
+    /// positional -- see [`Splice`](crate::Splice). Recorded here because the
+    /// scanner is the only thing that can tell a placeholder from a `?` inside
+    /// a string literal.
+    late_placeholder: Option<usize>,
     database: PhantomData<DB>,
 }
 
@@ -79,11 +86,12 @@ impl<DB> QueryTemplate<DB> {
     /// [`Error::Template`] if a literal or comment is unterminated, a sentinel
     /// is malformed, or a slot name is declared twice.
     pub fn parse(sql: &'static str) -> Result<Self, Error> {
-        let (pieces, skeleton) = scan(sql)?;
+        let (pieces, skeleton, late_placeholder) = scan(sql)?;
 
         Ok(Self {
             pieces: Cow::Owned(pieces),
             skeleton: Cow::Owned(skeleton),
+            late_placeholder,
             database: PhantomData,
         })
     }
@@ -108,6 +116,10 @@ impl<DB> QueryTemplate<DB> {
     pub(crate) fn pieces(&self) -> &[Piece] {
         &self.pieces
     }
+
+    pub(crate) fn late_placeholder(&self) -> Option<usize> {
+        self.late_placeholder
+    }
 }
 
 impl<DB: Database> QueryTemplate<DB> {
@@ -123,6 +135,7 @@ impl<DB> Clone for QueryTemplate<DB> {
         Self {
             pieces: self.pieces.clone(),
             skeleton: self.skeleton.clone(),
+            late_placeholder: self.late_placeholder,
             database: PhantomData,
         }
     }
@@ -150,7 +163,7 @@ impl<DB> fmt::Debug for QueryTemplate<DB> {
 /// not a sentinel. Every construct that can contain a `/*` has to be skipped:
 /// quoted strings and identifiers, line comments, dollar-quoted bodies, and
 /// nested block comments.
-fn scan(sql: &'static str) -> Result<(Vec<Piece>, String), Error> {
+fn scan(sql: &'static str) -> Result<(Vec<Piece>, String, Option<usize>), Error> {
     let bytes = sql.as_bytes();
     let mut pieces = Vec::new();
     let mut skeleton = String::with_capacity(sql.len());
@@ -161,6 +174,12 @@ fn scan(sql: &'static str) -> Result<(Vec<Piece>, String), Error> {
     let mut text_start = 0;
     let mut at = 0;
 
+    // A `?` after a slot is bound out of order on positional drivers, because
+    // what the slot splices in front of it shifts its position. Only the
+    // scanner can tell one from a `?` inside a literal.
+    let mut seen_slot = false;
+    let mut late_placeholder = None;
+
     while at < bytes.len() {
         match bytes[at] {
             b'\'' => at = string_literal(sql, at)?,
@@ -168,6 +187,12 @@ fn scan(sql: &'static str) -> Result<(Vec<Piece>, String), Error> {
             b'`' => at = delimited(sql, at, b'`')?,
             b'-' if bytes.get(at + 1) == Some(&b'-') => at = line_comment(bytes, at),
             b'$' => at = dollar_quoted(sql, at)?.unwrap_or(at + 1),
+            b'?' => {
+                if seen_slot && late_placeholder.is_none() {
+                    late_placeholder = Some(at);
+                }
+                at += 1;
+            }
             b'/' if bytes.get(at + 1) == Some(&b'*') => {
                 let (end, body) = block_comment(sql, at)?;
 
@@ -186,6 +211,7 @@ fn scan(sql: &'static str) -> Result<(Vec<Piece>, String), Error> {
                         skeleton.push_str(text);
                     }
                     pieces.push(Piece::Slot(slot));
+                    seen_slot = true;
                     text_start = end;
                 }
 
@@ -201,7 +227,7 @@ fn scan(sql: &'static str) -> Result<(Vec<Piece>, String), Error> {
         skeleton.push_str(text);
     }
 
-    Ok((pieces, skeleton))
+    Ok((pieces, skeleton, late_placeholder))
 }
 
 /// Skip a `'...'` literal, returning the index just past its closing quote.

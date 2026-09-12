@@ -11,7 +11,8 @@ use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table}
 
 /// Note `LIMIT 3` is a literal, not a bind. SQLite numbers placeholders by
 /// their position in the text, so a `?` after a slot would be shifted by
-/// whatever the slot splices in front of it.
+/// whatever the slot splices in front of it -- which the crate now refuses
+/// rather than binding wrongly.
 const PAGE: &str = "SELECT id, title, read_count FROM volumes \
                     WHERE tenant_id = ? \
                     /* AND query.predicate */ \

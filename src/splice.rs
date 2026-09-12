@@ -25,8 +25,14 @@ use crate::template::{Piece, QueryTemplate, SlotSpec};
 /// * `?` refers to the *N*th placeholder *in the text*, so a fragment spliced
 ///   ahead of a `?` silently shifts it onto the wrong value.
 ///
-/// So on a positional driver, binding after a fill -- or filling slots out of
-/// skeleton order -- is an error rather than a wrong answer.
+/// So on a positional driver three things are errors rather than wrong answers:
+/// binding after a fill, filling slots out of skeleton order, and filling a
+/// slot in a skeleton whose own placeholder comes after it.
+///
+/// That last one is not covered by the first two. A `LIMIT ?` at the end binds
+/// first and correctly, but renders after whatever the slot splices in, so it
+/// would read a fragment's value. Write the value literally, or move it before
+/// the first slot.
 ///
 /// # Errors are deferred to `build`
 ///
@@ -74,7 +80,7 @@ impl<'t, DB: Database> Splice<'t, DB> {
     pub fn bind<'q, T: Encode<'q, DB> + Type<DB>>(mut self, value: T) -> Self {
         if self.filled_any && !self.numbered {
             return self.fail(Error::Positional(
-                "every skeleton parameter must be bound before any slot is filled",
+                "every skeleton parameter must be bound before any slot is filled".to_owned(),
             ));
         }
 
@@ -245,7 +251,7 @@ impl<'t, DB: Database> Splice<'t, DB> {
     fn check_order(&mut self, index: usize) -> Option<Error> {
         if !self.numbered && index < self.last_filled {
             return Some(Error::Positional(
-                "slots must be filled in the order they appear in the skeleton",
+                "slots must be filled in the order they appear in the skeleton".to_owned(),
             ));
         }
 
@@ -260,6 +266,19 @@ impl<'t, DB: Database> Splice<'t, DB> {
     /// whitespace surrounded the comment, and adding more would only show up in
     /// logs. Repeated fills are separated here, because nothing else will.
     fn attach(&mut self, index: usize, spec: &SlotSpec, body: &str) {
+        if !self.numbered
+            && let Some(offset) = self.template.late_placeholder()
+        {
+            let error = Error::Positional(format!(
+                "the skeleton has a placeholder at byte {offset}, after a slot: \
+                 splicing in front of it would move it onto the wrong value. \
+                 Put every placeholder before the first slot, or write the \
+                 value literally"
+            ));
+            self.error.get_or_insert(error);
+            return;
+        }
+
         let slot = &mut self.filled[index];
 
         if !slot.is_empty() {
@@ -512,6 +531,67 @@ mod tests {
         );
 
         assert!(matches!(error, Error::Positional(_)), "{error}");
+    }
+
+    /// The hole the ordering rules alone do not close: the skeleton's own `?`
+    /// is bound first and correctly, but it renders *after* whatever the slot
+    /// splices in, so it ends up reading a fragment's value.
+    #[test]
+    fn a_positional_driver_refuses_a_placeholder_after_a_slot() {
+        let template =
+            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.predicate */ LIMIT ?").unwrap();
+
+        let error = build_error(
+            template
+                .splice()
+                .bind(50_i64)
+                .fill("predicate", &text("reads > 1")),
+        );
+
+        assert!(matches!(error, Error::Positional(_)), "{error}");
+        assert!(format!("{error}").contains("after a slot"), "{error}");
+    }
+
+    /// Unfilled, nothing moves, so there is nothing to refuse.
+    #[test]
+    fn a_late_placeholder_is_fine_while_the_slot_stays_empty() {
+        let template =
+            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.predicate */ LIMIT ?").unwrap();
+
+        assert_eq!(template.splice().bind(50_i64).sql(), "SELECT 1  LIMIT ?");
+    }
+
+    /// Numbered placeholders name a bound value, not a position, so the same
+    /// skeleton is correct on PostgreSQL.
+    #[test]
+    fn a_numbered_driver_allows_a_placeholder_after_a_slot() {
+        let template =
+            QueryTemplate::<Postgres>::parse("SELECT 1 /* AND query.predicate */ LIMIT $1")
+                .unwrap();
+
+        let sql = template
+            .splice()
+            .bind(50_i64)
+            .fill("predicate", &fragment("reads > ", 1))
+            .sql();
+
+        assert_eq!(sql, "SELECT 1 AND reads > $2 LIMIT $1");
+    }
+
+    /// A `?` inside a literal is not a placeholder, so it must not trip the
+    /// check -- which is why the scanner records this rather than a search.
+    #[test]
+    fn a_question_mark_in_a_literal_is_not_a_placeholder() {
+        let template =
+            QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.predicate */ AND x = \'?\'")
+                .unwrap();
+
+        let sql = template
+            .splice()
+            .fill("predicate", &text("reads > 1"))
+            .sql();
+
+        assert_eq!(sql, "SELECT 1 AND reads > 1 AND x = \'?\'");
     }
 
     /// The same sequence is fine where placeholders are numbered, which is why

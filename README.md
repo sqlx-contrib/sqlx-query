@@ -112,8 +112,8 @@ one to wander into a string literal.
 bound value, so text spliced ahead of a `$2` leaves it alone — that is why
 `LIMIT $2` survives above. MySQL's and SQLite's `?` names the *N*th placeholder
 *in the text*, so splicing ahead of one shifts it. Where that bites — binding
-after filling, or filling slots out of order — this crate returns an error
-rather than a wrong answer.
+after filling, filling slots out of order, or a skeleton whose own `?` sits
+after a slot — this crate returns an error rather than a wrong answer.
 
 **The schema is the type checker.** cel-rust parses without checking, so
 `id > 'tuesday'` is a perfectly good CEL program. The allow-list is the only
