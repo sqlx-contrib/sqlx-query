@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Brings up the compose stack -- PostgreSQL and MySQL -- and exports
+      # SQLX_QUERY_POSTGRES_URL and SQLX_QUERY_MYSQL_URL with the container
+      # hostnames rewritten to the ports Docker published. Without it those
+      # tests skip rather than fail, so this step is what makes them run at all.
+      - name: Setup Devcontainer
+        uses: devcontainer-env/devcontainer-ci@v1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-flakehub: disabled
+          use-gha-cache: enabled
+
+      # Prints which URLs are set, so a run where the databases did not come up
+      # is distinguishable from one where they did. Otherwise a silently
+      # skipped suite looks exactly like a passing one.
+      - name: Report Databases
+        run: nix develop --command make databases
+
+      - name: Run Lint
+        run: nix develop --command make lint
+
+      # Each driver alone, with and without CEL. The all-features build hides
+      # breakage in the configuration consumers actually use.
+      - name: Run Lint (feature combinations)
+        run: nix develop --command make lint-features
+
+      - name: Run Tests
+        run: nix develop --command make test

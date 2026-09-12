@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/refs/heads/main/schemas/devContainer.base.schema.json",
+  "name": "sqlx-query",
+  "service": "workspace",
+  "dockerComposeFile": "docker-compose.yml",
+  "workspaceFolder": "/home/vscode/workspace",
+  // Read by tests/postgres.rs and tests/mysql.rs. Both carry an explicit port
+  // even though it is the default: devcontainer-env rewrites a URL by looking
+  // up the port it names, and neither scheme is one the URL parser knows a
+  // default for -- so without `:5432` and `:3306` the rewrite silently does
+  // nothing and the host keeps a hostname it cannot resolve.
+  "containerEnv": {
+    "SQLX_QUERY_POSTGRES_URL": "postgres://vscode@postgres:5432/sqlx_query?sslmode=disable",
+    "SQLX_QUERY_MYSQL_URL": "mysql://root@mysql:3306/sqlx_query"
+  },
+  "mounts": [
+    "source=${localWorkspaceFolderBasename}-nix,target=/nix,type=volume",
+    "source=${localWorkspaceFolderBasename}-cache,target=/home/vscode/.cache,type=volume",
+    "source=${localWorkspaceFolderBasename}-cargo,target=/home/vscode/.cargo,type=volume"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+    "ghcr.io/devcontainers/features/nix:1": {
+      // Single-user install. The feature defaults to multiUser, which runs
+      // post-install steps through the nix-daemon -- but a Docker build layer
+      // has no init system to start one, so those steps fail with
+      // "opening lock file /nix/var/nix/db/big-lock: Permission denied".
+      // A single-user store owned by vscode needs no daemon, and is what the
+      // /nix volume and the postCreateCommand chown below already assume.
+      "multiUser": false,
+      "extraNixConfig": "experimental-features = nix-command flakes"
+    }
+  },
+  "postCreateCommand": "sudo chown -R vscode:vscode /nix /home/vscode/.cache /home/vscode/.cargo"
+}
