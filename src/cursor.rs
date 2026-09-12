@@ -81,15 +81,9 @@ impl Cursor {
 
     /// A position at the end of a page.
     ///
-    /// `key_values` are the last row's values for each key of `sort`, in the
-    /// same order.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Cursor`] if the number of values does not match the number of
-    /// keys. Their *order* cannot be checked -- that is the caller's to get
-    /// right.
-    pub fn new(sort: &Sort, key_values: &[Value]) -> Result<Self, Error> {
+    /// Reached through [`Sort::cursor`], which is the only caller that has the
+    /// key list this has to agree with.
+    pub(crate) fn new(sort: &Sort, key_values: &[Value]) -> Result<Self, Error> {
         if sort.keys().len() != key_values.len() {
             return Err(Error::Cursor(format!(
                 "the sort has {} keys but {} values were given",
@@ -491,7 +485,7 @@ mod tests {
     #[test]
     fn a_position_round_trips_through_a_token() {
         let values = [Value::Text("Dune".into()), Value::Int(4711)];
-        let cursor = Cursor::new(&sort(), &values).unwrap();
+        let cursor = sort().cursor(&values).unwrap();
 
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
@@ -511,7 +505,7 @@ mod tests {
             Value::Timestamp(Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap()),
         ];
 
-        let cursor = Cursor::new(&sort, &values).unwrap();
+        let cursor = sort.cursor(&values).unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         let round_tripped: Vec<Value> = parsed.keys().iter().map(|k| k.value.clone()).collect();
@@ -525,7 +519,7 @@ mod tests {
         let sort = Sort::parse("at").unwrap();
         let far = Utc.timestamp_opt(99_999_999_999, 0).unwrap();
 
-        let cursor = Cursor::new(&sort, &[Value::Timestamp(far)]).unwrap();
+        let cursor = sort.cursor(&[Value::Timestamp(far)]).unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         assert_eq!(parsed.keys()[0].value, Value::Timestamp(far));
@@ -533,7 +527,9 @@ mod tests {
 
     #[test]
     fn the_recorded_direction_survives() {
-        let cursor = Cursor::new(&sort(), &[Value::Text("x".into()), Value::Int(1)]).unwrap();
+        let cursor = sort()
+            .cursor(&[Value::Text("x".into()), Value::Int(1)])
+            .unwrap();
         let parsed = Cursor::parse(cursor.as_str()).unwrap();
 
         assert_eq!(parsed.keys()[0].key.direction, Direction::Desc);
@@ -542,7 +538,7 @@ mod tests {
 
     #[test]
     fn a_value_count_that_does_not_match_the_sort_is_rejected() {
-        let error = Cursor::new(&sort(), &[Value::Int(1)]).unwrap_err();
+        let error = sort().cursor(&[Value::Int(1)]).unwrap_err();
 
         assert!(
             format!("{error}").contains("2 keys but 1 values"),
@@ -554,7 +550,8 @@ mod tests {
     /// rather than read past the end of the buffer.
     #[test]
     fn malformed_tokens_are_rejected() {
-        let good = Cursor::new(&sort(), &[Value::Text("x".into()), Value::Int(1)])
+        let good = sort()
+            .cursor(&[Value::Text("x".into()), Value::Int(1)])
             .unwrap()
             .as_str()
             .to_owned();
@@ -586,7 +583,9 @@ mod tests {
     #[test]
     fn a_token_from_a_different_order_is_refused() {
         let issued = Sort::parse("title asc").unwrap().asc("id");
-        let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
+        let cursor = issued
+            .cursor(&[Value::Text("Dune".into()), Value::Int(42)])
+            .unwrap();
 
         let asked = Sort::parse("title desc").unwrap().asc("id");
         let error = cursor.resume(asked).unwrap_err();
@@ -601,7 +600,9 @@ mod tests {
     #[test]
     fn an_absent_order_by_adopts_the_token_s_own() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
-        let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
+        let cursor = issued
+            .cursor(&[Value::Text("Dune".into()), Value::Int(42)])
+            .unwrap();
 
         assert_eq!(cursor.resume(Sort::new()).unwrap(), issued);
     }
@@ -611,7 +612,9 @@ mod tests {
     #[test]
     fn an_agreeing_order_is_returned_unchanged() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
-        let cursor = Cursor::new(&issued, &[Value::Text("Dune".into()), Value::Int(42)]).unwrap();
+        let cursor = issued
+            .cursor(&[Value::Text("Dune".into()), Value::Int(42)])
+            .unwrap();
 
         assert_eq!(cursor.resume(issued.clone()).unwrap(), issued);
     }
@@ -622,7 +625,7 @@ mod tests {
         let sort = Sort::parse("blob").unwrap();
         let value = Value::Bytes((0..=255).collect());
 
-        let token = Cursor::new(&sort, &[value]).unwrap().as_str().to_owned();
+        let token = sort.cursor(&[value]).unwrap().as_str().to_owned();
 
         assert!(
             token
