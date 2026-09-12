@@ -591,6 +591,7 @@ mod tests {
         assert!(format!("{error}").contains("version 99"), "{error}");
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn the_first_page_has_no_condition() {
         let fragment = Cursor::parse("")

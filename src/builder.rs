@@ -475,7 +475,9 @@ fn numbered<DB: Database>() -> bool {
     probe.starts_with('$')
 }
 
-#[cfg(test)]
+// Every test here names a concrete driver, so the module needs the features
+// that provide them.
+#[cfg(all(test, feature = "postgres", feature = "mysql"))]
 mod tests {
     use sqlx::{MySql, Postgres};
 

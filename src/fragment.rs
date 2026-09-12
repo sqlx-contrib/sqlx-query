@@ -98,7 +98,7 @@ impl<DB, T> QueryFragment<DB, T> {
     }
 
     /// The segments and values, for tests in sibling modules.
-    #[cfg(all(test, feature = "cel"))]
+    #[cfg(all(test, feature = "cel", feature = "postgres"))]
     pub(crate) fn parts_for_test(&self) -> (&[String], &[T]) {
         self.parts()
     }
@@ -108,8 +108,11 @@ impl<DB, T> QueryFragment<DB, T> {
     /// Not what gets executed -- the driver decides the placeholder at splice
     /// time -- but the only way to look at a fragment on its own.
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests render a fragment on its own")
+        any(not(test), not(feature = "postgres")),
+        expect(
+            dead_code,
+            reason = "only PostgreSQL's tests render a fragment on its own"
+        )
     )]
     pub(crate) fn preview(&self) -> String {
         self.segments.join("?")

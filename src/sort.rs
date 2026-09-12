@@ -341,6 +341,7 @@ impl fmt::Display for Sort {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "postgres")]
     use sqlx::Postgres;
 
     use super::*;
@@ -413,6 +414,7 @@ mod tests {
         assert_eq!(sort.keys(), [SortKey::desc("id")]);
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn rendering_quotes_columns_and_maps_aliases() {
         let sort = Sort::parse("readCount desc, id").unwrap();

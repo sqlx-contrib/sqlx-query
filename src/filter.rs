@@ -127,7 +127,9 @@ impl<DB: Dialect> crate::render::Render<DB> for Filter {
     }
 }
 
-#[cfg(test)]
+// Rendering is what these check, and rendering needs a driver; PostgreSQL is
+// the one they are written against.
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use sqlx::Postgres;
 

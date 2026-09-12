@@ -546,7 +546,9 @@ fn unsupported(what: &str) -> Error {
     Error::Unsupported(format!("no SQL lowering for {what}"))
 }
 
-#[cfg(test)]
+// Rendering is what these check, and rendering needs a driver; PostgreSQL is
+// the one they are written against.
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use sqlx::Postgres;
 

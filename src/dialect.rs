@@ -190,7 +190,10 @@ pub(crate) fn reference<DB: Dialect>(column: &Column) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Every test here renders against a concrete driver.
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
     use super::*;
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
     use crate::mapping::ColumnType;
 
     /// A join needs `"a"."name"`, not one identifier containing a dot.
