@@ -84,15 +84,23 @@ impl Column {
     }
 
     /// Qualify it: `"a"."name"` rather than `"name"`.
+    ///
+    /// Named for the field it sets rather than as `qualified(..)`, so there is
+    /// no reading under which the argument might be the thing being qualified.
     #[must_use]
-    pub fn qualified(mut self, qualifier: impl Into<Cow<'static, str>>) -> Self {
+    pub fn with_qualifier(mut self, qualifier: impl Into<Cow<'static, str>>) -> Self {
         self.qualifier = Some(qualifier.into());
         self
     }
 
     /// Name it as the result set does, for `SELECT a.name AS author_name`.
+    ///
+    /// `with_alias("author_name")` rather than `aliased("author_name")`, which
+    /// can be read as "an alias *for* `author_name`" -- the opposite of what it
+    /// means. These two fields exist because source and result names are easy
+    /// to confuse; the setter should not add a second way to confuse them.
     #[must_use]
-    pub fn aliased(mut self, alias: impl Into<Cow<'static, str>>) -> Self {
+    pub fn with_alias(mut self, alias: impl Into<Cow<'static, str>>) -> Self {
         self.alias = Some(alias.into());
         self
     }

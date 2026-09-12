@@ -193,16 +193,16 @@ const JOINED: &str = "SELECT v.id, v.title, a.name AS author_name \
 
 fn joined_mapping() -> QueryMapping {
     QueryMapping::new()
-        .add("id", Column::key("id", ColumnType::Int).qualified("v"))
+        .add("id", Column::key("id", ColumnType::Int).with_qualifier("v"))
         .add(
             "title",
-            Column::new("title", ColumnType::Text).qualified("v"),
+            Column::new("title", ColumnType::Text).with_qualifier("v"),
         )
         .add(
             "authorName",
             Column::new("name", ColumnType::Text)
-                .qualified("a")
-                .aliased("author_name"),
+                .with_qualifier("a")
+                .with_alias("author_name"),
         )
 }
 

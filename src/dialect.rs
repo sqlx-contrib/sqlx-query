@@ -169,7 +169,7 @@ mod tests {
     fn a_qualified_column_quotes_each_part() {
         use sqlx::Postgres;
 
-        let column = Column::new("name", ColumnType::Text).qualified("a");
+        let column = Column::new("name", ColumnType::Text).with_qualifier("a");
 
         assert_eq!(reference::<Postgres>(&column), r#""a"."name""#);
     }
@@ -179,7 +179,7 @@ mod tests {
     fn a_qualifier_from_configuration_is_escaped_too() {
         use sqlx::Postgres;
 
-        let column = Column::new("name", ColumnType::Text).qualified(r#"a"."b"#);
+        let column = Column::new("name", ColumnType::Text).with_qualifier(r#"a"."b"#);
 
         assert_eq!(reference::<Postgres>(&column), r#""a"".""b"."name""#);
     }
