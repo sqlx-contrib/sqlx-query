@@ -47,19 +47,19 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     };
     let (tenant_id, page_size) = (7_i64, 50_i64);
 
-    let filter = Filter::parse(&request.filter)?;
-    let sort = Sort::parse(&request.order_by)?.asc("id");
-    let cursor = Cursor::parse(&request.page_token)?;
-
-    cursor.validate(&sort)?;
+    let filter = Filter::parse(&request.filter)?.resolve(&*MAPPING)?;
+    let sort = Sort::parse(&request.order_by)?
+        .asc("id")
+        .resolve(&*MAPPING)?;
+    let cursor = Cursor::parse(&request.page_token)?.resolve(&*MAPPING)?;
 
     let query = VOLUMES
-        .builder(&*MAPPING)
+        .builder()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("filter", &filter)
-        .fill("filter", &cursor)
-        .fill("order", &sort);
+        .filter(&filter)
+        .seek(&cursor)
+        .order(&sort);
 
     assert_eq!(
         query.sql(),
@@ -74,16 +74,15 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
     // `title desc, id asc` at ("Dune", 4711), so it doubles as a guard on the
     // format: clients keep these across deploys, and a silent change would
     // break live pagination.
-    let resumed = Cursor::parse(TOKEN)?;
-    resumed.validate(&sort)?;
+    let resumed = Cursor::parse(TOKEN)?.resolve(&*MAPPING)?;
 
     let second = VOLUMES
-        .builder(&*MAPPING)
+        .builder()
         .bind(tenant_id)
         .bind(page_size)
-        .fill("filter", &filter)
-        .fill("filter", &resumed)
-        .fill("order", &sort);
+        .filter(&filter)
+        .seek(&resumed)
+        .order(&sort);
 
     assert_eq!(
         second.sql(),

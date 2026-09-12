@@ -44,24 +44,23 @@ static MAPPING: LazyLock<QueryMapping> = LazyLock::new(|| {
 });
 
 // Request parameters, as the strings they arrive as. Each treats an empty
-// string as "not asked for" rather than as an error.
-let filter = Filter::parse(&request.filter)?;           // CEL, `cel` feature
-let sort = Sort::parse(&request.order_by)?.asc("id");   // AIP-132
-let cursor = Cursor::parse(&request.page_token)?;
+// string as "not asked for" rather than as an error, and each is checked
+// against the mapping before it goes anywhere near the query. `resolve` is the
+// boundary: on the far side of it nothing is still a client's string.
+let filter = Filter::parse(&request.filter)?.resolve(&*MAPPING)?;      // CEL, `cel` feature
+let sort = Sort::parse(&request.order_by)?.asc("id").resolve(&*MAPPING)?;  // AIP-132
+let cursor = Cursor::parse(&request.page_token)?.resolve(&*MAPPING)?;
 
-// Refused if the token was issued under a different ordering, which would
-// otherwise hand back rows the client has already seen, with no error anywhere.
-cursor.validate(&sort)?;
-
-// The mapping goes in once. `fill` takes the producer itself, so the chain has
-// no `?` in it and the first failure comes back from `build`.
+// So the builder needs no mapping. `seek` and `order` agree on the ordering or
+// the build fails -- a token reused under a changed `order_by` would otherwise
+// hand back rows the client has already seen, with no error anywhere.
 let rows = VOLUMES
-    .builder(&*MAPPING)
+    .builder()
     .bind(tenant_id)   // $1
     .bind(page_size)   // $2
-    .fill("filter", &filter)
-    .fill("filter", &cursor)
-    .fill("order", &sort)
+    .filter(&filter)
+    .seek(&cursor)
+    .order(&sort)
     .build()?
     .fetch_all(&pool)
     .await?;
@@ -70,14 +69,12 @@ let rows = VOLUMES
 // cursor below.
 let page: Vec<Volume> = rows.iter().map(Volume::from_row).collect::<Result<_, _>>()?;
 
-// The token for the next page, read out of the last row by the mapping's own
-// field-to-column mapping — so there is no second mapping to keep in step, and
-// the ordering may be one the client chose at runtime.
+// The token for the next page, read out of the last row by the columns the
+// resolved ordering already carries — so there is no second field-to-column
+// mapping to keep in step, and the ordering may be one the client chose at
+// runtime.
 if let Some(last) = rows.last() {
-    response.next_page_token = Cursor::new(&sort)
-        .after(last, &*MAPPING)?
-        .as_str()
-        .to_owned();
+    response.next_page_token = Cursor::new(&sort).after(last)?.as_str().to_owned();
 }
 ```
 
@@ -144,9 +141,9 @@ same object.
 Early, but the core is exercised against a real database: `tests/sqlite.rs`
 pages through a table in memory and checks that every row is visited exactly
 once, including rows that tie on the sort column, under ascending, descending
-and mixed orderings. PostgreSQL and MySQL are still only covered by
-SQL-shape assertions, and the `sql!` macro — which would turn a mistyped
-sentinel into a compile error — is not written yet.
+and mixed orderings. PostgreSQL and MySQL are still only covered by SQL-shape
+assertions — the numbering rules below are asserted against generated SQL, not
+against a live server.
 
 The rationale lives with the code — `cargo doc --open` — rather than here.
 

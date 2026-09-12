@@ -23,21 +23,20 @@
 //!     .add("readCount", Column::new("read_count", ColumnType::Int));
 //!
 //! // Request parameters, as the strings they arrive as. Each treats an empty
-//! // string as "not asked for" rather than as an error.
-//! let filter = Filter::parse("readCount > 100 && title.startsWith(\'D\')")?;
-//! let sort = Sort::parse("title desc")?.asc("id");
-//!
-//! // Refused if this token was issued under a different ordering.
-//! let cursor = Cursor::parse("")?;
-//! cursor.validate(&sort)?;
+//! // string as "not asked for" rather than as an error, and each is resolved
+//! // against the mapping -- the boundary between what a client sent and what
+//! // this query will run.
+//! let filter = Filter::parse("readCount > 100 && title.startsWith(\'D\')")?.resolve(&mapping)?;
+//! let sort = Sort::parse("title desc")?.asc("id").resolve(&mapping)?;
+//! let cursor = Cursor::parse("")?.resolve(&mapping)?;
 //!
 //! let query = volumes
-//!     .builder(&mapping)
+//!     .builder()
 //!     .bind(7_i64)   // $1, the tenant
 //!     .bind(50_i64)  // $2, the page size
-//!     .fill("filter", &filter)
-//!     .fill("filter", &cursor)
-//!     .fill("order", &sort);
+//!     .filter(&filter)
+//!     .seek(&cursor)
+//!     .order(&sort);
 //!
 //! assert_eq!(
 //!     query.sql(),

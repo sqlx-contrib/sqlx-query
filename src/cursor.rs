@@ -7,8 +7,8 @@ use chrono::{TimeZone as _, Utc};
 use crate::dialect::{Dialect, reference};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::mapping::Mapping;
-use crate::sort::{Direction, Sort, SortKey, resolve};
+use crate::mapping::{Column, Mapping};
+use crate::sort::{Direction, Sort, SortKey};
 use crate::value::Value;
 use sqlx::Row;
 
@@ -51,8 +51,8 @@ pub struct CursorKey {
 /// The key values, and the ordering they were taken under. The ordering is
 /// recorded because a client that changes `order_by` between pages and reuses
 /// the token would otherwise get a page that looks fine and is wrong -- rows
-/// already seen, rows never seen. [`validate`](Self::validate) compares the two
-/// and refuses.
+/// already seen, rows never seen. The builder compares the recorded ordering
+/// against the one it is given and refuses a mismatch.
 ///
 /// # What it does not carry
 ///
@@ -94,12 +94,6 @@ impl Cursor {
             keys: Vec::new(),
             token: String::new(),
         }
-    }
-
-    /// No position and no ordering: what a request with no page token has.
-    #[must_use]
-    pub fn empty() -> Self {
-        Self::default()
     }
 
     /// A cursor positioned after a row whose key values are already in hand.
@@ -153,23 +147,32 @@ impl Cursor {
     /// [`Error::UnknownColumn`] for a key the mapping does not expose, and
     /// [`Error::Column`] if a key's column is not in the row -- usually because
     /// it was left out of the `SELECT` list.
-    pub fn after<R>(&self, row: &R, mapping: &dyn Mapping) -> Result<Self, Error>
+    pub fn after<R>(&self, row: &R) -> Result<Self, Error>
     where
         R: Row,
         R::Database: Dialect,
     {
-        let mut values = Vec::with_capacity(self.sort.keys().len());
-
-        for key in self.sort.keys() {
-            let column = resolve(mapping, &key.field)?;
-            values.push(<R::Database as Dialect>::value(
-                row,
-                column.result_name(),
-                column.ty,
-            )?);
-        }
+        let values = self
+            .sort
+            .columns()?
+            .iter()
+            .map(|column| <R::Database as Dialect>::value(row, column.result_name(), column.ty))
+            .collect::<Result<Vec<_>, _>>()?;
 
         self.after_values(&values)
+    }
+
+    /// Resolve the ordering this cursor pages by, through `mapping`.
+    ///
+    /// The same boundary [`Sort::resolve`] is: afterwards the seek condition
+    /// renders, and rows are read, without the mapping again.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownColumn`] for a key the mapping does not expose.
+    pub fn resolve(mut self, mapping: &dyn Mapping) -> Result<Self, Error> {
+        self.sort = self.sort.resolve(mapping)?;
+        Ok(self)
     }
 
     /// Read a page token.
@@ -183,7 +186,7 @@ impl Cursor {
     /// version of this format, or is truncated or otherwise malformed.
     pub fn parse(token: &str) -> Result<Self, Error> {
         if token.trim().is_empty() {
-            return Ok(Self::empty());
+            return Ok(Self::default());
         }
 
         let bytes = BASE64
@@ -220,66 +223,6 @@ impl Cursor {
         self.keys.is_empty()
     }
 
-    /// Check this token against the ordering a request asks for.
-    ///
-    /// # Why not `OFFSET`
-    ///
-    /// An offset counts rows the database has to produce and discard, so the
-    /// last page of a long list costs the most, and a row inserted or deleted
-    /// between pages shifts everything after it. Seeking asks for the rows
-    /// *after a specific row*, which is a range scan and is stable under
-    /// concurrent writes. The price is that the ordering has to be total: see
-    /// [`Sort::asc`].
-    ///
-    /// # Why the token records an ordering at all
-    ///
-    /// Reusing a token under a changed `order_by` does not page backwards or
-    /// re-sort -- it flips the comparison and hands back rows the client has
-    /// already seen while never reaching the rest, with no error anywhere.
-    /// Refusing is the only outcome that says what to fix.
-    ///
-    /// An empty `order_by` counts as a change, and is refused too. A client
-    /// that sends the ordering once and then only the token gets an error
-    /// naming both, rather than a page that came back unordered.
-    ///
-    /// That accommodation is still available where it is wanted, because
-    /// [`sort`](Self::sort) is public:
-    ///
-    /// ```
-    /// # use sqlx_query::{Cursor, Sort};
-    /// # let cursor = Cursor::empty();
-    /// # let order_by = "title desc";
-    /// let mut sort = Sort::parse(order_by)?.asc("id");
-    /// if sort.is_empty() {
-    ///     sort = cursor.sort().clone();
-    /// }
-    /// cursor.validate(&sort)?;
-    /// # Ok::<_, sqlx_query::Error>(())
-    /// ```
-    ///
-    /// Returning the reconciled ordering instead would leave two of them in
-    /// scope, identical except in the one case the return value exists for --
-    /// so rendering the wrong one into the `ORDER BY` would be silent, and
-    /// silent only for the clients that triggered it.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Cursor`] if this token was issued under a different ordering.
-    pub fn validate(&self, sort: &Sort) -> Result<(), Error> {
-        if self.is_empty() {
-            return Ok(());
-        }
-
-        if self.sort != *sort {
-            return Err(Error::Cursor(format!(
-                "issued for `{}`, but this request asks for `{sort}`",
-                self.sort
-            )));
-        }
-
-        Ok(())
-    }
-
     /// The condition selecting rows after this position.
     ///
     /// Empty on the first page, so the slot it fills -- and that slot's joiner
@@ -290,11 +233,8 @@ impl Cursor {
     /// [`Error::UnknownColumn`] for a key the mapping does not expose,
     /// [`Error::NotUnique`] if no key is a unique column, and [`Error::Cursor`]
     /// if a value's type does not match its column's.
-    pub fn to_fragment<DB: Dialect>(
-        &self,
-        mapping: &dyn Mapping,
-    ) -> Result<QueryFragment<DB, Value>, Error> {
-        seek(&self.keys, mapping)
+    pub(crate) fn to_fragment<DB: Dialect>(&self) -> Result<QueryFragment<DB, Value>, Error> {
+        seek(&self.keys, self.sort.columns()?)
     }
 
     /// The ordering this cursor pages by.
@@ -322,19 +262,16 @@ impl Cursor {
 /// unavoidable on those drivers regardless.
 fn seek<DB: Dialect>(
     keys: &[CursorKey],
-    mapping: &dyn Mapping,
+    columns: &[Column],
 ) -> Result<QueryFragment<DB, Value>, Error> {
     let mut fragment = QueryFragment::new();
     if keys.is_empty() {
         return Ok(fragment);
     }
 
-    let mut columns = Vec::with_capacity(keys.len());
     let mut total = false;
 
-    for key in keys {
-        let column = resolve(mapping, &key.key.field)?;
-
+    for (key, column) in keys.iter().zip(columns) {
         // A token is client input. One carrying text for an integer column must
         // not reach the database as a comparison between the two.
         if column.ty != key.value.ty() {
@@ -347,7 +284,6 @@ fn seek<DB: Dialect>(
         }
 
         total |= column.unique;
-        columns.push(column);
     }
 
     if !total {
@@ -540,12 +476,6 @@ fn truncated() -> Error {
     Error::Cursor("ends in the middle of a value".to_owned())
 }
 
-impl<DB: Dialect> crate::render::Render<DB> for Cursor {
-    fn to_fragment(&self, mapping: &dyn Mapping) -> Result<QueryFragment<DB, Value>, Error> {
-        Cursor::to_fragment(self, mapping)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,7 +486,7 @@ mod tests {
 
     #[test]
     fn the_first_page_has_an_empty_token() {
-        let cursor = Cursor::empty();
+        let cursor = Cursor::parse("").unwrap();
 
         assert!(cursor.is_empty());
         assert_eq!(cursor.as_str(), "");
@@ -663,54 +593,17 @@ mod tests {
 
     #[test]
     fn the_first_page_has_no_condition() {
-        let fragment = Cursor::empty()
-            .to_fragment::<sqlx::Postgres>(&crate::mapping::QueryMapping::new())
+        let fragment = Cursor::parse("")
+            .unwrap()
+            .to_fragment::<sqlx::Postgres>()
             .unwrap();
 
         assert!(fragment.is_empty());
     }
 
     /// A client that pages under one order and then asks for another gets an
-    /// error rather than a page of rows it has already seen.
-    #[test]
-    fn a_token_from_a_different_order_is_refused() {
-        let issued = Sort::parse("title asc").unwrap().asc("id");
-        let cursor = Cursor::new(&issued)
-            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
-            .unwrap();
-
-        let asked = Sort::parse("title desc").unwrap().asc("id");
-        let error = cursor.validate(&asked).unwrap_err();
-
-        let message = format!("{error}");
-        assert!(message.contains("title asc"), "{message}");
-        assert!(message.contains("title desc"), "{message}");
-    }
-
     /// An omitted `order_by` is a changed parameter like any other: the page
-    /// would come back unordered, so it is refused rather than guessed at.
-    #[test]
-    fn an_absent_order_by_is_refused_too() {
-        let issued = Sort::parse("title desc").unwrap().asc("id");
-        let cursor = Cursor::new(&issued)
-            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
-            .unwrap();
-
-        assert!(cursor.validate(&Sort::new()).is_err());
-    }
-
     /// The ordering that renders the ORDER BY and the one the condition is
-    /// built from come out of the same call, so they cannot disagree.
-    #[test]
-    fn an_agreeing_order_passes() {
-        let issued = Sort::parse("title desc").unwrap().asc("id");
-        let cursor = Cursor::new(&issued)
-            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
-            .unwrap();
-
-        assert!(cursor.validate(&issued).is_ok());
-    }
-
     /// A URL is where these end up, so the alphabet matters.
     #[test]
     fn tokens_are_url_safe() {

@@ -6,7 +6,7 @@ use std::str::FromStr;
 use crate::dialect::{Dialect, reference};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::mapping::Mapping;
+use crate::mapping::{Column, Mapping};
 use crate::value::Value;
 
 /// Which way a sort key runs.
@@ -78,9 +78,22 @@ impl SortKey {
 /// First rather than last, because the direction a caller asked for is the one
 /// they should get. Overriding `id desc` with a later `id asc` would put the
 /// `ORDER BY` at odds with the request that produced it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Eq)]
 pub struct Sort {
     keys: Vec<SortKey>,
+    /// One per key once [`resolve`](Self::resolve) has run, empty until then.
+    ///
+    /// Kept beside the keys rather than inside them so that equality ignores
+    /// it: a page token records an ordering by its field paths, and comparing
+    /// that with a resolved one must not fail over columns the token never
+    /// carried.
+    columns: Vec<Column>,
+}
+
+impl PartialEq for Sort {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys == other.keys
+    }
 }
 
 impl Sort {
@@ -200,25 +213,54 @@ impl Sort {
         self.keys.is_empty()
     }
 
-    /// Render as the body of an `ORDER BY`.
+    /// Resolve each key's column through `mapping`.
+    ///
+    /// This is the boundary: before it a sort is a request string, after it
+    /// every key names a column the mapping exposes. An unknown field fails
+    /// here, on the line that handles request input, rather than when a query
+    /// is built -- which is where a handler can still answer 400.
+    ///
+    /// Afterwards the sort renders, and reads rows, without the mapping again.
     ///
     /// # Errors
     ///
     /// [`Error::UnknownColumn`] for a field the mapping does not expose.
-    pub fn to_fragment<DB: Dialect>(
-        &self,
-        mapping: &dyn Mapping,
-    ) -> Result<QueryFragment<DB, Value>, Error> {
+    pub fn resolve(mut self, mapping: &dyn Mapping) -> Result<Self, Error> {
+        self.columns = self
+            .keys
+            .iter()
+            .map(|key| resolve(mapping, &key.field))
+            .collect::<Result<_, _>>()?;
+
+        Ok(self)
+    }
+
+    /// Whether [`resolve`](Self::resolve) has run.
+    #[must_use]
+    pub fn is_resolved(&self) -> bool {
+        self.keys.len() == self.columns.len()
+    }
+
+    /// The resolved columns, one per key.
+    pub(crate) fn columns(&self) -> Result<&[Column], Error> {
+        if self.is_resolved() {
+            Ok(&self.columns)
+        } else {
+            Err(Error::Unresolved)
+        }
+    }
+
+    /// Render as the body of an `ORDER BY`.
+    pub(crate) fn to_fragment<DB: Dialect>(&self) -> Result<QueryFragment<DB, Value>, Error> {
         let mut fragment = QueryFragment::new();
         let mut sql = String::new();
 
-        for (at, key) in self.keys.iter().enumerate() {
+        for (at, (key, column)) in self.keys.iter().zip(self.columns()?).enumerate() {
             if at > 0 {
                 sql.push_str(", ");
             }
 
-            let column = resolve(mapping, &key.field)?;
-            sql.push_str(&reference::<DB>(&column));
+            sql.push_str(&reference::<DB>(column));
             sql.push(' ');
             sql.push_str(key.direction.keyword());
         }
@@ -236,6 +278,9 @@ impl Sort {
     fn insert(&mut self, key: SortKey) {
         if !self.keys.iter().any(|existing| existing.field == key.field) {
             self.keys.push(key);
+            // A key added after resolving would have no column; drop the lot
+            // rather than leave them out of step.
+            self.columns.clear();
         }
     }
 }
@@ -291,12 +336,6 @@ impl fmt::Display for Sort {
             )?;
         }
         Ok(())
-    }
-}
-
-impl<DB: Dialect> crate::render::Render<DB> for Sort {
-    fn to_fragment(&self, mapping: &dyn Mapping) -> Result<QueryFragment<DB, Value>, Error> {
-        Sort::to_fragment(self, mapping)
     }
 }
 
@@ -377,7 +416,11 @@ mod tests {
     #[test]
     fn rendering_quotes_columns_and_maps_aliases() {
         let sort = Sort::parse("readCount desc, id").unwrap();
-        let fragment = sort.to_fragment::<Postgres>(&volumes()).unwrap();
+        let fragment = sort
+            .resolve(&volumes())
+            .unwrap()
+            .to_fragment::<Postgres>()
+            .unwrap();
 
         assert_eq!(fragment.preview(), r#""read_count" DESC, "id" ASC"#);
     }
@@ -386,7 +429,7 @@ mod tests {
     fn an_unknown_field_is_rejected() {
         let error = Sort::parse("salary")
             .unwrap()
-            .to_fragment::<Postgres>(&volumes())
+            .resolve(&volumes())
             .unwrap_err();
 
         assert!(matches!(error, Error::UnknownColumn(field) if field == "salary"));

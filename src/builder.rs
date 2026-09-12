@@ -10,11 +10,20 @@ use sqlx::{Arguments, AssertSqlSafe, FromRow, IntoArguments};
 
 use crate::scan::Slot;
 
+use crate::cursor::Cursor;
 use crate::dialect::Dialect;
 use crate::error::Error;
-use crate::mapping::Mapping;
 use crate::render::Render;
+use crate::sort::Sort;
 use crate::template::QueryTemplate;
+
+#[cfg(feature = "cel")]
+use crate::filter::Filter;
+
+/// The slot a filter and a seek condition share.
+const FILTER: &str = "filter";
+/// The slot an ordering goes in.
+const ORDER: &str = "order";
 
 /// A template being filled in.
 ///
@@ -45,9 +54,10 @@ use crate::template::QueryTemplate;
 /// The first failure is kept and returned by the `build` methods.
 pub struct QueryBuilder<'t, DB: Database> {
     template: &'t QueryTemplate<DB>,
-    /// Resolves the request paths a producer names. Held here rather than
-    /// passed to each producer, so a query has one and the chain has no `?`.
-    mapping: &'t dyn Mapping,
+    /// The ordering [`order`](Self::order) declared, so [`seek`](Self::seek)
+    /// can refuse a token issued under a different one. The builder is the only
+    /// place both arrive, which is why the check lives here.
+    ordering: Option<Sort>,
     arguments: DB::Arguments,
     /// What has been put in each slot, indexed by the slot's position among
     /// slots rather than among pieces.
@@ -61,12 +71,12 @@ pub struct QueryBuilder<'t, DB: Database> {
 }
 
 impl<'t, DB: Database> QueryBuilder<'t, DB> {
-    pub(crate) fn new(template: &'t QueryTemplate<DB>, mapping: &'t dyn Mapping) -> Self {
+    pub(crate) fn new(template: &'t QueryTemplate<DB>) -> Self {
         let slots = template.parts().1.len();
 
         Self {
             template,
-            mapping,
+            ordering: None,
             arguments: DB::Arguments::default(),
             filled: vec![String::new(); slots],
             error: None,
@@ -110,7 +120,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
             return self.unknown(slot);
         };
 
-        let fragment = match item.to_fragment(self.mapping) {
+        let fragment = match item.to_fragment() {
             Ok(fragment) => fragment,
             Err(error) => return self.fail(error),
         };
@@ -139,6 +149,81 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
 
         self.attach(index, &spec, &body);
         self
+    }
+
+    /// Add a condition to the `filter` slot.
+    #[cfg(feature = "cel")]
+    #[must_use]
+    pub fn filter(self, filter: &Filter) -> Self
+    where
+        DB: Dialect,
+    {
+        self.fill(FILTER, filter)
+    }
+
+    /// Declare the ordering, into the `order` slot.
+    ///
+    /// The builder remembers it, so [`seek`](Self::seek) can refuse a page
+    /// token issued under a different one -- in either call order.
+    #[must_use]
+    pub fn order(mut self, sort: &Sort) -> Self
+    where
+        DB: Dialect,
+    {
+        if let Some(error) = self.declare(sort) {
+            return self.fail(error);
+        }
+
+        match sort.to_fragment::<DB>() {
+            Ok(fragment) => self.fill(ORDER, &fragment),
+            Err(error) => self.fail(error),
+        }
+    }
+
+    /// Seek past a position, into the `filter` slot.
+    ///
+    /// A seek condition is a predicate, so it shares that slot's joiner with
+    /// whatever [`filter`](Self::filter) put there.
+    ///
+    /// Refused if the token was issued under an ordering other than the one
+    /// [`order`](Self::order) declared. That is the whole reason a token
+    /// records its ordering: reusing one under a changed `order_by` otherwise
+    /// returns rows the client has already seen, with no error anywhere.
+    #[must_use]
+    pub fn seek(mut self, cursor: &Cursor) -> Self
+    where
+        DB: Dialect,
+    {
+        if cursor.is_empty() {
+            return self;
+        }
+
+        if let Some(error) = self.declare(cursor.sort()) {
+            return self.fail(error);
+        }
+
+        match cursor.to_fragment::<DB>() {
+            Ok(fragment) => self.fill(FILTER, &fragment),
+            Err(error) => self.fail(error),
+        }
+    }
+
+    /// Record an ordering, or report that it contradicts one already seen.
+    fn declare(&mut self, sort: &Sort) -> Option<Error> {
+        if sort.is_empty() {
+            return None;
+        }
+
+        match &self.ordering {
+            Some(declared) if declared != sort => Some(Error::Cursor(format!(
+                "issued for `{sort}`, but this query orders by `{declared}`"
+            ))),
+            Some(_) => None,
+            None => {
+                self.ordering = Some(sort.clone());
+                None
+            }
+        }
     }
 
     /// Build a slot by hand, for SQL no producer makes.
@@ -396,8 +481,10 @@ mod tests {
 
     use super::*;
     use crate::QueryTemplate;
+    use crate::cursor::Cursor;
     use crate::fragment::QueryFragment;
-    use crate::mapping::QueryMapping;
+    use crate::mapping::{Column, ColumnType, QueryMapping};
+    use crate::sort::Sort;
     use crate::value::Value;
 
     /// Note `ORDER BY` sits *inside* the sentinel. A keyword that only makes
@@ -407,16 +494,18 @@ mod tests {
                             /* ORDER BY query.order */ LIMIT $2";
 
     /// Producers are covered where they live; these exercise the builder, so
-    /// they use fragments built by hand and an empty mapping -- nothing here
-    /// resolves a field.
-    fn nothing() -> QueryMapping {
-        QueryMapping::new()
-    }
-
+    /// they use fragments built by hand -- nothing here resolves a field.
     fn fragment<DB>(sql: &str, value: i64) -> QueryFragment<DB, Value> {
         let mut fragment = QueryFragment::new();
         fragment.push(sql).push_bind(Value::Int(value));
         fragment
+    }
+
+    fn volumes() -> QueryMapping {
+        QueryMapping::new()
+            .key("id", ColumnType::Int)
+            .column("title", ColumnType::Text)
+            .add("readCount", Column::new("read_count", ColumnType::Int))
     }
 
     fn text<DB>(sql: &str) -> QueryFragment<DB, Value> {
@@ -444,7 +533,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder(&nothing())
+            .builder()
             .bind(7_i64)
             .bind(50_i64)
             .fill("filter", &fragment("reads > ", 100))
@@ -464,7 +553,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder(&nothing())
+            .builder()
             .bind(7_i64)
             .bind(50_i64)
             .fill("filter", &QueryFragment::<Postgres, Value>::new())
@@ -482,10 +571,7 @@ mod tests {
         let template =
             QueryTemplate::<Postgres>::parse("SELECT 1 ORDER BY /* query.order , */ id").unwrap();
 
-        let sql = template
-            .builder(&nothing())
-            .fill("order", &text("title DESC"))
-            .sql();
+        let sql = template.builder().fill("order", &text("title DESC")).sql();
 
         assert_eq!(sql, "SELECT 1 ORDER BY title DESC , id");
     }
@@ -495,7 +581,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder(&nothing())
+            .builder()
             .bind(7_i64)
             .bind(50_i64)
             .slot("filter", |slot| {
@@ -513,7 +599,7 @@ mod tests {
     fn an_unknown_slot_names_the_ones_that_exist() {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
-        let error = build_error(template.builder(&nothing()).fill("predicate", &text("x")));
+        let error = build_error(template.builder().fill("predicate", &text("x")));
 
         let message = format!("{error}");
         assert!(message.contains("`predicate`"), "{message}");
@@ -530,7 +616,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder(&nothing())
+                .builder()
                 .fill("filter", &text("reads > 1"))
                 .bind(7_i64),
         );
@@ -544,7 +630,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder(&nothing())
+                .builder()
                 .fill("order", &text("id ASC"))
                 .fill("filter", &text("reads > 1")),
         );
@@ -562,7 +648,7 @@ mod tests {
 
         let error = build_error(
             template
-                .builder(&nothing())
+                .builder()
                 .bind(50_i64)
                 .fill("filter", &text("reads > 1")),
         );
@@ -577,10 +663,7 @@ mod tests {
         let template =
             QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ LIMIT ?").unwrap();
 
-        assert_eq!(
-            template.builder(&nothing()).bind(50_i64).sql(),
-            "SELECT 1  LIMIT ?"
-        );
+        assert_eq!(template.builder().bind(50_i64).sql(), "SELECT 1  LIMIT ?");
     }
 
     /// Numbered placeholders name a bound value, not a position, so the same
@@ -591,7 +674,7 @@ mod tests {
             QueryTemplate::<Postgres>::parse("SELECT 1 /* AND query.filter */ LIMIT $1").unwrap();
 
         let sql = template
-            .builder(&nothing())
+            .builder()
             .bind(50_i64)
             .fill("filter", &fragment("reads > ", 1))
             .sql();
@@ -606,12 +689,84 @@ mod tests {
         let template =
             QueryTemplate::<MySql>::parse("SELECT 1 /* AND query.filter */ AND x = \'?\'").unwrap();
 
-        let sql = template
-            .builder(&nothing())
-            .fill("filter", &text("reads > 1"))
-            .sql();
+        let sql = template.builder().fill("filter", &text("reads > 1")).sql();
 
         assert_eq!(sql, "SELECT 1 AND reads > 1 AND x = \'?\'");
+    }
+
+    /// The whole reason a token records its ordering. Reusing one under a
+    /// changed `order_by` otherwise flips the comparison and hands back rows
+    /// the client has already seen, with no error anywhere.
+    #[test]
+    fn a_token_from_a_different_ordering_is_refused() {
+        let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
+        let mapping = volumes();
+
+        let issued = Sort::parse("title asc")
+            .unwrap()
+            .asc("id")
+            .resolve(&mapping)
+            .unwrap();
+        let cursor = Cursor::new(&issued)
+            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
+            .unwrap();
+
+        let asked = Sort::parse("title desc")
+            .unwrap()
+            .asc("id")
+            .resolve(&mapping)
+            .unwrap();
+
+        let error = build_error(template.builder().order(&asked).seek(&cursor));
+
+        let message = format!("{error}");
+        assert!(message.contains("title asc"), "{message}");
+        assert!(message.contains("title desc"), "{message}");
+    }
+
+    /// Either call order: the builder keeps whichever ordering it saw first.
+    #[test]
+    fn the_check_does_not_depend_on_call_order() {
+        let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
+        let mapping = volumes();
+
+        let issued = Sort::parse("title asc")
+            .unwrap()
+            .asc("id")
+            .resolve(&mapping)
+            .unwrap();
+        let cursor = Cursor::new(&issued)
+            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
+            .unwrap();
+
+        let asked = Sort::parse("title desc")
+            .unwrap()
+            .asc("id")
+            .resolve(&mapping)
+            .unwrap();
+
+        assert!(matches!(
+            build_error(template.builder().seek(&cursor).order(&asked)),
+            Error::Cursor(_)
+        ));
+    }
+
+    #[test]
+    fn an_agreeing_ordering_passes() {
+        let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
+        let sort = Sort::parse("title desc")
+            .unwrap()
+            .asc("id")
+            .resolve(&volumes())
+            .unwrap();
+        let cursor = Cursor::new(&sort)
+            .after_values(&[Value::Text("Dune".into()), Value::Int(42)])
+            .unwrap();
+
+        let sql = template.builder().order(&sort).seek(&cursor).sql();
+
+        assert!(sql.contains("ORDER BY"), "{sql}");
+        assert!(sql.contains("OR"), "{sql}");
     }
 
     /// The same sequence is fine where placeholders are numbered, which is why
@@ -621,7 +776,7 @@ mod tests {
         let template = QueryTemplate::<Postgres>::parse(SKELETON).unwrap();
 
         let sql = template
-            .builder(&nothing())
+            .builder()
             .fill("order", &text("id ASC"))
             .fill("filter", &fragment("reads > ", 1))
             .bind(7_i64)

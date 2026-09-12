@@ -101,22 +101,14 @@ impl<DB> QueryTemplate<DB> {
 }
 
 impl<DB: Database> QueryTemplate<DB> {
-    /// Start filling this template in, resolving request paths through
-    /// `mapping`.
+    /// Start filling this template in.
     ///
-    /// Taken here rather than held by the template, because a template is SQL
-    /// with holes and a mapping is policy: which paths a request may name, and
-    /// what each resolves to. The same skeleton can serve an administrator and
-    /// a caller who may see less, and a closure is a
-    /// [`Mapping`](crate::Mapping), so that decision can be made per request.
-    ///
-    /// It is taken once here rather than by each producer because it belongs to
-    /// the query rather than to any one of them -- which also lets
-    /// [`fill`](QueryBuilder::fill) take a producer directly and keeps the
-    /// chain free of `?`.
+    /// Takes no mapping: everything that fills a slot has already been
+    /// resolved, which is the boundary between what a client sent and what this
+    /// query will run.
     #[must_use]
-    pub fn builder<'a>(&'a self, mapping: &'a dyn crate::mapping::Mapping) -> QueryBuilder<'a, DB> {
-        QueryBuilder::new(self, mapping)
+    pub fn builder(&self) -> QueryBuilder<'_, DB> {
+        QueryBuilder::new(self)
     }
 }
 

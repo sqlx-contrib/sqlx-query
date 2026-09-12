@@ -75,21 +75,23 @@ async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i6
     let template = QueryTemplate::<Sqlite>::parse(PAGE).unwrap();
     let mapping = mapping();
 
-    let filter = Filter::parse(filter).unwrap();
-    let sort = Sort::parse(order_by).unwrap().asc("id");
+    let filter = Filter::parse(filter).unwrap().resolve(&mapping).unwrap();
+    let sort = Sort::parse(order_by)
+        .unwrap()
+        .asc("id")
+        .resolve(&mapping)
+        .unwrap();
 
-    let mut cursor = Cursor::parse("").unwrap();
+    let mut cursor = Cursor::parse("").unwrap().resolve(&mapping).unwrap();
     let mut seen = Vec::new();
 
     loop {
-        cursor.validate(&sort).unwrap();
-
         let rows = template
-            .builder(&mapping)
+            .builder()
             .bind(1_i64)
-            .fill("filter", &filter)
-            .fill("filter", &cursor)
-            .fill("order", &sort)
+            .filter(&filter)
+            .seek(&cursor)
+            .order(&sort)
             .build()
             .unwrap()
             .fetch_all(pool)
@@ -102,7 +104,7 @@ async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i6
 
         // The token for the next page, read out of the row by the mapping's
         // own field-to-column mapping.
-        cursor = Cursor::new(&sort).after(last, &mapping).unwrap();
+        cursor = Cursor::new(&sort).after(last).unwrap();
     }
 
     seen
@@ -225,19 +227,21 @@ async fn a_join_pages_by_a_qualified_and_aliased_column() {
 
     let template = QueryTemplate::<Sqlite>::parse(JOINED).unwrap();
     let mapping = joined_mapping();
-    let sort = Sort::parse("authorName desc").unwrap().asc("id");
+    let sort = Sort::parse("authorName desc")
+        .unwrap()
+        .asc("id")
+        .resolve(&mapping)
+        .unwrap();
 
-    let mut cursor = Cursor::parse("").unwrap();
+    let mut cursor = Cursor::parse("").unwrap().resolve(&mapping).unwrap();
     let mut seen = Vec::new();
 
     loop {
-        cursor.validate(&sort).unwrap();
-
         let rows = template
-            .builder(&mapping)
+            .builder()
             .bind(1_i64)
-            .fill("filter", &cursor)
-            .fill("order", &sort)
+            .seek(&cursor)
+            .order(&sort)
             .build()
             .unwrap()
             .fetch_all(&pool)
@@ -249,7 +253,7 @@ async fn a_join_pages_by_a_qualified_and_aliased_column() {
         seen.extend(rows.iter().map(|row| row.get::<i64, _>("id")));
 
         // Reads `author_name` from the row, not `a.name`.
-        cursor = Cursor::new(&sort).after(last, &mapping).unwrap();
+        cursor = Cursor::new(&sort).after(last).unwrap();
     }
 
     let whole: Vec<i64> = sqlx::query(

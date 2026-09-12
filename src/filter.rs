@@ -3,7 +3,9 @@
 use crate::dialect::Dialect;
 use crate::error::Error;
 use crate::fragment::QueryFragment;
-use crate::mapping::Mapping;
+use std::collections::BTreeMap;
+
+use crate::mapping::{Column, Mapping};
 use crate::value::Value;
 
 /// A parsed filter expression.
@@ -17,6 +19,9 @@ use crate::value::Value;
 #[derive(Debug, Clone)]
 pub struct Filter {
     expression: Option<cel::common::ast::IdedExpr>,
+    /// Every path the expression names, resolved. `None` until
+    /// [`resolve`](Self::resolve) has run.
+    columns: Option<BTreeMap<String, Column>>,
 }
 
 impl Filter {
@@ -26,7 +31,10 @@ impl Filter {
     /// joiner -- disappear from the query.
     #[must_use]
     pub fn empty() -> Self {
-        Self { expression: None }
+        Self {
+            expression: None,
+            columns: Some(BTreeMap::new()),
+        }
     }
 
     /// Parse a [CEL] expression.
@@ -58,7 +66,36 @@ impl Filter {
 
         Ok(Self {
             expression: Some(crate::cel::parse(source)?),
+            columns: None,
         })
+    }
+
+    /// Resolve every path this filter names, through `mapping`.
+    ///
+    /// This is the boundary: before it a filter is a string a client sent,
+    /// after it every path it names is one the mapping exposes. An unknown
+    /// field fails here, on the line that handles request input, rather than
+    /// when a query is built.
+    ///
+    /// Type mismatches -- `id > \'tuesday\'` -- are still caught when the
+    /// filter renders, since that needs the shape of each comparison and not
+    /// just the columns.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownColumn`] for a path the mapping does not expose.
+    pub fn resolve(mut self, mapping: &dyn Mapping) -> Result<Self, Error> {
+        let mut columns = BTreeMap::new();
+
+        if let Some(expression) = &self.expression {
+            for path in crate::cel::fields(expression) {
+                let column = crate::cel::resolve(mapping, &path)?;
+                columns.insert(path, column);
+            }
+        }
+
+        self.columns = Some(columns);
+        Ok(self)
     }
 
     /// Whether this filter would constrain anything.
@@ -74,20 +111,19 @@ impl Filter {
     /// [`Error::UnknownColumn`] for a field the mapping does not expose,
     /// [`Error::TypeMismatch`] for a comparison that cannot work, and
     /// [`Error::Unsupported`] for a construct with no faithful SQL lowering.
-    pub fn to_fragment<DB: Dialect>(
-        &self,
-        mapping: &dyn Mapping,
-    ) -> Result<QueryFragment<DB, Value>, Error> {
+    pub fn to_fragment<DB: Dialect>(&self) -> Result<QueryFragment<DB, Value>, Error> {
+        let columns = self.columns.as_ref().ok_or(Error::Unresolved)?;
+
         match &self.expression {
             None => Ok(QueryFragment::new()),
-            Some(expression) => crate::cel::render(expression, mapping),
+            Some(expression) => crate::cel::render(expression, columns),
         }
     }
 }
 
 impl<DB: Dialect> crate::render::Render<DB> for Filter {
-    fn to_fragment(&self, mapping: &dyn Mapping) -> Result<QueryFragment<DB, Value>, Error> {
-        Filter::to_fragment(self, mapping)
+    fn to_fragment(&self) -> Result<QueryFragment<DB, Value>, Error> {
+        Filter::to_fragment(self)
     }
 }
 
@@ -109,15 +145,10 @@ mod tests {
     #[test]
     fn an_absent_filter_is_empty_not_an_error() {
         for source in ["", "   "] {
-            let predicate = Filter::parse(source).unwrap();
+            let predicate = Filter::parse(source).unwrap().resolve(&volumes()).unwrap();
 
             assert!(predicate.is_empty());
-            assert!(
-                predicate
-                    .to_fragment::<Postgres>(&volumes())
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(predicate.to_fragment::<Postgres>().unwrap().is_empty());
         }
     }
 
@@ -130,7 +161,9 @@ mod tests {
     fn a_filter_renders_against_the_schema() {
         let fragment = Filter::parse("id > 21")
             .unwrap()
-            .to_fragment::<Postgres>(&volumes())
+            .resolve(&volumes())
+            .unwrap()
+            .to_fragment::<Postgres>()
             .unwrap();
 
         assert_eq!(fragment.preview(), r#""id" > ?"#);
@@ -150,7 +183,9 @@ mod tests {
     fn a_type_error_is_rejected_at_render() {
         let error = Filter::parse("id > 'tuesday'")
             .unwrap()
-            .to_fragment::<Postgres>(&volumes())
+            .resolve(&volumes())
+            .unwrap()
+            .to_fragment::<Postgres>()
             .unwrap_err();
 
         assert!(matches!(error, Error::TypeMismatch(_)), "{error}");

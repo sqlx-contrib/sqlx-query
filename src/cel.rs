@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use crate::dialect::{Dialect, reference};
 use crate::error::Error;
 use crate::fragment::QueryFragment;
+use std::collections::BTreeMap;
+
 use crate::mapping::{Column, ColumnType, Mapping};
 use crate::value::Value;
 
@@ -35,17 +37,17 @@ pub(crate) fn parse(source: &str) -> Result<IdedExpr, Error> {
 /// for a construct with no faithful SQL lowering.
 pub(crate) fn render<DB: Dialect>(
     expr: &IdedExpr,
-    mapping: &dyn Mapping,
+    columns: &Columns,
 ) -> Result<QueryFragment<DB, Value>, Error> {
     let mut fragment = QueryFragment::new();
-    condition(expr, mapping, &mut fragment)?;
+    condition(expr, columns, &mut fragment)?;
     Ok(fragment)
 }
 
 /// Write `expr` as a SQL boolean expression.
 fn condition<DB: Dialect>(
     expr: &IdedExpr,
-    mapping: &dyn Mapping,
+    columns: &Columns,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     match &expr.expr {
@@ -61,13 +63,13 @@ fn condition<DB: Dialect>(
             })
             .ok_or_else(|| unsupported("has() over something that is not a field"))?;
 
-            let column = resolve(mapping, &column)?;
+            let column = lookup(columns, &column)?;
             out.push(&reference::<DB>(&column));
             out.push(" IS NOT NULL");
             Ok(())
         }
 
-        Expr::Call(call) => call_condition(call, mapping, out),
+        Expr::Call(call) => call_condition(call, columns, out),
 
         Expr::Literal(LiteralValue::Boolean(value)) => {
             out.push(if **value { "TRUE" } else { "FALSE" });
@@ -78,7 +80,7 @@ fn condition<DB: Dialect>(
         // to take one directly.
         Expr::Ident(_) | Expr::Select(_) => {
             let path = column_of(expr).ok_or_else(|| unsupported("this expression"))?;
-            let column = resolve(mapping, &path)?;
+            let column = lookup(columns, &path)?;
 
             if column.ty != ColumnType::Bool {
                 return Err(Error::TypeMismatch(format!(
@@ -102,7 +104,7 @@ fn condition<DB: Dialect>(
 
 fn call_condition<DB: Dialect>(
     call: &cel::common::ast::CallExpr,
-    mapping: &dyn Mapping,
+    columns: &Columns,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let name = call.func_name.as_str();
@@ -117,9 +119,9 @@ fn call_condition<DB: Dialect>(
             };
 
             out.push("(");
-            condition(left, mapping, out)?;
+            condition(left, columns, out)?;
             out.push(joiner);
-            condition(right, mapping, out)?;
+            condition(right, columns, out)?;
             out.push(")");
             Ok(())
         }
@@ -128,7 +130,7 @@ fn call_condition<DB: Dialect>(
             let [only] = single(&call.args, name)?;
 
             out.push("(NOT ");
-            condition(only, mapping, out)?;
+            condition(only, columns, out)?;
             out.push(")");
             Ok(())
         }
@@ -140,15 +142,15 @@ fn call_condition<DB: Dialect>(
         | operators::GREATER
         | operators::GREATER_EQUALS => {
             let [left, right] = pair(&call.args, name)?;
-            comparison(name, left, right, mapping, out)
+            comparison(name, left, right, columns, out)
         }
 
         operators::IN => {
             let [needle, haystack] = pair(&call.args, name)?;
-            membership(needle, haystack, mapping, out)
+            membership(needle, haystack, columns, out)
         }
 
-        "startsWith" | "endsWith" | "contains" => like(call, name, mapping, out),
+        "startsWith" | "endsWith" | "contains" => like(call, name, columns, out),
 
         operators::CONDITIONAL => Err(unsupported(
             "the ternary operator: write it as `(a && b) || (!a && c)`",
@@ -169,11 +171,11 @@ fn comparison<DB: Dialect>(
     operator: &str,
     left: &IdedExpr,
     right: &IdedExpr,
-    mapping: &dyn Mapping,
+    columns: &Columns,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
-    let left = operand(left, mapping)?;
-    let right = operand(right, mapping)?;
+    let left = operand(left, columns)?;
+    let right = operand(right, columns)?;
 
     match (left, right) {
         // `x == null` is `IS NULL`, which is both what the caller means and the
@@ -241,10 +243,10 @@ fn comparison<DB: Dialect>(
 fn membership<DB: Dialect>(
     needle: &IdedExpr,
     haystack: &IdedExpr,
-    mapping: &dyn Mapping,
+    columns: &Columns,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
-    let Operand::Column(column, path) = operand(needle, mapping)? else {
+    let Operand::Column(column, path) = operand(needle, columns)? else {
         return Err(unsupported("`in` over something that is not a column"));
     };
 
@@ -268,7 +270,7 @@ fn membership<DB: Dialect>(
             out.push(", ");
         }
 
-        let Operand::Value(value) = operand(element, mapping)? else {
+        let Operand::Value(value) = operand(element, columns)? else {
             return Err(unsupported("a non-constant element in an `in` list"));
         };
 
@@ -283,7 +285,7 @@ fn membership<DB: Dialect>(
 fn like<DB: Dialect>(
     call: &cel::common::ast::CallExpr,
     name: &str,
-    mapping: &dyn Mapping,
+    columns: &Columns,
     out: &mut QueryFragment<DB, Value>,
 ) -> Result<(), Error> {
     let target = call
@@ -291,7 +293,7 @@ fn like<DB: Dialect>(
         .as_deref()
         .ok_or_else(|| unsupported(&format!("`{name}` without a receiver")))?;
 
-    let Operand::Column(column, path) = operand(target, mapping)? else {
+    let Operand::Column(column, path) = operand(target, columns)? else {
         return Err(unsupported(&format!(
             "`{name}` on something that is not a column"
         )));
@@ -305,7 +307,7 @@ fn like<DB: Dialect>(
     }
 
     let [argument] = single(&call.args, name)?;
-    let Operand::Value(Value::Text(needle)) = operand(argument, mapping)? else {
+    let Operand::Value(Value::Text(needle)) = operand(argument, columns)? else {
         return Err(unsupported(&format!(
             "`{name}` with an argument that is not a string constant"
         )));
@@ -326,9 +328,9 @@ fn like<DB: Dialect>(
 }
 
 /// Resolve one side of a comparison.
-fn operand(expr: &IdedExpr, mapping: &dyn Mapping) -> Result<Operand, Error> {
+fn operand(expr: &IdedExpr, columns: &Columns) -> Result<Operand, Error> {
     if let Some(path) = column_of(expr) {
-        let column = resolve(mapping, &path)?;
+        let column = lookup(columns, &path)?;
         return Ok(Operand::Column(column, path));
     }
 
@@ -366,6 +368,59 @@ fn literal_value(literal: &LiteralValue) -> Result<Value, Error> {
     })
 }
 
+/// Every path the expression names, deduplicated.
+///
+/// What [`Filter::resolve`](crate::Filter::resolve) walks to look each one up,
+/// so rendering afterwards consults only what it found.
+pub(crate) fn fields(expr: &IdedExpr) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect(expr, &mut paths);
+
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn collect(expr: &IdedExpr, out: &mut Vec<String>) {
+    if let Some(path) = column_of(expr) {
+        out.push(path);
+        return;
+    }
+
+    match &expr.expr {
+        // `has(x.y)` arrives as a select marked `test`, which `column_of`
+        // refuses; the path is the same select without the mark.
+        Expr::Select(select) if select.test => {
+            let plain = IdedExpr {
+                id: expr.id,
+                expr: Expr::Select(cel::common::ast::SelectExpr {
+                    test: false,
+                    ..select.clone()
+                }),
+            };
+
+            if let Some(path) = column_of(&plain) {
+                out.push(path);
+            }
+        }
+        Expr::Select(select) => collect(&select.operand, out),
+        Expr::Call(call) => {
+            if let Some(target) = call.target.as_deref() {
+                collect(target, out);
+            }
+            for argument in &call.args {
+                collect(argument, out);
+            }
+        }
+        Expr::List(list) => {
+            for element in &list.elements {
+                collect(element, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The dotted path this expression names, if it names one.
 fn column_of(expr: &IdedExpr) -> Option<String> {
     let mut segments = Vec::new();
@@ -388,11 +443,26 @@ fn walk(expr: &IdedExpr, into: &mut Vec<String>) -> Option<()> {
     }
 }
 
-fn resolve(mapping: &dyn Mapping, path: &str) -> Result<Column, Error> {
+/// The paths a filter names, already resolved against a mapping.
+pub(crate) type Columns = BTreeMap<String, Column>;
+
+/// Look a path up in a mapping. Used by [`Filter::resolve`].
+pub(crate) fn resolve(mapping: &dyn Mapping, path: &str) -> Result<Column, Error> {
     let segments: Vec<&str> = path.split('.').collect();
 
     mapping
         .resolve(&segments)
+        .ok_or_else(|| Error::UnknownColumn(path.to_owned()))
+}
+
+/// Look a path up among the resolved ones.
+///
+/// Absent means the filter was resolved against a different expression, which
+/// `Filter::resolve` does not allow.
+fn lookup(columns: &Columns, path: &str) -> Result<Column, Error> {
+    columns
+        .get(path)
+        .cloned()
         .ok_or_else(|| Error::UnknownColumn(path.to_owned()))
 }
 
@@ -493,14 +563,41 @@ mod tests {
             .add("author.name", Column::new("author_name", ColumnType::Text))
     }
 
+    fn resolved(source: &str) -> Columns {
+        let expression = parse(source).unwrap();
+        let mapping = volumes();
+
+        fields(&expression)
+            .into_iter()
+            .map(|path| {
+                let column = resolve(&mapping, &path).unwrap();
+                (path, column)
+            })
+            .collect()
+    }
+
     fn sql(source: &str) -> String {
-        render::<Postgres>(&parse(source).unwrap(), &volumes())
+        render::<Postgres>(&parse(source).unwrap(), &resolved(source))
             .unwrap()
             .preview()
     }
 
     fn error(source: &str) -> Error {
-        render::<Postgres>(&parse(source).unwrap(), &volumes()).unwrap_err()
+        let expression = parse(source).unwrap();
+        let mapping = volumes();
+
+        // Unknown columns are caught while resolving now, not while rendering.
+        let mut columns = Columns::new();
+        for path in fields(&expression) {
+            match resolve(&mapping, &path) {
+                Ok(column) => {
+                    columns.insert(path, column);
+                }
+                Err(error) => return error,
+            }
+        }
+
+        render::<Postgres>(&expression, &columns).unwrap_err()
     }
 
     #[test]
@@ -556,8 +653,11 @@ mod tests {
     /// A caller searching for a literal `%` must not get every row.
     #[test]
     fn like_wildcards_in_the_needle_are_neutralised() {
-        let fragment =
-            render::<Postgres>(&parse("title.startsWith('100%_x')").unwrap(), &volumes()).unwrap();
+        let fragment = render::<Postgres>(
+            &parse("title.startsWith('100%_x')").unwrap(),
+            &resolved("title.startsWith('100%_x')"),
+        )
+        .unwrap();
 
         let (_, values) = fragment.parts_for_test();
         assert_eq!(values, [Value::Text("100!%!_x%".into())]);

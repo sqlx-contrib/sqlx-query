@@ -78,6 +78,13 @@ pub enum Error {
     /// error rather than a rule everywhere.
     Positional(String),
 
+    /// Something was used before it was resolved against a mapping.
+    ///
+    /// A sort or a filter arrives from a request as field paths; `resolve`
+    /// turns those into columns. Rendering one that skipped that step would
+    /// have nothing to render against.
+    Unresolved,
+
     /// A driver refused to encode a bind value.
     Encode(BoxDynError),
 }
@@ -112,6 +119,9 @@ impl fmt::Display for Error {
             Self::NotUnique(message) => write!(f, "cannot paginate: {message}"),
             Self::Positional(message) => {
                 write!(f, "this driver uses positional `?` placeholders: {message}")
+            }
+            Self::Unresolved => {
+                f.write_str("used before being resolved against a mapping: call `resolve` first")
             }
             Self::Encode(error) => write!(f, "failed to encode a bind value: {error}"),
         }
