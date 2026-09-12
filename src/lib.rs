@@ -93,8 +93,6 @@ compile_error!(
 );
 
 mod builder;
-#[cfg(feature = "cel")]
-mod cel;
 mod cursor;
 mod dialect;
 mod error;
@@ -102,8 +100,6 @@ mod error;
 mod filter;
 mod fragment;
 mod mapping;
-mod render;
-mod scan;
 mod sort;
 mod template;
 mod value;
@@ -115,9 +111,8 @@ pub use error::Error;
 #[cfg(feature = "cel")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
 pub use filter::Filter;
-pub use fragment::QueryFragment;
+pub use fragment::{QueryFragment, Render};
 pub use mapping::{Column, ColumnType, Mapping, QueryMapping};
-pub use render::Render;
 pub use sort::{Direction, Sort, SortKey};
 pub use template::QueryTemplate;
 pub use value::Value;

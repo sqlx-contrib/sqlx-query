@@ -8,12 +8,12 @@ use sqlx::query::{Query, QueryAs, QueryScalar};
 use sqlx::types::Type;
 use sqlx::{Arguments, AssertSqlSafe, FromRow, IntoArguments};
 
-use crate::scan::Slot;
+use crate::template::Slot;
 
 use crate::cursor::Cursor;
 use crate::dialect::Dialect;
 use crate::error::Error;
-use crate::render::Render;
+use crate::fragment::Render;
 use crate::sort::Sort;
 use crate::template::QueryTemplate;
 
