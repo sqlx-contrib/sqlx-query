@@ -2,33 +2,54 @@
 //! wrote, for [sqlx].
 //!
 //! ```
-//! # #[cfg(feature = "postgres")] {
+//! # #[cfg(all(feature = "postgres", feature = "cel"))] {
 //! use sqlx::Postgres;
-//! use sqlx_query::{QueryFragment, QueryTemplate};
+//! use sqlx_query::{Column, ColumnType, Cursor, Predicate, QueryTemplate, Sort, Table, Value};
 //!
-//! let template = QueryTemplate::<Postgres>::parse(
-//!     "SELECT id, title FROM volumes
-//!       WHERE tenant_id = $1
-//!         /* AND query.predicate */
-//!       /* ORDER BY query.order */
-//!       LIMIT $2",
+//! // The query you already wrote. The sentinels are comments, so this is a
+//! // statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
+//! // `sqlx::query!` to be checked against a live database.
+//! let volumes = QueryTemplate::<Postgres>::parse(
+//!     "SELECT id, title, read_count FROM volumes \
+//!      WHERE tenant_id = $1 /* AND query.predicate */ \
+//!      /* ORDER BY query.order */ LIMIT $2",
 //! )?;
 //!
-//! let mut recent = QueryFragment::<Postgres, i64>::new();
-//! recent.push("read_count > ").push_bind(100);
+//! // The allow-list. A field not named here is rejected, not passed through.
+//! let schema = Table::new()
+//!     .key("id", ColumnType::Int)
+//!     .column("title", ColumnType::Text)
+//!     .add("readCount", Column::new("read_count", ColumnType::Int));
 //!
-//! let mut order = QueryFragment::<Postgres, i64>::new();
-//! order.push("\"title\" ASC, \"id\" ASC");
+//! // Request parameters, as the strings they arrive as. Each treats an empty
+//! // string as "not asked for" rather than as an error.
+//! let filter = Predicate::parse("readCount > 100 && title.startsWith(\'D\')")?;
+//! let sort = Sort::parse("title desc")?.asc("id");
 //!
-//! let query = template
+//! // Refused if this token was issued under a different ordering.
+//! let cursor = Cursor::parse("")?;
+//! cursor.validate(&sort)?;
+//!
+//! let query = volumes
 //!     .splice()
-//!     .bind(7_i64)   // $1
-//!     .bind(50_i64)  // $2
-//!     .fill("predicate", &recent)
-//!     .fill("order", &order);
+//!     .bind(7_i64)   // $1, the tenant
+//!     .bind(50_i64)  // $2, the page size
+//!     .fill("predicate", &filter.to_fragment(&schema)?)
+//!     .fill("predicate", &cursor.to_fragment(&schema)?)
+//!     .fill("order", &sort.to_fragment(&schema)?);
 //!
-//! assert!(query.sql().contains("AND read_count > $3"));
-//! # query.build()?;
+//! assert_eq!(
+//!     query.sql(),
+//!     "SELECT id, title, read_count FROM volumes \
+//!      WHERE tenant_id = $1 AND (\"read_count\" > $3 AND \"title\" LIKE $4 ESCAPE \'!\') \
+//!      ORDER BY \"title\" DESC, \"id\" ASC LIMIT $2",
+//! );
+//!
+//! // let rows = query.build_query_as::<Volume>()?.fetch_all(&pool).await?;
+//!
+//! // The token for the next page, from the last row of this one.
+//! let next = Cursor::new(&sort).after(&[Value::Text("Dune".into()), Value::Int(4711)])?;
+//! assert!(!next.as_str().is_empty());
 //! # }
 //! # Ok::<_, sqlx_query::Error>(())
 //! ```

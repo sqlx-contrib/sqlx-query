@@ -50,8 +50,8 @@ pub struct CursorKey {
 /// The key values, and the ordering they were taken under. The ordering is
 /// recorded because a client that changes `order_by` between pages and reuses
 /// the token would otherwise get a page that looks fine and is wrong -- rows
-/// already seen, rows never seen. [`resume`](Self::resume) compares the two and
-/// refuses.
+/// already seen, rows never seen. [`validate`](Self::validate) compares the two
+/// and refuses.
 ///
 /// # What it does not carry
 ///
@@ -192,7 +192,7 @@ impl Cursor {
         self.keys.is_empty()
     }
 
-    /// The ordering to page by, checked against the one this token records.
+    /// Check this token against the ordering a request asks for.
     ///
     /// # Why not `OFFSET`
     ///
@@ -203,42 +203,53 @@ impl Cursor {
     /// concurrent writes. The price is that the ordering has to be total: see
     /// [`Sort::asc`].
     ///
-    /// # Four cases, one of them an error
+    /// # Why the token records an ordering at all
     ///
-    /// * No position -- the first page. The request's ordering is returned as
-    ///   given.
-    /// * A position, and no ordering asked for. This token's is returned: a
-    ///   client that sends `order_by` once and then only `page_token` has not
-    ///   asked for anything different.
-    /// * Both, and they agree.
-    /// * Both, and they disagree. Refused.
+    /// Reusing a token under a changed `order_by` does not page backwards or
+    /// re-sort -- it flips the comparison and hands back rows the client has
+    /// already seen while never reaching the rest, with no error anywhere.
+    /// Refusing is the only outcome that says what to fix.
     ///
-    /// That last case is why the ordering is in the token at all. Reusing a
-    /// token under a reversed `order_by` does not page backwards -- it flips
-    /// the comparison and hands back rows the client has already seen, with no
-    /// error anywhere. Refusing is the only outcome that says what to fix.
+    /// An empty `order_by` counts as a change, and is refused too. A client
+    /// that sends the ordering once and then only the token gets an error
+    /// naming both, rather than a page that came back unordered.
+    ///
+    /// That accommodation is still available where it is wanted, because
+    /// [`sort`](Self::sort) is public:
+    ///
+    /// ```
+    /// # use sqlx_query::{Cursor, Sort};
+    /// # let cursor = Cursor::empty();
+    /// # let order_by = "title desc";
+    /// let mut sort = Sort::parse(order_by)?.asc("id");
+    /// if sort.is_empty() {
+    ///     sort = cursor.sort().clone();
+    /// }
+    /// cursor.validate(&sort)?;
+    /// # Ok::<_, sqlx_query::Error>(())
+    /// ```
+    ///
+    /// Returning the reconciled ordering instead would leave two of them in
+    /// scope, identical except in the one case the return value exists for --
+    /// so rendering the wrong one into the `ORDER BY` would be silent, and
+    /// silent only for the clients that triggered it.
     ///
     /// # Errors
     ///
     /// [`Error::Cursor`] if this token was issued under a different ordering.
-    pub fn resume(&self, requested: Sort) -> Result<Sort, Error> {
+    pub fn validate(&self, sort: &Sort) -> Result<(), Error> {
         if self.is_empty() {
-            return Ok(requested);
+            return Ok(());
         }
 
-        let recorded = self.sort.clone();
-
-        if requested.is_empty() {
-            return Ok(recorded);
-        }
-
-        if requested != recorded {
+        if self.sort != *sort {
             return Err(Error::Cursor(format!(
-                "issued for `{recorded}`, but this request asks for `{requested}`"
+                "issued for `{}`, but this request asks for `{sort}`",
+                self.sort
             )));
         }
 
-        Ok(requested)
+        Ok(())
     }
 
     /// The condition selecting rows after this position.
@@ -631,35 +642,35 @@ mod tests {
             .unwrap();
 
         let asked = Sort::parse("title desc").unwrap().asc("id");
-        let error = cursor.resume(asked).unwrap_err();
+        let error = cursor.validate(&asked).unwrap_err();
 
         let message = format!("{error}");
         assert!(message.contains("title asc"), "{message}");
         assert!(message.contains("title desc"), "{message}");
     }
 
-    /// A client that sends `order_by` once and then only `page_token` has not
-    /// asked for anything different.
+    /// An omitted `order_by` is a changed parameter like any other: the page
+    /// would come back unordered, so it is refused rather than guessed at.
     #[test]
-    fn an_absent_order_by_adopts_the_token_s_own() {
+    fn an_absent_order_by_is_refused_too() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
         let cursor = Cursor::new(&issued)
             .after(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
-        assert_eq!(cursor.resume(Sort::new()).unwrap(), issued);
+        assert!(cursor.validate(&Sort::new()).is_err());
     }
 
     /// The ordering that renders the ORDER BY and the one the condition is
     /// built from come out of the same call, so they cannot disagree.
     #[test]
-    fn an_agreeing_order_is_returned_unchanged() {
+    fn an_agreeing_order_passes() {
         let issued = Sort::parse("title desc").unwrap().asc("id");
         let cursor = Cursor::new(&issued)
             .after(&[Value::Text("Dune".into()), Value::Int(42)])
             .unwrap();
 
-        assert_eq!(cursor.resume(issued.clone()).unwrap(), issued);
+        assert!(cursor.validate(&issued).is_ok());
     }
 
     /// A URL is where these end up, so the alphabet matters.
