@@ -4,7 +4,7 @@
 //! ```
 //! # #[cfg(all(feature = "postgres", feature = "cel"))] {
 //! use sqlx::Postgres;
-//! use sqlx_query::{Column, ColumnType, Cursor, Predicate, QueryTemplate, Sort, Table, Value};
+//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, Value};
 //!
 //! // The query you already wrote. The sentinels are comments, so this is a
 //! // statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
@@ -23,7 +23,7 @@
 //!
 //! // Request parameters, as the strings they arrive as. Each treats an empty
 //! // string as "not asked for" rather than as an error.
-//! let filter = Predicate::parse("readCount > 100 && title.startsWith(\'D\')")?;
+//! let filter = Filter::parse("readCount > 100 && title.startsWith(\'D\')")?;
 //! let sort = Sort::parse("title desc")?.asc("id");
 //!
 //! // Refused if this token was issued under a different ordering.
@@ -97,9 +97,9 @@ mod cel;
 mod cursor;
 mod dialect;
 mod error;
-mod fragment;
 #[cfg(feature = "cel")]
-mod predicate;
+mod filter;
+mod fragment;
 mod schema;
 mod sort;
 mod splice;
@@ -109,10 +109,10 @@ mod value;
 pub use cursor::{Cursor, CursorKey};
 pub use dialect::Dialect;
 pub use error::Error;
-pub use fragment::QueryFragment;
 #[cfg(feature = "cel")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
-pub use predicate::Predicate;
+pub use filter::Filter;
+pub use fragment::QueryFragment;
 pub use schema::{Column, ColumnType, Schema, Table};
 pub use sort::{Direction, Sort, SortKey};
 pub use splice::{Slot, Splice};

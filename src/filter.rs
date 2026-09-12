@@ -15,11 +15,11 @@ use crate::value::Value;
 ///
 /// [`Cursor`]: crate::Cursor
 #[derive(Debug, Clone)]
-pub struct Predicate {
+pub struct Filter {
     expression: Option<cel::common::ast::IdedExpr>,
 }
 
-impl Predicate {
+impl Filter {
     /// A filter that constrains nothing.
     ///
     /// Renders to nothing at all, so the slot it fills -- and that slot's
@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn an_absent_filter_is_empty_not_an_error() {
         for source in ["", "   "] {
-            let predicate = Predicate::parse(source).unwrap();
+            let predicate = Filter::parse(source).unwrap();
 
             assert!(predicate.is_empty());
             assert!(
@@ -117,12 +117,12 @@ mod tests {
 
     #[test]
     fn an_empty_filter_constrains_nothing() {
-        assert!(Predicate::empty().is_empty());
+        assert!(Filter::empty().is_empty());
     }
 
     #[test]
     fn a_filter_renders_against_the_schema() {
-        let fragment = Predicate::parse("id > 21")
+        let fragment = Filter::parse("id > 21")
             .unwrap()
             .to_fragment::<Postgres, _>(&volumes())
             .unwrap();
@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn a_syntax_error_is_rejected_at_parse() {
         assert!(matches!(
-            Predicate::parse("id >").unwrap_err(),
+            Filter::parse("id >").unwrap_err(),
             Error::Parse(_)
         ));
     }
@@ -142,7 +142,7 @@ mod tests {
     /// can catch this before the database does.
     #[test]
     fn a_type_error_is_rejected_at_render() {
-        let error = Predicate::parse("id > 'tuesday'")
+        let error = Filter::parse("id > 'tuesday'")
             .unwrap()
             .to_fragment::<Postgres, _>(&volumes())
             .unwrap_err();

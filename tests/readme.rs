@@ -2,7 +2,7 @@
 #![cfg(all(feature = "cel", feature = "postgres"))]
 
 use sqlx::Postgres;
-use sqlx_query::{Column, ColumnType, Cursor, Predicate, QueryTemplate, Sort, Table, Value};
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, Value};
 
 struct Request {
     filter: String,
@@ -37,7 +37,7 @@ fn the_readme_example_is_real() -> Result<(), sqlx_query::Error> {
         .column("title", ColumnType::Text)
         .add("readCount", Column::new("read_count", ColumnType::Int));
 
-    let filter = Predicate::parse(&request.filter)?;
+    let filter = Filter::parse(&request.filter)?;
     let sort = Sort::parse(&request.order_by)?.asc("id");
     let cursor = Cursor::parse(&request.page_token)?;
 

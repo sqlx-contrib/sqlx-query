@@ -14,7 +14,7 @@ holes can do.
 
 ```rust
 use sqlx::Postgres;
-use sqlx_query::{Column, ColumnType, Cursor, Predicate, QueryTemplate, Sort, Table, Value};
+use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryTemplate, Sort, Table, Value};
 
 // The query you already wrote. A slot is named for the kind of SQL it holds,
 // not for whoever fills it: one slot takes fragments from several sources,
@@ -38,7 +38,7 @@ let schema = Table::new()
 
 // Request parameters, as the strings they arrive as. Each treats an empty
 // string as "not asked for" rather than as an error.
-let filter = Predicate::parse(&request.filter)?;        // CEL, `cel` feature
+let filter = Filter::parse(&request.filter)?;           // CEL, `cel` feature
 let sort = Sort::parse(&request.order_by)?.asc("id");   // AIP-132
 let cursor = Cursor::parse(&request.page_token)?;
 
