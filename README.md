@@ -5,40 +5,99 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+The skeleton is a statement. Comments are inert, so it runs in `psql`, it
+`EXPLAIN`s, and `skeleton()` hands it to `sqlx::query!` to be checked against a
+live database at compile time — none of which a template language with `{}`
+holes can do.
+
+## The whole API
+
 ```rust
 use sqlx::Postgres;
-use sqlx_query::{QueryFragment, QueryTemplate};
+use sqlx_query::{Column, ColumnType, Cursor, Predicate, QueryTemplate, Sort, Table, Value};
 
-let template = QueryTemplate::<Postgres>::parse(
-    "SELECT id, title FROM volumes
+// The query you already wrote. A slot is named for the kind of SQL it holds,
+// not for whoever fills it: one slot takes fragments from several sources,
+// joined by its own `AND`.
+let volumes = QueryTemplate::<Postgres>::parse(
+    "SELECT id, title, read_count
+       FROM volumes
       WHERE tenant_id = $1
         /* AND query.predicate */
       /* ORDER BY query.order */
       LIMIT $2",
 )?;
 
-let query = template
+// The allow-list, and the whole of this crate's type system. A field not named
+// here is rejected rather than passed through. `key` marks a unique column,
+// which is what lets a page token identify an exact row.
+let schema = Table::new()
+    .key("id", ColumnType::Int)
+    .column("title", ColumnType::Text)
+    .add("readCount", Column::new("read_count", ColumnType::Int));
+
+// Request parameters, as the strings they arrive as. Each treats an empty
+// string as "not asked for" rather than as an error.
+let filter = Predicate::parse(&request.filter)?;        // CEL, `cel` feature
+let sort = Sort::parse(&request.order_by)?.asc("id");   // AIP-132
+let cursor = Cursor::parse(&request.page_token)?;
+
+// Refused if the token was issued under a different ordering, which would
+// otherwise hand back rows the client has already seen, with no error anywhere.
+cursor.validate(&sort)?;
+
+let rows: Vec<Volume> = volumes
     .splice()
-    .bind(tenant_id)
-    .bind(page_size)
-    .fill("predicate", &recent)
-    .fill("order", &by_title)
-    .build_query_as::<Volume>()?;
+    .bind(tenant_id)   // $1
+    .bind(page_size)   // $2
+    .fill("predicate", &filter.to_fragment(&schema)?)
+    .fill("predicate", &cursor.to_fragment(&schema)?)
+    .fill("order", &sort.to_fragment(&schema)?)
+    .build_query_as::<Volume>()?
+    .fetch_all(&pool)
+    .await?;
+
+// The token for the next page, from the last row of this one. The field names
+// and directions come from the sort, so a token cannot record an ordering the
+// query did not run under.
+let last = rows.last().unwrap();
+let next = Cursor::new(&sort).after(&[
+    Value::Text(last.title.clone()),
+    Value::Int(last.id),
+])?;
+
+response.next_page_token = next.as_str().to_owned();
 ```
 
-The skeleton is a statement. Comments are inert, so it runs in `psql`, it
-`EXPLAIN`s, and `skeleton()` hands it to `sqlx::query!` to be checked against a
-live database at compile time — none of which a template language with `{}`
-holes can do.
+The first page, with an empty token:
 
-## Status
+```sql
+SELECT id, title, read_count
+   FROM volumes
+  WHERE tenant_id = $1
+    AND ("read_count" > $3 AND "title" LIKE $4 ESCAPE '!')
+  ORDER BY "title" DESC, "id" ASC
+  LIMIT $2
+```
 
-Early, but complete enough to use. Templates, the scanner, fragments and
-splices; the schema, bind values and dialects; sorting, keyset pagination via
-`Cursor::seek`, and CEL filters behind the `cel` feature. The `sql!` macro is not yet, and nothing
-has been run against a real database. The rationale lives with the code — `cargo doc --open` — rather than here.
+The second, with the token above. Note `LIMIT $2` still means the second bound
+value, even though `$3`–`$7` are spliced ahead of it:
 
-## Two things worth knowing
+```sql
+SELECT id, title, read_count
+   FROM volumes
+  WHERE tenant_id = $1
+    AND ("read_count" > $3 AND "title" LIKE $4 ESCAPE '!')
+    AND (("title" < $5) OR ("title" = $6 AND "id" > $7))
+  ORDER BY "title" DESC, "id" ASC
+  LIMIT $2
+```
+
+An unfilled or empty slot emits nothing — comment and joiner both — so the first
+page's absent seek condition, and an absent filter, simply leave the query as
+written.
+
+## Three things worth knowing
 
 **Placeholders are never rewritten.** A `QueryFragment` stores the SQL *between*
 its binds and leaves the placeholder to the driver, written at splice time by
@@ -47,10 +106,25 @@ added. There is no pass that turns `?` into `$3` afterwards, and so no way for
 one to wander into a string literal.
 
 **Numbering is not the same everywhere.** PostgreSQL's `$N` names the *N*th
-bound value, so text spliced ahead of a `$2` leaves it alone. MySQL's and
-SQLite's `?` names the *N*th placeholder *in the text*, so splicing ahead of one
-shifts it. Where that bites — binding after filling, or filling slots out of
-order — this crate returns an error rather than a wrong answer.
+bound value, so text spliced ahead of a `$2` leaves it alone — that is why
+`LIMIT $2` survives above. MySQL's and SQLite's `?` names the *N*th placeholder
+*in the text*, so splicing ahead of one shifts it. Where that bites — binding
+after filling, or filling slots out of order — this crate returns an error
+rather than a wrong answer.
+
+**The schema is the type checker.** cel-rust parses without checking, so
+`id > 'tuesday'` is a perfectly good CEL program. The allow-list is the only
+thing that can reject it before the database does, which is why the two are the
+same object.
+
+## Status
+
+Early. Everything above works and is tested, but **nothing has been run against
+a real database** — the tests assert on generated SQL, which proves shape and
+not that pagination visits every row exactly once. The `sql!` macro, which would
+turn a mistyped sentinel into a compile error, is not written yet.
+
+The rationale lives with the code — `cargo doc --open` — rather than here.
 
 ## Development
 
@@ -63,9 +137,10 @@ cargo test --features cel,sqlite,mysql
 cargo clippy --all-targets --features cel,sqlite,mysql
 ```
 
-`clippy::all` and `clippy::pedantic` are denied rather than warned, because
-several consumers in this ecosystem deny pedantic at the workspace level: a lint
-this crate tolerates is one they cannot.
+Driver-specific tests are gated on their feature. `clippy::all` and
+`clippy::pedantic` are denied rather than warned, because several consumers in
+this ecosystem deny pedantic at the workspace level: a lint this crate tolerates
+is one they cannot.
 
 ## License
 
