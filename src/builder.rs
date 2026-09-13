@@ -260,6 +260,24 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     }
 
     /// The SQL as it currently stands, for tests and tracing.
+    ///
+    /// For looking at, not for running: the bind values live in the builder's
+    /// argument list, and this is only the text they belong to. [`build`] is
+    /// the way out, because it hands sqlx both at once.
+    ///
+    /// That is also why this returns a [`String`] rather than a [`SqlStr`], and
+    /// why [`SqlSafeStr`] is deliberately not implemented here. It would be, via
+    /// sqlx's blanket `impl<T: SqlSafeStr> Execute for T`, whose
+    /// `take_arguments` is `Ok(None)` -- so a builder could be executed
+    /// directly, with every bound and spliced value dropped, and it would
+    /// compile.
+    ///
+    /// Borrowing rather than consuming, so a test can assert on this and then
+    /// build the same query.
+    ///
+    /// [`build`]: Self::build
+    /// [`SqlStr`]: sqlx::SqlStr
+    /// [`SqlSafeStr`]: sqlx::SqlSafeStr
     #[must_use]
     pub fn sql(&self) -> String {
         let (texts, _) = self.template.parts();
