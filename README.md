@@ -21,8 +21,7 @@ compile time — none of which a template language with `{}` holes can do.
 
 ## Installation
 
-Not on crates.io: the name `sqlx_query` is already taken there by an unrelated
-crate, so this is a git dependency until it has one of its own.
+Work in progress and unpublished, so a git dependency for now.
 
 ```toml
 [dependencies]
@@ -191,6 +190,10 @@ have to land on seven `?` in text order.
 SQLite runs in memory, so it needs nothing. PostgreSQL and MySQL read
 `SQLX_QUERY_POSTGRES_URL` and `SQLX_QUERY_MYSQL_URL` and **skip** when unset —
 see [Development](#development).
+
+Unpublished, and the name will have to change before it is: crates.io reads
+`sqlx-query` and `sqlx_query` as one name, and `sqlx_query` is taken by an
+unrelated crate from 2023.
 
 The rationale lives with the code — `cargo doc --open` — rather than here.
 
