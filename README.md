@@ -1,16 +1,54 @@
 # sqlx-query
 
-> Splices SQL fragments into the sentinel comments of a query you already wrote,
-> for [sqlx](https://github.com/launchbadge/sqlx).
+> Adds filtering, ordering and keyset pagination to a SQL query you already
+> wrote, for [sqlx](https://github.com/launchbadge/sqlx). Stop rebuilding your
+> query in a builder DSL.
 
+[![CI](https://github.com/sqlx-contrib/sqlx-query/actions/workflows/ci.yml/badge.svg)](https://github.com/sqlx-contrib/sqlx-query/actions/workflows/ci.yml)
+[![Rust: 1.94+](https://img.shields.io/badge/rust-1.94%2B-dea584.svg)](https://www.rust-lang.org)
+[![sqlx: 0.9](https://img.shields.io/badge/sqlx-0.9-4169e1.svg)](https://github.com/launchbadge/sqlx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The skeleton is a statement. Comments are inert, so it runs in `psql`, it
-`EXPLAIN`s, and `skeleton()` hands it to `sqlx::query!` to be checked against a
-live database at compile time — none of which a template language with `{}`
-holes can do.
+A list endpoint takes `filter`, `order_by` and `page_token` from the client, and
+none of the three is known when you write the SQL. The usual answers both cost
+something: a query builder takes the SQL away from you, and string
+concatenation takes the safety. This crate leaves the statement alone and
+splices into comments the database already ignores.
 
-## The whole API
+So the skeleton stays a statement. It runs in `psql`, it `EXPLAIN`s, and
+`skeleton()` hands it to `sqlx::query!` to be checked against a live database at
+compile time — none of which a template language with `{}` holes can do.
+
+## Installation
+
+Not on crates.io: the name `sqlx_query` is already taken there by an unrelated
+crate, so this is a git dependency until it has one of its own.
+
+```toml
+[dependencies]
+sqlx-query = { git = "https://github.com/sqlx-contrib/sqlx-query", features = [
+  "postgres",
+  "cel",
+] }
+```
+
+| Feature | |
+| --- | --- |
+| `postgres` | PostgreSQL, `$N` placeholders. On by default. |
+| `sqlite` | SQLite, `?` placeholders. |
+| `mysql` | MySQL, `?` placeholders. |
+| `cel` | [CEL](https://cel.dev) filter expressions — the `Filter` type. |
+
+At least one driver is required: without one there is no `Arguments` to splice
+against. Ordering and pagination work without `cel`; only `Filter` needs it.
+
+## Requirements
+
+- Rust 1.94+ — the MSRV sqlx 0.9 declares
+- sqlx 0.9+ — `Execute::sql` returns an owned `SqlStr` from 0.9, which is what
+  makes a rewritten query expressible at all
+
+## Usage
 
 ```rust
 use std::sync::LazyLock;
@@ -106,7 +144,7 @@ An unfilled or empty slot emits nothing — comment and joiner both — so the f
 page's absent seek condition, and an absent filter, simply leave the query as
 written.
 
-## Three things worth knowing
+## How it works
 
 **Placeholders are never rewritten.** A `QueryFragment` stores the SQL *between*
 its binds and leaves the placeholder to the driver, written at splice time by
@@ -193,13 +231,14 @@ build time was an unterminated comment or a duplicate slot name, neither of
 which survives the first test.
 
 Driver-specific tests are gated on their feature, so a build with one driver
-and no default features — which is what consumers take — compiles and runs a
-narrower suite. Nothing checks those configurations automatically; `cargo
-clippy --all-targets --no-default-features --features sqlite` is worth a run
-after touching a `cfg`. `clippy::all` and
-`clippy::pedantic` are denied rather than warned, because several consumers in
-this ecosystem deny pedantic at the workspace level: a lint this crate tolerates
-is one they cannot.
+and no default features — which is what consumers take — runs a narrower suite.
+`make lint` walks all six of those configurations as well as the all-features
+one, because that is where breakage hides: twice now the narrow builds have
+failed while the wide one stayed green.
+
+`clippy::all` and `clippy::pedantic` are denied rather than warned, because
+several consumers in this ecosystem deny pedantic at the workspace level: a lint
+this crate tolerates is one they cannot.
 
 ## License
 
