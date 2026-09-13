@@ -104,7 +104,7 @@ mod sort;
 mod template;
 mod value;
 
-pub use builder::{QueryBuilder, SlotBuilder};
+pub use builder::{FragmentBuilder, QueryBuilder};
 pub use cursor::{Cursor, CursorKey};
 pub use dialect::Dialect;
 pub use error::Error;

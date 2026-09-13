@@ -230,13 +230,17 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     ///
     /// The closure variant of [`fill`](Self::fill), in the sense
     /// [`Vec::resize_with`] is of `resize`: where that takes a fragment, this
-    /// takes something that writes one. It gets a [`SlotBuilder`], which binds
-    /// straight into this query's argument list -- so its placeholders continue
-    /// the numbering rather than restarting.
+    /// takes something that writes one. The [`FragmentBuilder`] it hands over
+    /// binds straight into this query's argument list, so its placeholders
+    /// continue the numbering rather than restarting.
     ///
     /// [`Vec::resize_with`]: std::vec::Vec::resize_with
     #[must_use]
-    pub fn fill_with(mut self, name: &str, build: impl FnOnce(&mut SlotBuilder<'_, DB>)) -> Self {
+    pub fn fill_with(
+        mut self,
+        name: &str,
+        build: impl FnOnce(&mut FragmentBuilder<'_, DB>),
+    ) -> Self {
         let Some((index, spec)) = self.find(name) else {
             return self.unknown(name);
         };
@@ -246,7 +250,7 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
         }
 
         let mut body = String::new();
-        build(&mut SlotBuilder {
+        build(&mut FragmentBuilder {
             sql: &mut body,
             arguments: &mut self.arguments,
             error: &mut self.error,
@@ -435,17 +439,21 @@ impl<DB: Database> fmt::Debug for QueryBuilder<'_, DB> {
     }
 }
 
-/// A slot being built by hand.
+/// A fragment being written straight into a query.
 ///
-/// Binds go straight into the query's argument list, so placeholders continue
-/// its numbering. Obtained from [`QueryBuilder::fill_with`].
-pub struct SlotBuilder<'a, DB: Database> {
+/// The streaming counterpart of [`QueryFragment`]: same job -- literal SQL and
+/// bind values, interleaved -- but written into the query's own argument list
+/// rather than buffered, so its placeholders continue that query's numbering
+/// instead of restarting. Obtained from [`QueryBuilder::fill_with`].
+///
+/// [`QueryFragment`]: crate::QueryFragment
+pub struct FragmentBuilder<'a, DB: Database> {
     sql: &'a mut String,
     arguments: &'a mut DB::Arguments,
     error: &'a mut Option<Error>,
 }
 
-impl<DB: Database> SlotBuilder<'_, DB> {
+impl<DB: Database> FragmentBuilder<'_, DB> {
     /// Append literal SQL. Not escaped: never pass untrusted input.
     pub fn push(&mut self, sql: impl fmt::Display) -> &mut Self {
         use fmt::Write;
@@ -477,9 +485,9 @@ impl<DB: Database> SlotBuilder<'_, DB> {
     }
 }
 
-impl<DB: Database> fmt::Debug for SlotBuilder<'_, DB> {
+impl<DB: Database> fmt::Debug for FragmentBuilder<'_, DB> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SlotBuilder")
+        f.debug_struct("FragmentBuilder")
             .field("sql", &self.sql)
             .finish()
     }
