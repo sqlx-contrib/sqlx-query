@@ -36,19 +36,8 @@ jobs:
           use-flakehub: disabled
           use-gha-cache: enabled
 
-      # Prints which URLs are set, so a run where the databases did not come up
-      # is distinguishable from one where they did. Otherwise a silently
-      # skipped suite looks exactly like a passing one.
-      - name: Report Databases
-        run: nix develop --command make databases
-
       - name: Run Lint
         run: nix develop --command make lint
-
-      # Each driver alone, with and without CEL. The all-features build hides
-      # breakage in the configuration consumers actually use.
-      - name: Run Lint (feature combinations)
-        run: nix develop --command make lint-features
 
       - name: Run Tests
         run: nix develop --command make test

@@ -166,7 +166,6 @@ Open the repository in a Dev Container, or on the host:
 
 ```sh
 nix develop
-make databases   # which servers the tests will reach
 make test
 make lint
 ```
@@ -182,8 +181,8 @@ project would collide with.
 
 With no stack running, both variables are unset and those tests skip rather
 than fail. That keeps `cargo test` green on a machine with no Docker, at the
-cost of making a skipped suite look exactly like a passing one — which is what
-`make databases` is for, and why CI prints it before running anything.
+cost of making a skipped suite look exactly like a passing one. `echo
+$SQLX_QUERY_POSTGRES_URL` is the check.
 
 One crate. There was briefly a `sql!` macro that scanned the skeleton at compile
 time, which forced two more — a proc-macro crate cannot export the scanner it
@@ -193,10 +192,11 @@ deliberately treating an unrecognised sentinel as prose, all `sql!` caught at
 build time was an unterminated comment or a duplicate slot name, neither of
 which survives the first test.
 
-Driver-specific tests are gated on their feature, and `make lint-features`
-builds each driver alone, with and without CEL: consumers take this crate with
-one driver and no default features, and that configuration has broken while the
-all-features build stayed green. `clippy::all` and
+Driver-specific tests are gated on their feature, so a build with one driver
+and no default features — which is what consumers take — compiles and runs a
+narrower suite. Nothing checks those configurations automatically; `cargo
+clippy --all-targets --no-default-features --features sqlite` is worth a run
+after touching a `cfg`. `clippy::all` and
 `clippy::pedantic` are denied rather than warned, because several consumers in
 this ecosystem deny pedantic at the workspace level: a lint this crate tolerates
 is one they cannot.
