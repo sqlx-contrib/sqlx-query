@@ -1,0 +1,930 @@
+//! Filters a client sent, and the CEL they are written in.
+
+use std::collections::BTreeMap;
+
+use crate::dialect::Dialect;
+use crate::error::Error;
+use crate::fragment::{QueryFragment, ToFragment};
+use crate::mapping::{Column, Mapping};
+use crate::value::Value;
+
+/// A parsed filter expression.
+///
+/// Renders to a boolean expression, suitable to drop after `WHERE`, after
+/// `AND`, into a `HAVING`, or into a `CHECK` -- which is why a
+/// `/* AND query.filter */` slot takes one of these and a [`Cursor`]'s seek
+/// condition together, joined by that slot's own `AND`.
+///
+/// [`Cursor`]: crate::Cursor
+#[derive(Debug, Clone)]
+pub struct Filter {
+    expression: Option<::cel::common::ast::IdedExpr>,
+    /// Every path the expression names, resolved. `None` until
+    /// [`resolve`](Self::resolve) has run.
+    columns: Option<BTreeMap<String, Column>>,
+}
+
+impl Filter {
+    /// A filter that constrains nothing.
+    ///
+    /// Renders to nothing at all, so the slot it fills -- and that slot's
+    /// joiner -- disappear from the query.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            expression: None,
+            columns: Some(BTreeMap::new()),
+        }
+    }
+
+    /// Parse a [CEL] expression.
+    ///
+    /// An empty or all-whitespace string is an empty filter, not an error, to
+    /// match [`Sort::parse`] and [`Cursor::parse`]: a request that did not ask
+    /// to filter should look like one that did not ask to sort.
+    ///
+    /// The expression is plain CEL, not the [AIP-160] grammar -- AIP is one
+    /// caller with a CEL expression and a table, not a requirement.
+    ///
+    /// Nothing is type-checked here, because cel-rust has no checking phase:
+    /// `id > 'tuesday'` parses perfectly well. The [`Mapping`] is what catches
+    /// it, at [`to_fragment`](Self::to_fragment), which is why the allow-list
+    /// and the type checker are the same object.
+    ///
+    /// [CEL]: https://cel.dev
+    /// [AIP-160]: https://google.aip.dev/160
+    /// [`Sort::parse`]: crate::Sort::parse
+    /// [`Cursor::parse`]: crate::Cursor::parse
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parse`] for anything the CEL grammar rejects.
+    pub fn parse(source: &str) -> Result<Self, Error> {
+        if source.trim().is_empty() {
+            return Ok(Self::empty());
+        }
+
+        Ok(Self {
+            expression: Some(cel::parse(source)?),
+            columns: None,
+        })
+    }
+
+    /// Resolve every path this filter names, through `mapping`.
+    ///
+    /// This is the boundary: before it a filter is a string a client sent,
+    /// after it every path it names is one the mapping exposes. An unknown
+    /// field fails here, on the line that handles request input, rather than
+    /// when a query is built.
+    ///
+    /// Type mismatches -- `id > \'tuesday\'` -- are still caught when the
+    /// filter renders, since that needs the shape of each comparison and not
+    /// just the columns.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownColumn`] for a path the mapping does not expose.
+    pub fn resolve(mut self, mapping: &dyn Mapping) -> Result<Self, Error> {
+        let mut columns = BTreeMap::new();
+
+        if let Some(expression) = &self.expression {
+            for path in cel::fields(expression) {
+                let column = cel::resolve(mapping, &path)?;
+                columns.insert(path, column);
+            }
+        }
+
+        self.columns = Some(columns);
+        Ok(self)
+    }
+
+    /// Whether this filter would constrain anything.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.expression.is_none()
+    }
+
+    /// Render against a mapping.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownColumn`] for a field the mapping does not expose,
+    /// [`Error::TypeMismatch`] for a comparison that cannot work, and
+    /// [`Error::Unsupported`] for a construct with no faithful SQL lowering.
+    pub fn to_fragment<DB: Dialect>(&self) -> Result<QueryFragment<DB, Value>, Error> {
+        let columns = self.columns.as_ref().ok_or(Error::Unresolved)?;
+
+        match &self.expression {
+            None => Ok(QueryFragment::new()),
+            Some(expression) => cel::render(expression, columns),
+        }
+    }
+}
+
+impl<DB: Dialect> ToFragment<DB> for Filter {
+    fn to_fragment(&self) -> Result<QueryFragment<DB, Value>, Error> {
+        Filter::to_fragment(self)
+    }
+}
+
+/// Lowering a CEL expression to SQL.
+///
+/// Private to [`Filter`], which is the only thing that may call in here -- hence
+/// `pub(super)` throughout rather than `pub(crate)`.
+///
+/// Named for the crate it lowers, which the name then shadows: paths to that
+/// crate are spelled `::cel` inside.
+mod cel {
+    use ::cel::common::ast::{Expr, IdedExpr, LiteralValue, operators};
+    use chrono::{DateTime, Utc};
+
+    use crate::dialect::{Dialect, reference};
+    use crate::error::Error;
+    use crate::fragment::QueryFragment;
+    use std::collections::BTreeMap;
+
+    use crate::mapping::{Column, ColumnType, Mapping};
+    use crate::value::Value;
+
+    /// The character that escapes a `LIKE` wildcard.
+    ///
+    /// Not a backslash: MySQL's `NO_BACKSLASH_ESCAPES` and the backslash's own
+    /// double meaning in string literals make it the one character guaranteed to be
+    /// argued about. `!` is inert everywhere and declared explicitly with `ESCAPE`.
+    const LIKE_ESCAPE: char = '!';
+
+    /// Parse CEL source.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parse`] for anything the CEL grammar rejects.
+    pub(super) fn parse(source: &str) -> Result<IdedExpr, Error> {
+        ::cel::parser::Parser::new()
+            .parse(source)
+            .map_err(|errors| Error::Parse(errors.to_string()))
+    }
+
+    /// Lower a parsed expression to a boolean fragment.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownColumn`], [`Error::TypeMismatch`], or [`Error::Unsupported`]
+    /// for a construct with no faithful SQL lowering.
+    pub(super) fn render<DB: Dialect>(
+        expr: &IdedExpr,
+        columns: &Columns,
+    ) -> Result<QueryFragment<DB, Value>, Error> {
+        let mut fragment = QueryFragment::new();
+        condition(expr, columns, &mut fragment)?;
+        Ok(fragment)
+    }
+
+    /// Write `expr` as a SQL boolean expression.
+    fn condition<DB: Dialect>(
+        expr: &IdedExpr,
+        columns: &Columns,
+        out: &mut QueryFragment<DB, Value>,
+    ) -> Result<(), Error> {
+        match &expr.expr {
+            // `has(x)` reaches us as a select marked `test`. In SQL the question
+            // "is this field set" is "is this column not null".
+            Expr::Select(select) if select.test => {
+                let column = column_of(&IdedExpr {
+                    id: expr.id,
+                    expr: Expr::Select(::cel::common::ast::SelectExpr {
+                        test: false,
+                        ..select.clone()
+                    }),
+                })
+                .ok_or_else(|| unsupported("has() over something that is not a field"))?;
+
+                let column = lookup(columns, &column)?;
+                out.push(&reference::<DB>(&column));
+                out.push(" IS NOT NULL");
+                Ok(())
+            }
+
+            Expr::Call(call) => call_condition(call, columns, out),
+
+            Expr::Literal(LiteralValue::Boolean(value)) => {
+                out.push(if **value { "TRUE" } else { "FALSE" });
+                Ok(())
+            }
+
+            // A bare column is only a condition if it is boolean, and SQL is happy
+            // to take one directly.
+            Expr::Ident(_) | Expr::Select(_) => {
+                let path = column_of(expr).ok_or_else(|| unsupported("this expression"))?;
+                let column = lookup(columns, &path)?;
+
+                if column.ty != ColumnType::Bool {
+                    return Err(Error::TypeMismatch(format!(
+                        "`{path}` is {} and cannot stand alone as a condition",
+                        column.ty
+                    )));
+                }
+
+                out.push(&reference::<DB>(&column));
+                Ok(())
+            }
+
+            Expr::Comprehension(_) => Err(unsupported(
+                "a comprehension macro (`all`, `exists`, `map`, `filter`): these \
+                 iterate, and a WHERE clause cannot",
+            )),
+            Expr::Map(_) | Expr::Struct(_) => Err(unsupported("a map or struct literal")),
+            _ => Err(unsupported("this expression as a condition")),
+        }
+    }
+
+    fn call_condition<DB: Dialect>(
+        call: &::cel::common::ast::CallExpr,
+        columns: &Columns,
+        out: &mut QueryFragment<DB, Value>,
+    ) -> Result<(), Error> {
+        let name = call.func_name.as_str();
+
+        match name {
+            operators::LOGICAL_AND | operators::LOGICAL_OR => {
+                let [left, right] = pair(&call.args, name)?;
+                let joiner = if name == operators::LOGICAL_AND {
+                    " AND "
+                } else {
+                    " OR "
+                };
+
+                out.push("(");
+                condition(left, columns, out)?;
+                out.push(joiner);
+                condition(right, columns, out)?;
+                out.push(")");
+                Ok(())
+            }
+
+            operators::LOGICAL_NOT => {
+                let [only] = single(&call.args, name)?;
+
+                out.push("(NOT ");
+                condition(only, columns, out)?;
+                out.push(")");
+                Ok(())
+            }
+
+            operators::EQUALS
+            | operators::NOT_EQUALS
+            | operators::LESS
+            | operators::LESS_EQUALS
+            | operators::GREATER
+            | operators::GREATER_EQUALS => {
+                let [left, right] = pair(&call.args, name)?;
+                comparison(name, left, right, columns, out)
+            }
+
+            operators::IN => {
+                let [needle, haystack] = pair(&call.args, name)?;
+                membership(needle, haystack, columns, out)
+            }
+
+            "startsWith" | "endsWith" | "contains" => like(call, name, columns, out),
+
+            operators::CONDITIONAL => Err(unsupported(
+                "the ternary operator: write it as `(a && b) || (!a && c)`",
+            )),
+
+            _ => Err(unsupported(&format!("the function `{name}`"))),
+        }
+    }
+
+    /// One side of a comparison, once we know what it is.
+    enum Operand {
+        Column(Column, String),
+        Value(Value),
+        Null,
+    }
+
+    fn comparison<DB: Dialect>(
+        operator: &str,
+        left: &IdedExpr,
+        right: &IdedExpr,
+        columns: &Columns,
+        out: &mut QueryFragment<DB, Value>,
+    ) -> Result<(), Error> {
+        let left = operand(left, columns)?;
+        let right = operand(right, columns)?;
+
+        match (left, right) {
+            // `x == null` is `IS NULL`, which is both what the caller means and the
+            // only form that behaves: a bound NULL makes a comparison unknown.
+            (Operand::Column(column, _), Operand::Null)
+            | (Operand::Null, Operand::Column(column, _)) => {
+                let sql = match operator {
+                    operators::EQUALS => " IS NULL",
+                    operators::NOT_EQUALS => " IS NOT NULL",
+                    _ => {
+                        return Err(unsupported(
+                            "ordering a column against null: only `==` and `!=` mean anything",
+                        ));
+                    }
+                };
+
+                out.push(&reference::<DB>(&column));
+                out.push(sql);
+                Ok(())
+            }
+
+            (Operand::Column(column, path), Operand::Value(value)) => {
+                check(&column, &value, &path)?;
+
+                out.push(&reference::<DB>(&column));
+                out.push(sql_operator(operator)?);
+                out.push_bind(value);
+                Ok(())
+            }
+
+            // Flipped, so `21 < age` reads as `age > 21` rather than binding on the
+            // left of the operator.
+            (Operand::Value(value), Operand::Column(column, path)) => {
+                check(&column, &value, &path)?;
+
+                out.push(&reference::<DB>(&column));
+                out.push(sql_operator(flip(operator))?);
+                out.push_bind(value);
+                Ok(())
+            }
+
+            (Operand::Column(left, left_path), Operand::Column(right, right_path)) => {
+                if left.ty != right.ty {
+                    return Err(Error::TypeMismatch(format!(
+                        "`{left_path}` is {} and `{right_path}` is {}",
+                        left.ty, right.ty
+                    )));
+                }
+
+                out.push(&reference::<DB>(&left));
+                out.push(sql_operator(operator)?);
+                out.push(&reference::<DB>(&right));
+                Ok(())
+            }
+
+            (Operand::Null, _) | (_, Operand::Null) => Err(unsupported("comparing null to null")),
+
+            (Operand::Value(_), Operand::Value(_)) => Err(unsupported(
+                "a comparison between two constants: it names no column, so it \
+                 filters nothing",
+            )),
+        }
+    }
+
+    fn membership<DB: Dialect>(
+        needle: &IdedExpr,
+        haystack: &IdedExpr,
+        columns: &Columns,
+        out: &mut QueryFragment<DB, Value>,
+    ) -> Result<(), Error> {
+        let Operand::Column(column, path) = operand(needle, columns)? else {
+            return Err(unsupported("`in` over something that is not a column"));
+        };
+
+        let Expr::List(list) = &haystack.expr else {
+            return Err(unsupported(
+                "`in` over something that is not a list literal",
+            ));
+        };
+
+        if list.elements.is_empty() {
+            // `IN ()` is a syntax error everywhere, and the answer is known anyway.
+            out.push("FALSE");
+            return Ok(());
+        }
+
+        out.push(&reference::<DB>(&column));
+        out.push(" IN (");
+
+        for (at, element) in list.elements.iter().enumerate() {
+            if at > 0 {
+                out.push(", ");
+            }
+
+            let Operand::Value(value) = operand(element, columns)? else {
+                return Err(unsupported("a non-constant element in an `in` list"));
+            };
+
+            check(&column, &value, &path)?;
+            out.push_bind(value);
+        }
+
+        out.push(")");
+        Ok(())
+    }
+
+    fn like<DB: Dialect>(
+        call: &::cel::common::ast::CallExpr,
+        name: &str,
+        columns: &Columns,
+        out: &mut QueryFragment<DB, Value>,
+    ) -> Result<(), Error> {
+        let target = call
+            .target
+            .as_deref()
+            .ok_or_else(|| unsupported(&format!("`{name}` without a receiver")))?;
+
+        let Operand::Column(column, path) = operand(target, columns)? else {
+            return Err(unsupported(&format!(
+                "`{name}` on something that is not a column"
+            )));
+        };
+
+        if column.ty != ColumnType::Text {
+            return Err(Error::TypeMismatch(format!(
+                "`{path}` is {} and has no text to match",
+                column.ty
+            )));
+        }
+
+        let [argument] = single(&call.args, name)?;
+        let Operand::Value(Value::Text(needle)) = operand(argument, columns)? else {
+            return Err(unsupported(&format!(
+                "`{name}` with an argument that is not a string constant"
+            )));
+        };
+
+        let escaped = escape_like(&needle);
+        let pattern = match name {
+            "startsWith" => format!("{escaped}%"),
+            "endsWith" => format!("%{escaped}"),
+            _ => format!("%{escaped}%"),
+        };
+
+        out.push(&reference::<DB>(&column));
+        out.push(" LIKE ");
+        out.push_bind(Value::Text(pattern));
+        out.push(&format!(" ESCAPE '{LIKE_ESCAPE}'"));
+        Ok(())
+    }
+
+    /// Resolve one side of a comparison.
+    fn operand(expr: &IdedExpr, columns: &Columns) -> Result<Operand, Error> {
+        if let Some(path) = column_of(expr) {
+            let column = lookup(columns, &path)?;
+            return Ok(Operand::Column(column, path));
+        }
+
+        match &expr.expr {
+            Expr::Literal(LiteralValue::Null) => Ok(Operand::Null),
+            Expr::Literal(literal) => Ok(Operand::Value(literal_value(literal)?)),
+            Expr::Call(call) if call.func_name == "timestamp" && call.target.is_none() => {
+                let [argument] = single(&call.args, "timestamp")?;
+
+                let Expr::Literal(LiteralValue::String(text)) = &argument.expr else {
+                    return Err(unsupported("`timestamp()` with a non-constant argument"));
+                };
+
+                let parsed: DateTime<Utc> = text.parse::<DateTime<Utc>>().map_err(|error| {
+                    Error::Parse(format!("`{}` is not a timestamp: {error}", &**text))
+                })?;
+
+                Ok(Operand::Value(Value::Timestamp(parsed)))
+            }
+            _ => Err(unsupported("this expression as a value")),
+        }
+    }
+
+    fn literal_value(literal: &LiteralValue) -> Result<Value, Error> {
+        Ok(match literal {
+            LiteralValue::Boolean(value) => Value::Bool(**value),
+            LiteralValue::Int(value) => Value::Int(**value),
+            LiteralValue::UInt(value) => Value::Int(i64::try_from(**value).map_err(|_| {
+                Error::TypeMismatch(format!("`{}` does not fit in a signed integer", **value))
+            })?),
+            LiteralValue::Double(value) => Value::Float(**value),
+            LiteralValue::String(value) => Value::Text((**value).to_owned()),
+            LiteralValue::Bytes(value) => Value::Bytes((**value).to_vec()),
+            LiteralValue::Null => return Err(unsupported("null here")),
+        })
+    }
+
+    /// Every path the expression names, deduplicated.
+    ///
+    /// What [`Filter::resolve`](crate::Filter::resolve) walks to look each one up,
+    /// so rendering afterwards consults only what it found.
+    pub(super) fn fields(expr: &IdedExpr) -> Vec<String> {
+        let mut paths = Vec::new();
+        collect(expr, &mut paths);
+
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn collect(expr: &IdedExpr, out: &mut Vec<String>) {
+        if let Some(path) = column_of(expr) {
+            out.push(path);
+            return;
+        }
+
+        match &expr.expr {
+            // `has(x.y)` arrives as a select marked `test`, which `column_of`
+            // refuses; the path is the same select without the mark.
+            Expr::Select(select) if select.test => {
+                let plain = IdedExpr {
+                    id: expr.id,
+                    expr: Expr::Select(::cel::common::ast::SelectExpr {
+                        test: false,
+                        ..select.clone()
+                    }),
+                };
+
+                if let Some(path) = column_of(&plain) {
+                    out.push(path);
+                }
+            }
+            Expr::Select(select) => collect(&select.operand, out),
+            Expr::Call(call) => {
+                if let Some(target) = call.target.as_deref() {
+                    collect(target, out);
+                }
+                for argument in &call.args {
+                    collect(argument, out);
+                }
+            }
+            Expr::List(list) => {
+                for element in &list.elements {
+                    collect(element, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The dotted path this expression names, if it names one.
+    fn column_of(expr: &IdedExpr) -> Option<String> {
+        let mut segments = Vec::new();
+        walk(expr, &mut segments)?;
+        Some(segments.join("."))
+    }
+
+    fn walk(expr: &IdedExpr, into: &mut Vec<String>) -> Option<()> {
+        match &expr.expr {
+            Expr::Ident(name) => {
+                into.push(name.clone());
+                Some(())
+            }
+            Expr::Select(select) if !select.test => {
+                walk(&select.operand, into)?;
+                into.push(select.field.clone());
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
+    /// The paths a filter names, already resolved against a mapping.
+    pub(super) type Columns = BTreeMap<String, Column>;
+
+    /// Look a path up in a mapping. Used by [`Filter::resolve`].
+    pub(super) fn resolve(mapping: &dyn Mapping, path: &str) -> Result<Column, Error> {
+        let segments: Vec<&str> = path.split('.').collect();
+
+        mapping
+            .resolve(&segments)
+            .ok_or_else(|| Error::UnknownColumn(path.to_owned()))
+    }
+
+    /// Look a path up among the resolved ones.
+    ///
+    /// Absent means the filter was resolved against a different expression, which
+    /// `Filter::resolve` does not allow.
+    fn lookup(columns: &Columns, path: &str) -> Result<Column, Error> {
+        columns
+            .get(path)
+            .cloned()
+            .ok_or_else(|| Error::UnknownColumn(path.to_owned()))
+    }
+
+    /// Whether a literal can be compared against a column.
+    ///
+    /// An integer literal against a float column is allowed, because `price > 10`
+    /// is what people write and the widening is exact. Nothing else crosses.
+    fn check(column: &Column, value: &Value, path: &str) -> Result<(), Error> {
+        let given = value.ty();
+
+        let ok = column.ty == given || (column.ty == ColumnType::Float && given == ColumnType::Int);
+
+        if ok {
+            return Ok(());
+        }
+
+        Err(Error::TypeMismatch(format!(
+            "`{path}` is {} but was compared against {given}",
+            column.ty
+        )))
+    }
+
+    fn sql_operator(operator: &str) -> Result<&'static str, Error> {
+        Ok(match operator {
+            operators::EQUALS => " = ",
+            operators::NOT_EQUALS => " <> ",
+            operators::LESS => " < ",
+            operators::LESS_EQUALS => " <= ",
+            operators::GREATER => " > ",
+            operators::GREATER_EQUALS => " >= ",
+            _ => return Err(unsupported(&format!("the operator `{operator}`"))),
+        })
+    }
+
+    /// The operator that means the same thing with its operands swapped.
+    fn flip(operator: &str) -> &str {
+        match operator {
+            operators::LESS => operators::GREATER,
+            operators::LESS_EQUALS => operators::GREATER_EQUALS,
+            operators::GREATER => operators::LESS,
+            operators::GREATER_EQUALS => operators::LESS_EQUALS,
+            same => same,
+        }
+    }
+
+    /// Neutralise the wildcards in a `LIKE` pattern.
+    fn escape_like(needle: &str) -> String {
+        let mut out = String::with_capacity(needle.len());
+
+        for character in needle.chars() {
+            if matches!(character, LIKE_ESCAPE | '%' | '_') {
+                out.push(LIKE_ESCAPE);
+            }
+            out.push(character);
+        }
+
+        out
+    }
+
+    fn pair<'a>(args: &'a [IdedExpr], name: &str) -> Result<[&'a IdedExpr; 2], Error> {
+        match args {
+            [left, right] => Ok([left, right]),
+            _ => Err(unsupported(&format!(
+                "`{name}` with {} arguments",
+                args.len()
+            ))),
+        }
+    }
+
+    fn single<'a>(args: &'a [IdedExpr], name: &str) -> Result<[&'a IdedExpr; 1], Error> {
+        match args {
+            [only] => Ok([only]),
+            _ => Err(unsupported(&format!(
+                "`{name}` with {} arguments",
+                args.len()
+            ))),
+        }
+    }
+
+    fn unsupported(what: &str) -> Error {
+        Error::Unsupported(format!("no SQL lowering for {what}"))
+    }
+
+    // Rendering is what these check, and rendering needs a driver; PostgreSQL is
+    // the one they are written against.
+    #[cfg(all(test, feature = "postgres"))]
+    mod tests {
+        use sqlx::Postgres;
+
+        use super::*;
+        use crate::mapping::{ColumnType, QueryMapping};
+
+        fn volumes() -> QueryMapping {
+            QueryMapping::new()
+                .key("id", ColumnType::Int)
+                .column("title", ColumnType::Text)
+                .column("price", ColumnType::Float)
+                .column("archived", ColumnType::Bool)
+                .column("publishedAt", ColumnType::Timestamp)
+                .add("author.name", Column::new("author_name", ColumnType::Text))
+        }
+
+        fn resolved(source: &str) -> Columns {
+            let expression = parse(source).unwrap();
+            let mapping = volumes();
+
+            fields(&expression)
+                .into_iter()
+                .map(|path| {
+                    let column = resolve(&mapping, &path).unwrap();
+                    (path, column)
+                })
+                .collect()
+        }
+
+        fn sql(source: &str) -> String {
+            render::<Postgres>(&parse(source).unwrap(), &resolved(source))
+                .unwrap()
+                .preview()
+        }
+
+        fn error(source: &str) -> Error {
+            let expression = parse(source).unwrap();
+            let mapping = volumes();
+
+            // Unknown columns are caught while resolving now, not while rendering.
+            let mut columns = Columns::new();
+            for path in fields(&expression) {
+                match resolve(&mapping, &path) {
+                    Ok(column) => {
+                        columns.insert(path, column);
+                    }
+                    Err(error) => return error,
+                }
+            }
+
+            render::<Postgres>(&expression, &columns).unwrap_err()
+        }
+
+        #[test]
+        fn comparisons_bind_their_constant() {
+            assert_eq!(sql("id > 21"), r#""id" > ?"#);
+            assert_eq!(sql("title == 'Dune'"), r#""title" = ?"#);
+            assert_eq!(sql("id != 3"), r#""id" <> ?"#);
+        }
+
+        /// The column belongs on the left whichever way it was written.
+        #[test]
+        fn a_reversed_comparison_flips_its_operator() {
+            assert_eq!(sql("21 < id"), r#""id" > ?"#);
+            assert_eq!(sql("21 >= id"), r#""id" <= ?"#);
+        }
+
+        #[test]
+        fn logic_nests_with_parentheses() {
+            assert_eq!(
+                sql("id > 1 && (title == 'Dune' || archived)"),
+                r#"("id" > ? AND ("title" = ? OR "archived"))"#
+            );
+            assert_eq!(sql("!archived"), r#"(NOT "archived")"#);
+        }
+
+        /// A bound NULL makes a comparison unknown rather than true, so the only
+        /// forms that mean what the caller wrote take no parameter.
+        #[test]
+        fn null_becomes_is_null() {
+            assert_eq!(sql("publishedAt == null"), r#""publishedAt" IS NULL"#);
+            assert_eq!(sql("publishedAt != null"), r#""publishedAt" IS NOT NULL"#);
+        }
+
+        #[test]
+        fn has_asks_whether_a_column_is_set() {
+            assert_eq!(sql("has(author.name)"), r#""author_name" IS NOT NULL"#);
+        }
+
+        #[test]
+        fn dotted_paths_resolve_through_the_schema() {
+            assert_eq!(sql("author.name == 'Herbert'"), r#""author_name" = ?"#);
+        }
+
+        #[test]
+        fn the_string_functions_become_escaped_like() {
+            assert_eq!(
+                sql("title.startsWith('Du')"),
+                r#""title" LIKE ? ESCAPE '!'"#
+            );
+            assert_eq!(sql("title.contains('un')"), r#""title" LIKE ? ESCAPE '!'"#);
+        }
+
+        /// A caller searching for a literal `%` must not get every row.
+        #[test]
+        fn like_wildcards_in_the_needle_are_neutralised() {
+            let fragment = render::<Postgres>(
+                &parse("title.startsWith('100%_x')").unwrap(),
+                &resolved("title.startsWith('100%_x')"),
+            )
+            .unwrap();
+
+            let (_, values) = fragment.parts_for_test();
+            assert_eq!(values, [Value::Text("100!%!_x%".into())]);
+        }
+
+        #[test]
+        fn in_becomes_a_bound_list() {
+            assert_eq!(sql("id in [1, 2, 3]"), r#""id" IN (?, ?, ?)"#);
+        }
+
+        /// `IN ()` is a syntax error everywhere, and the answer is known.
+        #[test]
+        fn an_empty_in_list_is_false() {
+            assert_eq!(sql("id in []"), "FALSE");
+        }
+
+        #[test]
+        fn timestamps_fold_into_a_bind_value() {
+            assert_eq!(
+                sql("publishedAt > timestamp('2024-01-01T00:00:00Z')"),
+                r#""publishedAt" > ?"#
+            );
+        }
+
+        /// cel-rust parses without checking, so the mapping is the only thing that
+        /// can catch this before the database does.
+        #[test]
+        fn a_type_mismatch_is_rejected() {
+            assert!(matches!(error("id > 'tuesday'"), Error::TypeMismatch(_)));
+            assert!(matches!(error("title > 3"), Error::TypeMismatch(_)));
+        }
+
+        /// Integers against floats are the one crossing, because `price > 10` is
+        /// what people write and widening is exact.
+        #[test]
+        fn an_integer_may_be_compared_against_a_float_column() {
+            assert_eq!(sql("price > 10"), r#""price" > ?"#);
+        }
+
+        #[test]
+        fn an_unknown_column_is_rejected() {
+            assert!(matches!(error("salary > 1"), Error::UnknownColumn(f) if f == "salary"));
+        }
+
+        #[test]
+        fn constructs_with_no_lowering_are_rejected_not_approximated() {
+            for source in [
+                "[1, 2].all(x, x > 1)",
+                "{'a': 1}.a == 1",
+                "id > 1 ? true : false",
+                "id + 1 > 2",
+                "1 > 0",
+            ] {
+                assert!(
+                    matches!(error(source), Error::Unsupported(_)),
+                    "accepted `{source}`"
+                );
+            }
+        }
+
+        #[test]
+        fn a_non_boolean_column_cannot_stand_alone() {
+            assert!(matches!(error("title"), Error::TypeMismatch(_)));
+        }
+    }
+}
+
+// Rendering is what these check, and rendering needs a driver; PostgreSQL is
+// the one they are written against.
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use sqlx::Postgres;
+
+    use super::*;
+    use crate::mapping::{ColumnType, QueryMapping};
+
+    fn volumes() -> QueryMapping {
+        QueryMapping::new()
+            .key("id", ColumnType::Int)
+            .column("title", ColumnType::Text)
+    }
+
+    /// A request that did not ask to filter should look like one that did not
+    /// ask to sort: an empty string, not an error.
+    #[test]
+    fn an_absent_filter_is_empty_not_an_error() {
+        for source in ["", "   "] {
+            let predicate = Filter::parse(source).unwrap().resolve(&volumes()).unwrap();
+
+            assert!(predicate.is_empty());
+            assert!(predicate.to_fragment::<Postgres>().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_empty_filter_constrains_nothing() {
+        assert!(Filter::empty().is_empty());
+    }
+
+    #[test]
+    fn a_filter_renders_against_the_schema() {
+        let fragment = Filter::parse("id > 21")
+            .unwrap()
+            .resolve(&volumes())
+            .unwrap()
+            .to_fragment::<Postgres>()
+            .unwrap();
+
+        assert_eq!(fragment.preview(), r#""id" > ?"#);
+    }
+
+    #[test]
+    fn a_syntax_error_is_rejected_at_parse() {
+        assert!(matches!(
+            Filter::parse("id >").unwrap_err(),
+            Error::Parse(_)
+        ));
+    }
+
+    /// cel-rust parses without checking, so the mapping is the only thing that
+    /// can catch this before the database does.
+    #[test]
+    fn a_type_error_is_rejected_at_render() {
+        let error = Filter::parse("id > 'tuesday'")
+            .unwrap()
+            .resolve(&volumes())
+            .unwrap()
+            .to_fragment::<Postgres>()
+            .unwrap_err();
+
+        assert!(matches!(error, Error::TypeMismatch(_)), "{error}");
+    }
+}
