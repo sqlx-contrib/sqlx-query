@@ -18,10 +18,20 @@ test:
 	cargo test --all-targets --features $(FEATURES)
 	cargo test --doc --features $(FEATURES)
 
+# Every driver alone, with and without CEL, and then all of them together.
+# Consumers take this crate with one driver and no default features, and that
+# configuration has broken twice while the all-features build stayed green --
+# so it is linted by default rather than on request.
+DRIVERS := postgres sqlite mysql postgres,cel sqlite,cel mysql,cel
+
 .PHONY: lint
 lint:
 	cargo fmt --all --check
 	cargo clippy --all-targets --features $(FEATURES)
+	@for features in $(DRIVERS); do \
+		echo "--- $$features"; \
+		cargo clippy --quiet --all-targets --no-default-features --features $$features || exit 1; \
+	done
 
 .PHONY: doc
 doc:

@@ -106,7 +106,7 @@ mod value;
 
 pub use builder::{QueryBuilder, SlotBuilder};
 pub use cursor::{Cursor, CursorKey};
-pub use dialect::Dialect;
+pub use dialect::{Dialect, value_from_row};
 pub use error::Error;
 #[cfg(feature = "cel")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]

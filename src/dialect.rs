@@ -10,15 +10,62 @@ use crate::error::Error;
 use crate::mapping::{Column, ColumnType};
 use crate::value::Value;
 
-mod sealed {
-    pub trait Sealed {}
-}
-
 /// The SQL spellings that differ between drivers.
 ///
-/// Sealed: the constants here are facts about a driver, not policy, so there is
-/// no sensible way for a caller to supply a different answer for one this crate
-/// already supports.
+/// # Implementing it for a driver this crate has not heard of
+///
+/// Deliberately not sealed. sqlx's [`Database`] is open, and a driver can live
+/// outside sqlx entirely -- Cloudflare D1, `libSQL` and `DuckDB` are the sort that
+/// arrive that way. Sealing this would have made the crate unusable with every
+/// one of them, for the sake of a rule ("a driver's quote character is a fact,
+/// not a preference") that only holds for drivers already supported. For one
+/// that is not, there is no answer here to protect -- only a missing one.
+///
+/// Everything else was already open: [`Value`] implements `Encode` and `Type`
+/// for any `Database` that handles the six primitives underneath, and
+/// placeholders come from the driver itself.
+///
+/// Three items, none of them long:
+///
+/// Not compiled here, because an example cannot implement this crate's trait
+/// for a driver it does not own -- which is the orphan rule doing its job, and
+/// the reason this has to be your crate's code and not ours.
+///
+/// ```ignore
+/// use sqlx_query::{ColumnType, Dialect, Error, Value, value_from_row};
+///
+/// impl Dialect for D1 {
+///     const QUOTE: char = '"';
+///
+///     fn bind(
+///         arguments: &mut Self::Arguments,
+///         value: Value,
+///     ) -> Result<(), sqlx::error::BoxDynError> {
+///         use sqlx::Arguments as _;
+///         arguments.add(value)
+///     }
+///
+///     fn value(row: &Self::Row, column: &str, ty: ColumnType) -> Result<Value, Error> {
+///         value_from_row(row, column, ty)
+///     }
+/// }
+/// ```
+///
+/// [`value_from_row`] is the whole of [`value`](Self::value) for every driver
+/// here, and is public for exactly this.
+///
+/// One limit, and it is Rust's rather than this crate's: the impl has to live
+/// in the crate that defines the driver type. A third crate holding neither
+/// `Dialect` nor the `Database` impl gets E0117 -- so bolting this onto a
+/// driver you merely depend on means asking its author, or wrapping it in a
+/// newtype that implements `Database` itself. Unsealing removes the barrier
+/// this crate put up; it cannot remove that one.
+///
+/// The cost of being open: adding a method to this trait is a breaking change,
+/// so it will not gain one lightly.
+///
+/// [`Value`]: crate::Value
+/// [`value_from_row`]: crate::value_from_row
 ///
 /// # Notably absent: anything about placeholders
 ///
@@ -29,7 +76,7 @@ mod sealed {
 ///
 /// [`Arguments::format_placeholder`]: sqlx::Arguments::format_placeholder
 /// [`QueryBuilder`]: crate::QueryBuilder
-pub trait Dialect: Database + sealed::Sealed {
+pub trait Dialect: Database {
     /// The identifier quote character. Doubled to escape itself.
     const QUOTE: char;
 
@@ -60,8 +107,18 @@ pub trait Dialect: Database + sealed::Sealed {
     fn value(row: &Self::Row, column: &str, ty: ColumnType) -> Result<Value, Error>;
 }
 
-/// One implementation for every driver, reached through [`Dialect::value`].
-fn value_from_row<R>(row: &R, column: &str, ty: ColumnType) -> Result<Value, Error>
+/// Read a value of `ty` out of `row`'s `column`.
+///
+/// The body of [`Dialect::value`] for every driver in this crate, and public so
+/// that it can be the body of yours: the bounds are what stop this living on
+/// the trait, since a where-clause on a trait is an obligation at every use
+/// site rather than an implied bound.
+///
+/// # Errors
+///
+/// [`Error::Column`] if the column is absent from the row, or its value does
+/// not decode as `ty`.
+pub fn value_from_row<R>(row: &R, column: &str, ty: ColumnType) -> Result<Value, Error>
 where
     R: Row,
     // Column lookup by name is per-driver, not blanket.
@@ -96,9 +153,6 @@ where
 }
 
 #[cfg(feature = "postgres")]
-impl sealed::Sealed for sqlx::Postgres {}
-
-#[cfg(feature = "postgres")]
 #[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
 impl Dialect for sqlx::Postgres {
     const QUOTE: char = '"';
@@ -115,9 +169,6 @@ impl Dialect for sqlx::Postgres {
 }
 
 #[cfg(feature = "sqlite")]
-impl sealed::Sealed for sqlx::Sqlite {}
-
-#[cfg(feature = "sqlite")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sqlite")))]
 impl Dialect for sqlx::Sqlite {
     const QUOTE: char = '"';
@@ -132,9 +183,6 @@ impl Dialect for sqlx::Sqlite {
         value_from_row(row, column, ty)
     }
 }
-
-#[cfg(feature = "mysql")]
-impl sealed::Sealed for sqlx::MySql {}
 
 #[cfg(feature = "mysql")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mysql")))]
