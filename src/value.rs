@@ -23,7 +23,7 @@ use crate::mapping::ColumnType;
 /// naming a driver, and so that a mapping can type-check a comparison before the
 /// database sees it. A caller who wants to bind something else can build a
 /// [`QueryFragment<DB, T>`](crate::QueryFragment) over their own type, or reach
-/// for [`FragmentBuilder::push_bind`](crate::FragmentBuilder::push_bind).
+/// for [`SlotBuilder::push_bind`](crate::SlotBuilder::push_bind).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
