@@ -112,12 +112,12 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
     /// filter and a cursor condition and read correctly. An empty fragment
     /// contributes nothing at all, not even the joiner.
     #[must_use]
-    pub fn fill(mut self, slot: &str, item: &impl ToFragment<DB>) -> Self
+    pub fn fill(mut self, name: &str, item: &impl ToFragment<DB>) -> Self
     where
         DB: Dialect,
     {
-        let Some((index, spec)) = self.find(slot) else {
-            return self.unknown(slot);
+        let Some((index, spec)) = self.find(name) else {
+            return self.unknown(name);
         };
 
         let fragment = match item.to_fragment() {
@@ -226,13 +226,17 @@ impl<'t, DB: Database> QueryBuilder<'t, DB> {
         }
     }
 
-    /// Build a slot by hand, for SQL no producer makes.
+    /// Fill a slot by hand, for SQL no producer makes.
     ///
-    /// The closure gets a [`SlotBuilder`], which binds straight into this query's
-    /// argument list -- so its placeholders continue the numbering rather than
-    /// restarting.
+    /// The closure variant of [`fill`](Self::fill), in the sense
+    /// [`Vec::resize_with`] is of `resize`: where that takes a fragment, this
+    /// takes something that writes one. It gets a [`SlotBuilder`], which binds
+    /// straight into this query's argument list -- so its placeholders continue
+    /// the numbering rather than restarting.
+    ///
+    /// [`Vec::resize_with`]: std::vec::Vec::resize_with
     #[must_use]
-    pub fn slot(mut self, name: &str, build: impl FnOnce(&mut SlotBuilder<'_, DB>)) -> Self {
+    pub fn fill_with(mut self, name: &str, build: impl FnOnce(&mut SlotBuilder<'_, DB>)) -> Self {
         let Some((index, spec)) = self.find(name) else {
             return self.unknown(name);
         };
@@ -416,7 +420,7 @@ impl<DB: Database> fmt::Debug for QueryBuilder<'_, DB> {
 /// A slot being built by hand.
 ///
 /// Binds go straight into the query's argument list, so placeholders continue
-/// its numbering. Obtained from [`QueryBuilder::slot`].
+/// its numbering. Obtained from [`QueryBuilder::fill_with`].
 pub struct SlotBuilder<'a, DB: Database> {
     sql: &'a mut String,
     arguments: &'a mut DB::Arguments,
@@ -586,7 +590,7 @@ mod tests {
             .builder()
             .bind(7_i64)
             .bind(50_i64)
-            .slot("filter", |slot| {
+            .fill_with("filter", |slot| {
                 slot.push("reads BETWEEN ")
                     .push_bind(1_i64)
                     .push(" AND ")
