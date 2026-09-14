@@ -1,118 +1,103 @@
-//! Splices SQL fragments into the sentinel comments of a query you already
-//! wrote, for [sqlx].
+//! Adds filters and ordering to a SQL query you already wrote, by rewriting
+//! its syntax tree, for [sqlx].
 //!
 //! ```
-//! # #[cfg(all(feature = "postgres", feature = "cel"))] {
+//! # #[cfg(feature = "postgres")] {
 //! use sqlx::Postgres;
-//! use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
+//! use sqlx_query::QueryWriter;
 //!
-//! // The query you already wrote. The sentinels are comments, so the skeleton
-//! // is a statement: it runs in psql, it EXPLAINs, and `skeleton()` hands it to
-//! // `sqlx::query!` to be checked against a live database.
-//! let volumes = QueryTemplate::<Postgres>::parse(
-//!     "SELECT id, title, read_count FROM volumes \
-//!      WHERE tenant_id = $1 /* AND query.filter */ \
-//!      /* ORDER BY query.order */ LIMIT $2",
+//! // The query you already wrote. Nothing in it belongs to this crate -- it
+//! // runs in psql, it EXPLAINs, and `sqlx::query!` will check it against a
+//! // live database.
+//! let mut writer = QueryWriter::<Postgres>::new(
+//!     "SELECT id, title, read_count FROM volumes WHERE tenant_id = $1 ORDER BY id",
 //! )?;
 //!
-//! // What a request may name, and which column each path resolves to. Anything
-//! // not named here is rejected, not passed through.
-//! let mapping = QueryMapping::new()
-//!     .key("id", ColumnType::Int)
-//!     .column("title", ColumnType::Text)
-//!     .add("readCount", Column::new("read_count", ColumnType::Int));
-//!
-//! // Request parameters, as the strings they arrive as. Each treats an empty
-//! // string as "not asked for" rather than as an error, and each is resolved
-//! // against the mapping -- the boundary between what a client sent and what
-//! // this query will run.
-//! let filter = Filter::parse("readCount > 100 && title.startsWith(\'D\')")?.resolve(&mapping)?;
-//! let sort = Sort::parse("title desc")?.asc("id").resolve(&mapping)?;
-//! let cursor = Cursor::parse("")?.resolve(&mapping)?;
-//!
-//! let query = volumes
-//!     .builder()
-//!     .bind(7_i64)   // $1, the tenant
-//!     .bind(50_i64)  // $2, the page size
-//!     .filter(&filter)
-//!     .seek(&cursor)
-//!     .order(&sort);
+//! // What the request asked for, as fragments. Each is parsed before it is
+//! // used, so a fragment that is not one complete expression never lands in
+//! // the query.
+//! writer
+//!     .bind(7_i64)
+//!     .filter_by("read_count > 100")
+//!     .order_by("title desc")
+//!     .limit(50);
 //!
 //! assert_eq!(
-//!     query.sql(),
+//!     writer.sql()?,
 //!     "SELECT id, title, read_count FROM volumes \
-//!      WHERE tenant_id = $1 AND (\"read_count\" > $3 AND \"title\" LIKE $4 ESCAPE \'!\') \
-//!      ORDER BY \"title\" DESC, \"id\" ASC LIMIT $2",
+//!      WHERE tenant_id = $1 AND read_count > 100 \
+//!      ORDER BY title DESC, id LIMIT 50",
 //! );
 //!
-//! // let rows = query.build_query_as::<Volume>()?.fetch_all(&pool).await?;
-//!
-//! // The token for the next page is read out of the last row:
-//! //   Cursor::new(&sort).after(last, &mapping)?
-//! // which needs a live row, so see `tests/sqlite.rs` for it end to end.
+//! // let rows = writer.build_as::<Volume>()?.fetch_all(&pool).await?;
 //! # }
 //! # Ok::<_, sqlx_query::Error>(())
 //! ```
 //!
-//! # What the sentinels buy
+//! # Why a tree and not a template
 //!
-//! The skeleton above is a statement. Comments are inert, so you can paste it
-//! into `psql`, `EXPLAIN` it, or hand
-//! [`skeleton()`](QueryTemplate::skeleton) to `sqlx::query!` and have the
-//! database check it at compile time. A template language with `{}` holes
-//! cannot do any of that, because its skeleton is not SQL.
+//! The query above has no holes, no markers and no escaping. That is the whole
+//! point: a skeleton with `{}` in it is not SQL, so nothing that reads SQL can
+//! read it -- not your formatter, not `EXPLAIN`, not the compile-time check in
+//! `sqlx::query!`. Here the skeleton is the statement, and the parts that vary
+//! are grafted onto its tree.
 //!
-//! # What the fragments buy
+//! It also means the rewrite knows what it is editing. Adding a filter to
+//! `WHERE a = 1 OR b = 2` has to parenthesise the existing condition or
+//! quietly change the query, because `AND` binds tighter than `OR`. A
+//! rewriter that only has text cannot see that; one that has a tree cannot
+//! miss it.
 //!
-//! A [`QueryFragment`] stores the SQL *between* its binds and leaves the
-//! placeholders to be written at splice time, by the driver, through
-//! [`Arguments::format_placeholder`]. So `$3` is produced once, when the value
-//! is added -- there is no pass that rewrites `?` into `$3` afterwards, and so
-//! no chance of a rewrite wandering into a string literal.
+//! # What a fragment is allowed to be
 //!
-//! It also means a fragment carries no driver bounds until it is used: build
-//! one anywhere, encode it when it lands in a query.
+//! Exactly one expression. [`filter_by`](QueryWriter::filter_by) parses its
+//! argument and then insists the parser reached the end of it, so
+//! `role = 'admin'` is accepted and `role = 'admin'; DROP TABLE users` is
+//! [`Error::Trailing`] -- the statement after the expression has nowhere to go.
 //!
-//! # Placeholder numbering is not the same everywhere
+//! That is a check on shape. It is not a claim that any expression is safe to
+//! run: `role = 'admin' OR 1=1` is well-formed. Fragments should be built from
+//! an allowlist of columns, with values bound rather than written in.
 //!
-//! PostgreSQL's `$N` names the *N*th bound value, so text spliced ahead of a
-//! `$2` leaves it alone. MySQL's and SQLite's `?` names the *N*th placeholder
-//! *in the text*, so splicing ahead of one shifts it. Where that distinction
-//! bites -- binding after filling, or filling slots out of order -- this crate
-//! returns [`Error::Positional`] rather than a wrong answer. See [`QueryBuilder`].
+//! # Placeholders are numbered, then written back out
+//!
+//! Whatever the driver spells them as, placeholders are numbered on the way in
+//! and written back in that driver's form at the end. In between there is one
+//! kind of placeholder and the rewrite is arithmetic: a fragment's `$1` becomes
+//! `$3` because two values were claimed before it.
+//!
+//! Values are bound in the order the placeholders claim them -- the base
+//! query's first, then each fragment's -- and sent in that same order, because
+//! every placeholder names the value it wants rather than merely occupying a
+//! position:
+//!
+//! ```text
+//! base      SELECT id FROM users WHERE tenant_id = ? LIMIT ?
+//! fragment  role = ?
+//! sqlite    SELECT id FROM users WHERE tenant_id = ?1 AND role = ?3 LIMIT ?2
+//! postgres  SELECT id FROM users WHERE tenant_id = $1 AND role = $3 LIMIT $2
+//! ```
+//!
+//! Naming is why both drivers here are supported and MySQL is not. Its `?`
+//! takes a value per appearance and cannot ask for an earlier one, so the same
+//! rewrite would have to reorder the values to match -- silently, since the SQL
+//! would look identical either way. Supporting it later is possible; doing it
+//! quietly is not.
+//!
+//! A base query uses its own driver's syntax, because it is SQL for that
+//! database and nothing else. PostgreSQL will not parse `?`, and SQLite takes
+//! `?`, `?N` or `$N`.
 //!
 //! [sqlx]: https://github.com/launchbadge/sqlx
-//! [`Arguments::format_placeholder`]: sqlx::Arguments::format_placeholder
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+#[cfg(not(any(feature = "postgres", feature = "sqlite")))]
 compile_error!(
-    "sqlx-query needs at least one driver feature: `postgres`, `mysql`, or `sqlite`. \
-     Without one there is no `Arguments` implementation to splice against."
+    "sqlx-query needs at least one driver feature: `postgres` or `sqlite`. \
+     Without one there is no syntax to parse with and no `Arguments` to bind against."
 );
 
-mod builder;
-mod cursor;
-mod dialect;
-mod error;
-#[cfg(feature = "cel")]
-mod filter;
-mod fragment;
-mod mapping;
-mod sort;
-mod template;
-mod value;
+mod writer;
 
-pub use builder::{QueryBuilder, SlotBuilder};
-pub use cursor::{Cursor, CursorKey};
-pub use dialect::{Dialect, value_from_row};
-pub use error::Error;
-#[cfg(feature = "cel")]
-#[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
-pub use filter::Filter;
-pub use fragment::{QueryFragment, ToFragment};
-pub use mapping::{Column, ColumnType, Mapping, QueryMapping};
-pub use sort::{Direction, Sort, SortKey};
-pub use template::QueryTemplate;
-pub use value::Value;
+pub use writer::{Error, QueryWriter, Syntax};
