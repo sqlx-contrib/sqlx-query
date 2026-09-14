@@ -1,9 +1,8 @@
 //! The rewrite, driver by driver.
 //!
 //! One file, mirroring `src/writer.rs`, and one module per driver, because the
-//! driver is what the answers actually depend on: the same base query and the
-//! same fragment come out numbered under PostgreSQL and SQLite and bare under
-//! MySQL.
+//! driver is what the answers actually depend on: the same base query comes out
+//! with `$N` under PostgreSQL and `?N` under SQLite.
 //!
 //! Within each, `placeholders` compares SQL, which is all a numbering question
 //! needs, and `database` runs it, which is the only way to tell whether a value
@@ -15,10 +14,7 @@ mod postgres {
     use sqlx_query::{Error, QueryWriter};
 
     /// Rewrites `sql` and returns what came out.
-    fn rewrite(
-        sql: &str,
-        apply: impl FnOnce(&mut QueryWriter<'_, Postgres>),
-    ) -> Result<String, Error> {
+    fn rewrite(sql: &str, apply: impl FnOnce(&mut QueryWriter<Postgres>)) -> Result<String, Error> {
         let mut writer = QueryWriter::<Postgres>::new(sql)?;
         apply(&mut writer);
         writer.sql()
@@ -449,10 +445,7 @@ mod sqlite {
     use sqlx_query::{Error, QueryWriter};
 
     /// Rewrites `sql` and returns what came out.
-    fn rewrite(
-        sql: &str,
-        apply: impl FnOnce(&mut QueryWriter<'_, Sqlite>),
-    ) -> Result<String, Error> {
+    fn rewrite(sql: &str, apply: impl FnOnce(&mut QueryWriter<Sqlite>)) -> Result<String, Error> {
         let mut writer = QueryWriter::<Sqlite>::new(sql)?;
         apply(&mut writer);
         writer.sql()
@@ -794,216 +787,6 @@ mod sqlite {
             let row = writer.build().unwrap().fetch_one(&pool).await.unwrap();
 
             assert_eq!(row.get::<i64, _>("n"), 3);
-        }
-    }
-}
-
-#[cfg(feature = "mysql")]
-mod mysql {
-    use sqlx::MySql;
-    use sqlx_query::{Error, QueryWriter};
-
-    /// Rewrites `sql` and returns what came out.
-    fn rewrite(
-        sql: &str,
-        apply: impl FnOnce(&mut QueryWriter<'_, MySql>),
-    ) -> Result<String, Error> {
-        let mut writer = QueryWriter::<MySql>::new(sql)?;
-        apply(&mut writer);
-        writer.sql()
-    }
-
-    /// Bare `?`, because MySQL has no other form: `?1` is a syntax error there
-    /// and `$1` comes back as an unknown column. The placeholders stay put and
-    /// the values move instead, which only `database` below can show.
-    mod placeholders {
-        use super::rewrite;
-        use sqlx_query::Error;
-
-        #[test]
-        fn a_fragment_after_the_last_placeholder_is_fine() {
-            let sql = rewrite("SELECT id FROM users WHERE tenant_id = ?", |w| {
-                w.filter_by("role = ?");
-            })
-            .unwrap();
-
-            assert_eq!(sql, "SELECT id FROM users WHERE tenant_id = ? AND role = ?");
-        }
-
-        /// The placeholders stay bare and in place; what moves is the order the
-        /// values are sent in, which this cannot show. See `mysql.rs`.
-        #[test]
-        fn a_fragment_before_an_existing_placeholder_is_rewritten() {
-            let sql = rewrite("SELECT id FROM users WHERE tenant_id = ? LIMIT ?", |w| {
-                w.filter_by("role = ?");
-            })
-            .unwrap();
-
-            assert_eq!(
-                sql,
-                "SELECT id FROM users WHERE tenant_id = ? AND role = ? LIMIT ?"
-            );
-        }
-
-        #[test]
-        fn a_question_mark_in_a_string_literal_is_not_a_placeholder() {
-            let sql = rewrite("SELECT id FROM users WHERE note = '? ?'", |w| {
-                w.filter_by("role = ?");
-            })
-            .unwrap();
-
-            assert_eq!(sql, "SELECT id FROM users WHERE note = '? ?' AND role = ?");
-        }
-
-        /// The one thing bare `?` cannot express. PostgreSQL and SQLite both
-        /// allow one value in two places; MySQL has no way to name an earlier one,
-        /// so a fragment that asks for it is refused rather than silently given
-        /// two values.
-        #[test]
-        fn one_value_wanted_by_two_placeholders_is_refused() {
-            let error = rewrite("SELECT id FROM users", |w| {
-                w.filter_by("a = ?1 OR b = ?1");
-            })
-            .unwrap_err();
-
-            assert!(matches!(error, Error::Positional), "{error:?}");
-        }
-    }
-
-    /// Against a server, which is the only thing that can tell whether the
-    /// values were sent in the right order -- the SQL looks identical either
-    /// way.
-    ///
-    /// Needs `SQLX_QUERY_MYSQL_URL`. Without it these skip, so a machine with
-    /// no Docker still runs green, and covers less.
-    mod database {
-        use sqlx::{AssertSqlSafe, MySqlPool, Row};
-        use sqlx_query::QueryWriter;
-
-        /// Connects, or returns `None` so the test reports itself as skipped rather
-        /// than failing on a machine that was never going to have a server.
-        async fn pool() -> Option<MySqlPool> {
-            // An empty value counts as unset: `env::var` returns `Ok("")` for
-            // `SQLX_QUERY_MYSQL_URL=`, which is how CI spells "no server" when a
-            // variable is declared but not filled in.
-            let url = std::env::var("SQLX_QUERY_MYSQL_URL")
-                .ok()
-                .filter(|url| !url.trim().is_empty())?;
-            Some(
-                MySqlPool::connect(&url)
-                    .await
-                    .expect("SQLX_QUERY_MYSQL_URL is set but unreachable"),
-            )
-        }
-
-        /// A table per test, because these may run against a shared server and
-        /// concurrently with each other.
-        async fn seed(pool: &MySqlPool, table: &str) {
-            sqlx::query(AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
-                .execute(pool)
-                .await
-                .unwrap();
-            sqlx::query(AssertSqlSafe(format!(
-                "CREATE TABLE {table} (
-                    id        BIGINT PRIMARY KEY,
-                    tenant_id BIGINT NOT NULL,
-                    name      VARCHAR(32) NOT NULL,
-                    role      VARCHAR(32) NOT NULL
-                )"
-            )))
-            .execute(pool)
-            .await
-            .unwrap();
-
-            for (id, tenant, name, role) in [
-                (1, 1, "ada", "admin"),
-                (2, 1, "grace", "admin"),
-                (3, 1, "alan", "member"),
-                (4, 2, "edsger", "admin"),
-            ] {
-                sqlx::query(AssertSqlSafe(format!(
-                    "INSERT INTO {table} (id, tenant_id, name, role) VALUES (?, ?, ?, ?)"
-                )))
-                .bind(id)
-                .bind(tenant)
-                .bind(name)
-                .bind(role)
-                .execute(pool)
-                .await
-                .unwrap();
-            }
-        }
-
-        /// The filter renders between `tenant_id = ?` and `LIMIT ?`, so the values are
-        /// wanted as tenant, role, limit -- but were given as tenant, limit, role,
-        /// because a fragment's values follow the base query's. Sending them as given
-        /// would put the page size on `role` and the string `admin` on `LIMIT`.
-        #[tokio::test]
-        async fn values_are_replayed_in_the_order_the_statement_wants() {
-            let Some(pool) = pool().await else { return };
-            seed(&pool, "replay_order").await;
-
-            let mut writer = QueryWriter::<sqlx::MySql>::new(
-                "SELECT id, name FROM replay_order WHERE tenant_id = ? ORDER BY id LIMIT ?",
-            )
-            .unwrap();
-            writer
-                .bind(1_i64) // base: tenant_id
-                .bind(2_i64) // base: limit
-                .filter_by("role = ?")
-                .bind("admin"); // fragment
-
-            assert_eq!(
-                writer.sql().unwrap(),
-                "SELECT id, name FROM replay_order WHERE tenant_id = ? AND role = ? ORDER BY id LIMIT ?"
-            );
-
-            let rows = writer.build().unwrap().fetch_all(&pool).await.unwrap();
-            let names: Vec<String> = rows.iter().map(|r| r.get::<String, _>("name")).collect();
-
-            assert_eq!(names, ["ada", "grace"]);
-        }
-
-        /// The same shape with a limit of one, so a mis-bound limit could not pass
-        /// unnoticed.
-        #[tokio::test]
-        async fn a_replayed_limit_still_limits() {
-            let Some(pool) = pool().await else { return };
-            seed(&pool, "replay_limit").await;
-
-            let mut writer = QueryWriter::<sqlx::MySql>::new(
-                "SELECT id, name FROM replay_limit WHERE tenant_id = ? ORDER BY id LIMIT ?",
-            )
-            .unwrap();
-            writer
-                .bind(1_i64)
-                .bind(1_i64)
-                .filter_by("role = ?")
-                .bind("admin");
-
-            let rows = writer.build().unwrap().fetch_all(&pool).await.unwrap();
-            let names: Vec<String> = rows.iter().map(|r| r.get::<String, _>("name")).collect();
-
-            assert_eq!(names, ["ada"]);
-        }
-
-        /// The `OR` grouping, executed. Without the parentheses this returns edsger
-        /// too, which is another tenant's row: a data leak rather than a syntax error.
-        #[tokio::test]
-        async fn an_or_in_the_base_query_keeps_its_grouping() {
-            let Some(pool) = pool().await else { return };
-            seed(&pool, "replay_or").await;
-
-            let mut writer = QueryWriter::<sqlx::MySql>::new(
-                "SELECT id, name FROM replay_or WHERE name = 'edsger' OR name = 'alan'",
-            )
-            .unwrap();
-            writer.filter_by("tenant_id = ?").bind(1_i64);
-
-            let rows = writer.build().unwrap().fetch_all(&pool).await.unwrap();
-            let names: Vec<String> = rows.iter().map(|r| r.get::<String, _>("name")).collect();
-
-            assert_eq!(names, ["alan"]);
         }
     }
 }

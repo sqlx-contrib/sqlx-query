@@ -77,13 +77,9 @@ written back in that driver's form at the end. In between there is one kind of
 placeholder and the rewrite is arithmetic: a fragment's `$1` becomes `$3`
 because two values were claimed before it.
 
-Values are given in the order the placeholders claim them -- the base query's
-first, then each fragment's. What comes out depends only on what the driver can
-say.
-
-PostgreSQL's `$N` and SQLite's `?N` each name the value they want, so the
-numbering survives to the wire and a fragment spliced into the middle disturbs
-nothing:
+Values are bound in the order the placeholders claim them -- the base query's
+first, then each fragment's -- and sent in that same order, because every
+placeholder names the value it wants rather than merely occupying a position:
 
 ```
 base      SELECT id FROM users WHERE tenant_id = ? LIMIT ?
@@ -92,19 +88,21 @@ sqlite    SELECT id FROM users WHERE tenant_id = ?1 AND role = ?3 LIMIT ?2
 postgres  SELECT id FROM users WHERE tenant_id = $1 AND role = $3 LIMIT $2
 ```
 
-MySQL has no numbered form -- `?1` is a syntax error and `$1` is read as a
-column name -- so its placeholders go out bare and take a value each, in the
-order they appear. The values are sent in that order rather than the order they
-were given:
+A base query uses its own driver's syntax, because it is SQL for that database
+and nothing else. PostgreSQL will not parse `?`; SQLite takes `?`, `?N` or `$N`.
 
-```
-mysql     SELECT id FROM users WHERE tenant_id = ? AND role = ? LIMIT ?
-given     tenant, limit, role
-sent      tenant, role, limit
-```
+## Why not MySQL
 
-The one thing a bare `?` cannot express is a value wanted twice. `$1` or `?1`
-used in two places is ordinary elsewhere; on MySQL it is `Error::Positional`.
+Its placeholder is a bare `?`, which takes a value per appearance and has no way
+to ask for an earlier one. A fragment spliced into the middle of a query would
+shift what every placeholder after it binds, so the values would have to be
+reordered to compensate -- and the SQL would look identical either way, so
+nothing would show that it had happened.
+
+That is supportable, and an earlier revision of this crate did support it. It
+cost a positional code path, a lifetime on `QueryWriter`, and a class of error
+the other drivers cannot raise. For a first version it is left out. Adding it
+back is a breaking change, which is the right way round.
 
 ## What it refuses
 
@@ -115,9 +113,7 @@ Every one of these is raised before the database is touched.
 | `Trailing`, `Fragment` | the fragment was not one complete expression |
 | `SetOperation` | the outermost level is a `UNION`, so there is no single `SELECT` to filter -- wrap it in `SELECT * FROM (...) AS t` |
 | `Grouped` | there is a `GROUP BY`, so a predicate could mean `WHERE` or `HAVING` and the fragment does not say which |
-| `Positional` | one value is wanted by two placeholders, which MySQL's bare `?` cannot express |
 | `Orphaned` | the rewrite removed a placeholder that still has a value bound to it |
-| `Unbound` | fewer values were bound than the statement has placeholders |
 | `NotQuery`, `Query` | the base SQL was not a single parseable query |
 
 ## Status

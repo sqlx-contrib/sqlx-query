@@ -9,7 +9,7 @@
 
 # Every driver. A test that names one is gated on its feature, so a narrower
 # set silently runs fewer tests rather than failing.
-FEATURES := postgres,sqlite,mysql
+FEATURES := postgres,sqlite
 
 .PHONY: test
 test:
@@ -20,7 +20,7 @@ test:
 # with one driver and no default features, and that configuration is easy to
 # break while the all-features build stays green -- so it is linted by default
 # rather than on request.
-DRIVERS := postgres sqlite mysql
+DRIVERS := postgres sqlite
 
 .PHONY: lint
 lint:

@@ -66,13 +66,10 @@
 //! kind of placeholder and the rewrite is arithmetic: a fragment's `$1` becomes
 //! `$3` because two values were claimed before it.
 //!
-//! Values are given in the order the placeholders claim them -- the base
-//! query's first, then each fragment's. What comes out depends only on what the
-//! driver can say.
-//!
-//! PostgreSQL's `$N` and SQLite's `?N` each name the value they want, so the
-//! numbering survives to the wire and a fragment spliced into the middle
-//! disturbs nothing:
+//! Values are bound in the order the placeholders claim them -- the base
+//! query's first, then each fragment's -- and sent in that same order, because
+//! every placeholder names the value it wants rather than merely occupying a
+//! position:
 //!
 //! ```text
 //! base      SELECT id FROM users WHERE tenant_id = ? LIMIT ?
@@ -81,28 +78,23 @@
 //! postgres  SELECT id FROM users WHERE tenant_id = $1 AND role = $3 LIMIT $2
 //! ```
 //!
-//! MySQL has no numbered form -- `?1` is a syntax error and `$1` is read as a
-//! column -- so its placeholders go out bare and take a value each, in the
-//! order they appear. The values are sent in that order rather than the order
-//! they were given:
+//! Naming is why both drivers here are supported and MySQL is not. Its `?`
+//! takes a value per appearance and cannot ask for an earlier one, so the same
+//! rewrite would have to reorder the values to match -- silently, since the SQL
+//! would look identical either way. Supporting it later is possible; doing it
+//! quietly is not.
 //!
-//! ```text
-//! mysql     SELECT id FROM users WHERE tenant_id = ? AND role = ? LIMIT ?
-//! given     tenant, limit, role
-//! sent      tenant, role, limit
-//! ```
-//!
-//! The one thing a bare `?` cannot express is a value wanted twice. `$1` or
-//! `?1` used in two places is ordinary elsewhere; on MySQL it is
-//! [`Error::Positional`].
+//! A base query uses its own driver's syntax, because it is SQL for that
+//! database and nothing else. PostgreSQL will not parse `?`, and SQLite takes
+//! `?`, `?N` or `$N`.
 //!
 //! [sqlx]: https://github.com/launchbadge/sqlx
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+#[cfg(not(any(feature = "postgres", feature = "sqlite")))]
 compile_error!(
-    "sqlx-query needs at least one driver feature: `postgres`, `mysql`, or `sqlite`. \
+    "sqlx-query needs at least one driver feature: `postgres` or `sqlite`. \
      Without one there is no syntax to parse with and no `Arguments` to bind against."
 );
 

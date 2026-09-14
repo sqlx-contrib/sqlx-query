@@ -9,7 +9,6 @@ use sqlparser::ast::{
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
-use sqlx::error::BoxDynError;
 use sqlx::query::{Query as SqlxQuery, QueryAs};
 use sqlx::{Arguments, AssertSqlSafe, Encode, FromRow, Type};
 
@@ -34,21 +33,14 @@ pub trait Syntax: sqlx::Database<Arguments: sqlx::IntoArguments<Self>> {
 
     /// Renders the placeholder that binds the `index`th value, counting from
     /// zero.
+    ///
+    /// It has to *name* that value rather than merely occupy a position, so
+    /// that a fragment spliced into the middle of a query does not disturb
+    /// what the placeholders after it bind. PostgreSQL's `$N` and SQLite's
+    /// `?N` both do. MySQL's bare `?` does not, which is why this crate does
+    /// not support it: the values would have to be reordered to match, and
+    /// nothing in the SQL would show that it had happened.
     fn placeholder(index: usize) -> String;
-
-    /// Whether placeholders are bound by their position in the text.
-    ///
-    /// MySQL's `?` is: the third one in the statement takes the third value,
-    /// so moving it moves what it binds, and it has no way to ask for a value
-    /// twice. PostgreSQL's `$N` and SQLite's `?N` are not: each names the
-    /// *N*th value wherever it appears, and may appear more than once or not
-    /// at all.
-    ///
-    /// This decides how the values are sent. A driver that numbers takes them
-    /// in the order they were given; one that does not takes them in the order
-    /// the finished statement renders, which is the only thing that says which
-    /// value each placeholder means.
-    fn positional() -> bool;
 }
 
 #[cfg(feature = "postgres")]
@@ -65,35 +57,6 @@ mod postgres {
 
         fn placeholder(index: usize) -> String {
             format!("${}", index + 1)
-        }
-
-        fn positional() -> bool {
-            false
-        }
-    }
-}
-
-#[cfg(feature = "mysql")]
-mod mysql {
-    use super::{Dialect, Syntax};
-    use sqlparser::dialect::MySqlDialect;
-
-    static DIALECT: MySqlDialect = MySqlDialect {};
-
-    impl Syntax for sqlx::MySql {
-        fn parser() -> &'static dyn Dialect {
-            &DIALECT
-        }
-
-        // Bare, because MySQL has no other form: `?1` is a syntax error and
-        // `$1` comes back as an unknown column. It is the reason this crate
-        // has a positional path at all.
-        fn placeholder(_index: usize) -> String {
-            "?".to_owned()
-        }
-
-        fn positional() -> bool {
-            true
         }
     }
 }
@@ -117,10 +80,6 @@ mod sqlite {
         // nothing has to be replayed in a different order.
         fn placeholder(index: usize) -> String {
             format!("?{}", index + 1)
-        }
-
-        fn positional() -> bool {
-            false
         }
     }
 }
@@ -169,16 +128,6 @@ impl Render for Vec<OrderByExpr> {
     }
 }
 
-/// One value, kept until the statement is rendered.
-///
-/// The values cannot go straight into `DB::Arguments`, because that is
-/// append-only and the order they are bound in is not known until the SQL has
-/// been laid out -- a fragment spliced into the middle of a `?` query shifts
-/// everything after it. Holding each one as a closure lets them be replayed in
-/// whatever order the finished statement asks for.
-type Bind<'a, DB> =
-    Box<dyn FnOnce(&mut <DB as sqlx::Database>::Arguments) -> Result<(), BoxDynError> + Send + 'a>;
-
 /// Adds filters and ordering to a query you already wrote.
 ///
 /// The query stays a query: there are no markers in it, nothing to escape, and
@@ -225,7 +174,7 @@ type Bind<'a, DB> =
 /// line. A fragment that does not parse is remembered and returned from
 /// [`sql`](Self::sql), [`build`](Self::build) or [`build_as`](Self::build_as)
 /// -- the first failure, every time it is asked.
-pub struct QueryWriter<'a, DB: Syntax> {
+pub struct QueryWriter<DB: Syntax> {
     statement: Statement,
     filters: Vec<Expr>,
     order_by: Vec<OrderByExpr>,
@@ -235,11 +184,11 @@ pub struct QueryWriter<'a, DB: Syntax> {
     // fragment's own numbering starts from.
     arity: usize,
 
-    binds: Vec<Bind<'a, DB>>,
+    arguments: DB::Arguments,
     failure: Option<Error>,
 }
 
-impl<'a, DB: Syntax> QueryWriter<'a, DB> {
+impl<DB: Syntax> QueryWriter<DB> {
     /// Parses the query to rewrite.
     ///
     /// # Errors
@@ -270,7 +219,7 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
             order_by: Vec::new(),
             limit: None,
             arity,
-            binds: Vec::new(),
+            arguments: DB::Arguments::default(),
             failure: None,
         })
     }
@@ -282,15 +231,20 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
     /// added. A fragment numbers its own placeholders from `$1`, and they are
     /// renumbered to follow whatever came before.
     ///
-    /// That is the order they are *given* in, not necessarily the order they
-    /// are sent in. A fragment spliced into the middle of the query renders
-    /// its placeholder there, and for a driver that binds `?` by position the
-    /// values are replayed to match. Nothing about that is visible here.
-    pub fn bind<T>(&mut self, value: T) -> &mut Self
+    /// The order they are given in is the order they are sent in: every
+    /// placeholder names the value it wants, so nothing has to be rearranged
+    /// to match where it ended up.
+    pub fn bind<'t, T>(&mut self, value: T) -> &mut Self
     where
-        T: Encode<'a, DB> + Type<DB> + Send + 'a,
+        T: Encode<'t, DB> + Type<DB>,
     {
-        self.binds.push(Box::new(move |args| args.add(value)));
+        if let Err(error) = self.arguments.add(value) {
+            // Raised when a value cannot be encoded at all -- out of range for
+            // the wire format, say. Nothing later can fix it, and it reads
+            // better next to the fragment errors than as a separate result on
+            // every `bind`.
+            self.fail(Error::Encode(error.to_string()));
+        }
         self
     }
 
@@ -342,7 +296,7 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
     /// refuses to guess at: [`Error::SetOperation`], [`Error::Grouped`],
     /// [`Error::Orphaned`].
     pub fn sql(&self) -> Result<String, Error> {
-        Ok(self.render()?.0)
+        self.render()
     }
 
     /// Renders the query and hands it to sqlx with its bound values.
@@ -355,8 +309,8 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
         // `AssertSqlSafe` is sqlx asking who vouches for a string built at
         // runtime. This crate does: every part of it was either the query the
         // caller wrote or a fragment that parsed, and each value is bound.
-        let (sql, arguments) = self.finish()?;
-        Ok(sqlx::query_with(AssertSqlSafe(sql), arguments))
+        let sql = self.render()?;
+        Ok(sqlx::query_with(AssertSqlSafe(sql), self.arguments))
     }
 
     /// As [`build`](Self::build), mapping rows to `O`.
@@ -368,13 +322,12 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
     where
         O: for<'r> FromRow<'r, DB::Row>,
     {
-        let (sql, arguments) = self.finish()?;
-        Ok(sqlx::query_as_with(AssertSqlSafe(sql), arguments))
+        let sql = self.render()?;
+        Ok(sqlx::query_as_with(AssertSqlSafe(sql), self.arguments))
     }
 
-    /// Assembles the statement and reports which value each placeholder takes,
-    /// in the order they render.
-    fn render(&self) -> Result<(String, Vec<usize>), Error> {
+    /// Assembles the statement.
+    fn render(&self) -> Result<String, Error> {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
         }
@@ -390,38 +343,6 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
         self.apply_limit(query);
 
         Self::write(&statement.to_string(), self.arity)
-    }
-
-    /// Renders the statement and replays the values into it.
-    ///
-    /// A driver that numbers its placeholders takes the values in the order
-    /// they were given, since each placeholder says which one it wants. One
-    /// that binds by position takes them in the order they render, which is
-    /// the only thing that says the same.
-    fn finish(mut self) -> Result<(String, DB::Arguments), Error> {
-        let (sql, order) = self.render()?;
-
-        let mut arguments = DB::Arguments::default();
-        let sequence: Vec<usize> = if DB::positional() {
-            order
-        } else {
-            (0..self.arity).collect()
-        };
-
-        // Draining by slot rather than in order, because the closures are
-        // `FnOnce` and the sequence is a permutation rather than a walk.
-        let mut binds: Vec<Option<Bind<'a, DB>>> = self.binds.drain(..).map(Some).collect();
-        for slot in sequence {
-            let Some(bind) = binds.get_mut(slot).and_then(Option::take) else {
-                return Err(Error::Unbound {
-                    wanted: self.arity,
-                    given: binds.len(),
-                });
-            };
-            bind(&mut arguments).map_err(|error| Error::Encode(error.to_string()))?;
-        }
-
-        Ok((sql, arguments))
     }
 
     /// Parses a fragment, marks its placeholders, and claims the slots they
@@ -611,26 +532,16 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
         named.max(counted)
     }
 
-    /// Writes the placeholders out in the driver's own form, and says which
-    /// value each one takes.
-    ///
-    /// The returned numbers are in render order. For a driver whose
-    /// placeholder carries no number that is the order it binds in, so this is
-    /// also what says how the values have to be sent.
-    fn write(sql: &str, arity: usize) -> Result<(String, Vec<usize>), Error> {
+    /// Writes the placeholders out in the driver's own form.
+    fn write(sql: &str, arity: usize) -> Result<String, Error> {
         let found = Self::scan(sql, NUMBERED);
-        let order: Vec<usize> = found.iter().map(|(_, slot)| *slot).collect();
 
-        let distinct: HashSet<usize> = order.iter().copied().collect();
-        if distinct.len() != arity {
+        // Every value that was claimed has to still have somewhere to go. One
+        // value in two places is fine and stays one value: both drivers here
+        // name what they bind.
+        let claimed: HashSet<usize> = found.iter().map(|(_, slot)| *slot).collect();
+        if claimed.len() != arity {
             return Err(Error::Orphaned);
-        }
-
-        // A placeholder with no number of its own takes a value per appearance
-        // and cannot ask for an earlier one, so one value in two places cannot
-        // be written at all.
-        if DB::positional() && order.len() != distinct.len() {
-            return Err(Error::Positional);
         }
 
         let mut out = String::with_capacity(sql.len());
@@ -643,7 +554,7 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
         }
         out.push_str(&sql[at..]);
 
-        Ok((out, order))
+        Ok(out)
     }
 
     /// Replaces every placeholder under `node`, handing each to `next`.
@@ -690,7 +601,7 @@ impl<'a, DB: Syntax> QueryWriter<'a, DB> {
 /// Written out rather than derived for two reasons: `DB::Arguments` is not
 /// `Debug` for every driver, and bound values are the part of a query most
 /// likely to be something that should not reach a log.
-impl<DB: Syntax> fmt::Debug for QueryWriter<'_, DB> {
+impl<DB: Syntax> fmt::Debug for QueryWriter<DB> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryWriter")
             .field("statement", &self.statement.to_string())
@@ -793,24 +704,6 @@ pub enum Error {
     /// then be handed one more value than the statement has places for. Take
     /// the `LIMIT` out of the base query, or keep it and do not call `limit`.
     Orphaned,
-
-    /// Fewer values were bound than the statement has placeholders.
-    Unbound {
-        /// How many the statement asks for.
-        wanted: usize,
-        /// How many were given.
-        given: usize,
-    },
-
-    /// One value is wanted by two placeholders, which `?` cannot express.
-    ///
-    /// `$1` twice is ordinary, and PostgreSQL binds one value to both. `?`
-    /// takes a value per placeholder and has no way to name an earlier one, so
-    /// there is nothing to render this as.
-    ///
-    /// Reordering, which this used to mean, is no longer an error: values are
-    /// replayed in the order the finished statement asks for.
-    Positional,
 }
 
 impl fmt::Display for Error {
@@ -839,15 +732,6 @@ impl fmt::Display for Error {
             Self::Grouped => f.write_str(
                 "the query has a GROUP BY, so a filter could mean WHERE or HAVING; \
                  put the predicate in the query itself",
-            ),
-            Self::Unbound { wanted, given } => write!(
-                f,
-                "the statement has {wanted} placeholders but {given} values were bound",
-            ),
-            Self::Positional => f.write_str(
-                "one value is wanted by two placeholders, and this driver's `?` takes a value \
-                 per placeholder with no way to name an earlier one; bind it twice, or use \
-                 PostgreSQL, whose `$1` can repeat",
             ),
         }
     }

@@ -34,15 +34,18 @@ default = ["postgres"]
 
 # Driver support. At least one is required: without a driver there is no
 # `Arguments` impl to bind against.
+#
+# Both of these name the value a placeholder binds -- `$N` and `?N` -- which is
+# what lets a fragment be spliced into the middle of a query without disturbing
+# what comes after it. MySQL has only a bare `?`, which does not, so it is left
+# out rather than made to work by reordering the values behind your back.
 postgres = ["sqlx/postgres"]
 sqlite = ["sqlx/sqlite"]
-mysql = ["sqlx/mysql"]
 
 [dev-dependencies]
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",
   "sqlite",
-  "mysql",
   "runtime-tokio",
   # Only the tests need `derive(FromRow)`. The crate itself is macro-free, and
   # takes sqlx with no default features so a consumer is not made to compile
