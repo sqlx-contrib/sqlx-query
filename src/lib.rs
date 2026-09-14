@@ -103,14 +103,13 @@
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 compile_error!(
     "sqlx-query needs at least one driver feature: `postgres`, `mysql`, or `sqlite`. \
-     Without one there is no dialect to parse with and no `Arguments` to bind against."
+     Without one there is no syntax to parse with and no `Arguments` to bind against."
 );
 
-mod dialect;
 mod error;
-mod placeholder;
+mod syntax;
 mod writer;
 
-pub use dialect::Dialect;
 pub use error::Error;
+pub use syntax::Syntax;
 pub use writer::QueryWriter;

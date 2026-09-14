@@ -42,11 +42,16 @@ fn filter_joins_an_existing_where() {
 #[test]
 fn filters_accumulate() {
     let sql = rewrite("SELECT id FROM users", |w| {
-        w.filter_by("role = 'admin'").filter_by("active");
+        w.filter_by("role = 'admin'")
+            .filter_by("active")
+            .filter_by("age > 18");
     })
     .unwrap();
 
-    assert_eq!(sql, "SELECT id FROM users WHERE role = 'admin' AND active");
+    assert_eq!(
+        sql,
+        "SELECT id FROM users WHERE role = 'admin' AND active AND age > 18"
+    );
 }
 
 /// The case a text splice gets wrong. `AND` binds tighter than `OR`, so
@@ -107,6 +112,46 @@ fn order_by_does_not_repeat_a_column_the_base_already_named() {
     .unwrap();
 
     assert_eq!(sql, "SELECT id FROM users ORDER BY id ASC");
+}
+
+/// Repeated calls append, in the order they were made.
+#[test]
+fn order_by_accumulates() {
+    let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
+        w.order_by("name desc").order_by("created_at asc");
+    })
+    .unwrap();
+
+    assert_eq!(
+        sql,
+        "SELECT id FROM users ORDER BY name DESC, created_at ASC, id"
+    );
+}
+
+/// First mention of a column wins, and settles both its position and its
+/// direction -- whether the second mention came from another call or from the
+/// base query. Ordering by a column twice is not an error; the second one just
+/// has nothing left to say.
+#[test]
+fn order_by_does_not_repeat_a_column_an_earlier_call_named() {
+    let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
+        w.order_by("name asc").order_by("name desc");
+    })
+    .unwrap();
+
+    assert_eq!(sql, "SELECT id FROM users ORDER BY name ASC, id");
+}
+
+/// `limit` replaces rather than accumulating: there is only one `LIMIT`, and
+/// two calls cannot both be honoured.
+#[test]
+fn limit_keeps_the_last_call() {
+    let sql = rewrite("SELECT id FROM users", |w| {
+        w.limit(10).limit(20);
+    })
+    .unwrap();
+
+    assert_eq!(sql, "SELECT id FROM users LIMIT 20");
 }
 
 #[test]

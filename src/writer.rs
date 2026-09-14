@@ -1,8 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::ops::{ControlFlow, Range};
 
 use sqlparser::ast::{
     BinaryOperator, Expr, GroupByExpr, LimitClause, OrderBy, OrderByExpr, OrderByKind, Query,
-    SetExpr, Statement, Value,
+    SetExpr, Statement, Value, VisitMut, visit_expressions_mut,
 };
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -10,8 +12,52 @@ use sqlx::error::BoxDynError;
 use sqlx::query::{Query as SqlxQuery, QueryAs};
 use sqlx::{Arguments, AssertSqlSafe, Encode, FromRow, Type};
 
-use crate::dialect::Dialect;
-use crate::{Error, placeholder};
+use crate::Error;
+use crate::syntax::Syntax;
+
+/// A placeholder that has been numbered but not yet written in the driver's
+/// own form.
+///
+/// Spelled distinctively rather than as `$4`, because the last pass finds it in
+/// rendered SQL and a string literal is allowed to contain `$4`. The numbering
+/// is the idea; this is only how it is written down in between.
+const NUMBERED: &str = "$__sqlxq_";
+
+/// The same, before the numbers are known: one per placeholder node, so they
+/// can be told apart while their order is being worked out.
+const PENDING: &str = "$__sqlxqt_";
+
+const SUFFIX: &str = "__";
+
+/// Renders a node so its placeholders can be read in the order they print.
+///
+/// Display order is the order the database sees, and the only authority on it:
+/// sqlparser's `Select` prints `top` before `distinct` or after it depending on
+/// a runtime flag, so no traversal of the tree can stand in for this.
+trait Render {
+    fn render(&self) -> String;
+}
+
+impl Render for Statement {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for Expr {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for Vec<OrderByExpr> {
+    fn render(&self) -> String {
+        self.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
 
 /// One value, kept until the statement is rendered.
 ///
@@ -53,7 +99,7 @@ type Bind<'a, DB> =
 /// # Fragments are checked, not trusted
 ///
 /// A fragment arrives as text, usually from something that compiled it out of
-/// a request. It is parsed with the same dialect as the query, and it has to
+/// a request. It is parsed with the same syntax as the query, and it has to
 /// come out as exactly one expression: `role = 'admin'` does, and
 /// `role = 'admin'; DROP TABLE users` does not, because the statement after
 /// the expression is left over. That leftover is [`Error::Trailing`], and it
@@ -69,7 +115,7 @@ type Bind<'a, DB> =
 /// line. A fragment that does not parse is remembered and returned from
 /// [`sql`](Self::sql), [`build`](Self::build) or [`build_as`](Self::build_as)
 /// -- the first failure, every time it is asked.
-pub struct QueryWriter<'a, DB: Dialect> {
+pub struct QueryWriter<'a, DB: Syntax> {
     statement: Statement,
     filters: Vec<Expr>,
     order_by: Vec<OrderByExpr>,
@@ -83,12 +129,12 @@ pub struct QueryWriter<'a, DB: Dialect> {
     failure: Option<Error>,
 }
 
-impl<'a, DB: Dialect> QueryWriter<'a, DB> {
+impl<'a, DB: Syntax> QueryWriter<'a, DB> {
     /// Parses the query to rewrite.
     ///
     /// # Errors
     ///
-    /// [`Error::Query`] if the SQL does not parse in this driver's dialect,
+    /// [`Error::Query`] if the SQL does not parse in this driver's syntax,
     /// and [`Error::NotQuery`] if it parses as something other than a query --
     /// an `INSERT` has no `WHERE` for a filter to join.
     pub fn new(sql: &str) -> Result<Self, Error> {
@@ -106,7 +152,7 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
 
         // The base query's placeholders are claimed first, so they are
         // numbered from zero and every fragment follows them.
-        let arity = placeholder::number(&mut statement, 0);
+        let arity = Self::number(&mut statement, 0);
 
         Ok(Self {
             statement,
@@ -233,7 +279,7 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
         self.apply_order_by(query);
         self.apply_limit(query);
 
-        placeholder::write::<DB>(&statement.to_string(), self.arity)
+        Self::write(&statement.to_string(), self.arity)
     }
 
     /// Renders the statement and replays the values into it.
@@ -276,8 +322,8 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
     /// fragment, so the slots are offset by everything claimed before it.
     fn parse<T, F>(&mut self, fragment: &str, parse: F) -> Result<T, Error>
     where
-        T: placeholder::Render + sqlparser::ast::VisitMut,
-        // `'static` rather than elided: the dialect is a `&'static dyn`, so
+        T: Render + VisitMut,
+        // `'static` rather than elided: the parser's grammar is a `&'static dyn`, so
         // the parser built from it is too, and leaving the lifetime open
         // would ask `parse_expr` to work for every parser rather than this one.
         F: FnOnce(&mut Parser<'static>) -> Result<T, sqlparser::parser::ParserError>,
@@ -302,7 +348,7 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
             });
         }
 
-        self.arity += placeholder::number(&mut parsed, self.arity);
+        self.arity += Self::number(&mut parsed, self.arity);
 
         Ok(parsed)
     }
@@ -356,19 +402,32 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
             return;
         }
 
-        let mut exprs = self.order_by.clone();
+        let base = match query.order_by.take() {
+            Some(OrderBy {
+                kind: OrderByKind::Expressions(base),
+                ..
+            }) => base,
+            _ => Vec::new(),
+        };
 
-        if let Some(existing) = query.order_by.take()
-            && let OrderByKind::Expressions(base) = existing.kind
-        {
-            // Compared as rendered text: `name` and `"name"` are different
-            // orderings to the database too, so matching them here would be
-            // the wrong kind of clever.
-            let kept: Vec<String> = exprs.iter().map(|e| e.expr.to_string()).collect();
-            exprs.extend(
-                base.into_iter()
-                    .filter(|candidate| !kept.contains(&candidate.expr.to_string())),
-            );
+        // First mention of a column wins, and decides both where it sits and
+        // which way it sorts. Fragments come before the base query's own
+        // ordering, and an earlier fragment before a later one -- so ordering
+        // by a column twice is not an error, it is just the second one having
+        // nothing left to say.
+        //
+        // Compared as rendered text: `name` and `"name"` are different
+        // orderings to the database too, so matching them here would be the
+        // wrong kind of clever.
+        let mut seen: Vec<String> = Vec::new();
+        let mut exprs: Vec<OrderByExpr> = Vec::new();
+
+        for candidate in self.order_by.iter().cloned().chain(base) {
+            let column = candidate.expr.to_string();
+            if !seen.contains(&column) {
+                seen.push(column);
+                exprs.push(candidate);
+            }
         }
 
         query.order_by = Some(OrderBy {
@@ -388,6 +447,132 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
             limit_by: Vec::new(),
         });
     }
+
+    /// Numbers every placeholder under `node`, continuing from `base`, and
+    /// returns how many values it claims.
+    ///
+    /// A placeholder that arrived numbered is taken at its word, so `$2` asks
+    /// for the second value of this fragment and `$1` twice asks for the first
+    /// one twice. A bare `?` asks for the next one, counted in the order it
+    /// renders.
+    fn number<V: Render + VisitMut>(node: &mut V, base: usize) -> usize {
+        // Tell the nodes apart first. Which value each one wants depends on
+        // where it renders, and that is not known until it has been rendered.
+        let mut origins = HashMap::new();
+        let mut id = 0;
+        Self::substitute(node, |text| {
+            origins.insert(id, text.to_owned());
+            id += 1;
+            format!("{PENDING}{}{SUFFIX}", id - 1)
+        });
+
+        let mut slots: HashMap<usize, usize> = HashMap::new();
+        let mut counted = 0;
+        let mut named = 0;
+
+        for (_, id) in Self::scan(&node.render(), PENDING) {
+            // `$2`, and SQLite's `?2`, both say which value they want. A bare
+            // `?` says only that it wants one.
+            let asked = origins
+                .get(&id)
+                .and_then(|origin| origin.strip_prefix(['$', '?']))
+                .and_then(|digits| digits.parse::<usize>().ok());
+
+            let slot = if let Some(n) = asked {
+                named = named.max(n);
+                n - 1
+            } else {
+                counted += 1;
+                counted - 1
+            };
+
+            slots.insert(id, slot);
+        }
+
+        Self::substitute(node, |text| {
+            let id = text
+                .strip_prefix(PENDING)
+                .and_then(|rest| rest.strip_suffix(SUFFIX))
+                .and_then(|digits| digits.parse::<usize>().ok())
+                .expect("every placeholder was just given a pending number");
+            format!("{NUMBERED}{}{SUFFIX}", base + slots[&id])
+        });
+
+        named.max(counted)
+    }
+
+    /// Writes the placeholders out in the driver's own form, and says which
+    /// value each one takes.
+    ///
+    /// The returned numbers are in render order. For a driver whose
+    /// placeholder carries no number that is the order it binds in, so this is
+    /// also what says how the values have to be sent.
+    fn write(sql: &str, arity: usize) -> Result<(String, Vec<usize>), Error> {
+        let found = Self::scan(sql, NUMBERED);
+        let order: Vec<usize> = found.iter().map(|(_, slot)| *slot).collect();
+
+        let distinct: HashSet<usize> = order.iter().copied().collect();
+        if distinct.len() != arity {
+            return Err(Error::Orphaned);
+        }
+
+        // A placeholder with no number of its own takes a value per appearance
+        // and cannot ask for an earlier one, so one value in two places cannot
+        // be written at all.
+        if DB::positional() && order.len() != distinct.len() {
+            return Err(Error::Positional);
+        }
+
+        let mut out = String::with_capacity(sql.len());
+        let mut at = 0;
+
+        for (span, slot) in found {
+            out.push_str(&sql[at..span.start]);
+            out.push_str(&DB::placeholder(slot));
+            at = span.end;
+        }
+        out.push_str(&sql[at..]);
+
+        Ok((out, order))
+    }
+
+    /// Replaces every placeholder under `node`, handing each to `next`.
+    fn substitute<V: VisitMut>(node: &mut V, mut next: impl FnMut(&str) -> String) {
+        let _: ControlFlow<()> = visit_expressions_mut(node, |expr| {
+            if let Expr::Value(value) = expr
+                && let Value::Placeholder(text) = &mut value.value
+            {
+                *text = next(text);
+            }
+            ControlFlow::Continue(())
+        });
+    }
+
+    /// Finds every placeholder written with `prefix`, in the order it renders.
+    fn scan(sql: &str, prefix: &str) -> Vec<(Range<usize>, usize)> {
+        let mut found = Vec::new();
+        let mut at = 0;
+
+        while let Some(offset) = sql[at..].find(prefix) {
+            let start = at + offset;
+            let digits = start + prefix.len();
+
+            let Some(end) = sql[digits..].find(SUFFIX) else {
+                at = digits;
+                continue;
+            };
+            let Ok(n) = sql[digits..digits + end].parse::<usize>() else {
+                at = digits;
+                continue;
+            };
+
+            let stop = digits + end + SUFFIX.len();
+            found.push((start..stop, n));
+            at = stop;
+        }
+
+        found
+    }
 }
 
 /// Shows the query being assembled, but never the values bound to it.
@@ -395,7 +580,7 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
 /// Written out rather than derived for two reasons: `DB::Arguments` is not
 /// `Debug` for every driver, and bound values are the part of a query most
 /// likely to be something that should not reach a log.
-impl<DB: Dialect> fmt::Debug for QueryWriter<'_, DB> {
+impl<DB: Syntax> fmt::Debug for QueryWriter<'_, DB> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryWriter")
             .field("statement", &self.statement.to_string())

@@ -14,9 +14,9 @@
 
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 
-use sqlx_query::{Dialect, Error, QueryWriter};
+use sqlx_query::{Error, QueryWriter, Syntax};
 
-fn rewrite<DB: Dialect>(
+fn rewrite<DB: Syntax>(
     sql: &str,
     apply: impl FnOnce(&mut QueryWriter<'_, DB>),
 ) -> Result<String, Error> {

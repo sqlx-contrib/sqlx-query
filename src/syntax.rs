@@ -1,4 +1,4 @@
-use sqlparser::dialect::Dialect as SqlDialect;
+use sqlparser::dialect::Dialect;
 
 /// The two things a rewrite needs from a driver: how to read its SQL, and how
 /// to write a placeholder back out.
@@ -7,15 +7,17 @@ use sqlparser::dialect::Dialect as SqlDialect;
 /// so `QueryWriter<Postgres>` names the same `Postgres` the rest of your
 /// queries do and no adapter type stands between them.
 ///
-/// It is sealed. Implementing it means claiming that sqlparser's dialect
-/// matches what the driver will actually run, and that claim is only checkable
-/// here.
-// The `Arguments` bound is what lets `build` hand the collected values to
-// sqlx. Every driver satisfies it -- sqlx's own macro writes the impl -- but
-// nothing in `Database` says so, so it has to be said here.
-pub trait Dialect: sqlx::Database<Arguments: sqlx::IntoArguments<Self>> + sealed::Sealed {
+/// # Implementing it for a driver this crate does not ship
+///
+/// Nothing stops you. What you are claiming by doing so is that
+/// [`parser`](Self::parser) accepts the same grammar the driver will actually
+/// run, and that [`placeholder`](Self::placeholder) and
+/// [`positional`](Self::positional) agree with how it binds. Get those wrong
+/// and the rewrite produces SQL that parses here and means something else
+/// there, which is not a failure any test in this crate can catch for you.
+pub trait Syntax: sqlx::Database<Arguments: sqlx::IntoArguments<Self>> {
     /// The grammar the base query and its fragments are parsed with.
-    fn parser() -> &'static dyn SqlDialect;
+    fn parser() -> &'static dyn Dialect;
 
     /// Renders the placeholder that binds the `index`th value, counting from
     /// zero.
@@ -36,21 +38,15 @@ pub trait Dialect: sqlx::Database<Arguments: sqlx::IntoArguments<Self>> + sealed
     fn positional() -> bool;
 }
 
-mod sealed {
-    pub trait Sealed {}
-}
-
 #[cfg(feature = "postgres")]
 mod postgres {
-    use super::{SqlDialect, sealed};
+    use super::{Dialect, Syntax};
     use sqlparser::dialect::PostgreSqlDialect;
 
     static DIALECT: PostgreSqlDialect = PostgreSqlDialect {};
 
-    impl sealed::Sealed for sqlx::Postgres {}
-
-    impl super::Dialect for sqlx::Postgres {
-        fn parser() -> &'static dyn SqlDialect {
+    impl Syntax for sqlx::Postgres {
+        fn parser() -> &'static dyn Dialect {
             &DIALECT
         }
 
@@ -66,18 +62,19 @@ mod postgres {
 
 #[cfg(feature = "mysql")]
 mod mysql {
-    use super::{SqlDialect, sealed};
+    use super::{Dialect, Syntax};
     use sqlparser::dialect::MySqlDialect;
 
     static DIALECT: MySqlDialect = MySqlDialect {};
 
-    impl sealed::Sealed for sqlx::MySql {}
-
-    impl super::Dialect for sqlx::MySql {
-        fn parser() -> &'static dyn SqlDialect {
+    impl Syntax for sqlx::MySql {
+        fn parser() -> &'static dyn Dialect {
             &DIALECT
         }
 
+        // Bare, because MySQL has no other form: `?1` is a syntax error and
+        // `$1` comes back as an unknown column. It is the reason this crate
+        // has a positional path at all.
         fn placeholder(_index: usize) -> String {
             "?".to_owned()
         }
@@ -90,15 +87,13 @@ mod mysql {
 
 #[cfg(feature = "sqlite")]
 mod sqlite {
-    use super::{SqlDialect, sealed};
+    use super::{Dialect, Syntax};
     use sqlparser::dialect::SQLiteDialect;
 
     static DIALECT: SQLiteDialect = SQLiteDialect {};
 
-    impl sealed::Sealed for sqlx::Sqlite {}
-
-    impl super::Dialect for sqlx::Sqlite {
-        fn parser() -> &'static dyn SqlDialect {
+    impl Syntax for sqlx::Sqlite {
+        fn parser() -> &'static dyn Dialect {
             &DIALECT
         }
 
