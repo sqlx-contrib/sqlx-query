@@ -17,7 +17,7 @@ let mut writer = QueryWriter::<Postgres>::new(
 writer
     .bind(7_i64)
     .filter_by("read_count > 100")
-    .order_by("title desc")
+    .sort_by("title desc")
     .limit(50);
 
 assert_eq!(
@@ -29,6 +29,51 @@ assert_eq!(
 
 let rows = writer.build_as::<Volume>()?.fetch_all(&pool).await?;
 ```
+
+## Two layers
+
+`QueryWriter` takes SQL fragments, which you wrote and therefore vouch for.
+`QueryBuilder` takes what a client asked for, already parsed and checked
+against a map of the fields you chose to offer.
+
+```rust
+use sqlx::Postgres;
+use sqlx_query::{QueryBuilder, Sort};
+
+// What a request may order by, and the column each name means. Anything not
+// here is refused rather than passed through.
+let columns = HashMap::from([("title", "title"), ("readCount", "read_count"), ("id", "id")]);
+
+let sort = Sort::parse(&request.order_by)?   // AIP-132: "readCount desc"
+    .asc("id")                               // a tiebreaker, so the order is total
+    .resolve(&columns)?;                     // fields become columns, or are refused
+
+let mut query = QueryBuilder::<Postgres>::new(
+    "SELECT id, title, read_count FROM volumes WHERE tenant_id = $1",
+)?;
+query.bind(tenant).sort_by(&sort).limit(50);
+
+let rows = query.build_as::<Volume>()?.fetch_all(&pool).await?;
+```
+
+```sql
+SELECT id, title, read_count FROM volumes WHERE tenant_id = $1
+ORDER BY "read_count" DESC, "id" ASC
+LIMIT 50
+```
+
+The two are separate types because an AIP `order_by` value and a SQL
+`ORDER BY` fragment look identical -- `"title desc"` is both -- so one type
+offering both would let a client's string reach the unchecked path with nothing
+at the call site looking wrong.
+
+| | takes | checked against the map |
+| --- | --- | --- |
+| `QueryWriter` | `filter_by("role = 'admin'")` | no -- you wrote it |
+| `QueryBuilder` | `sort_by(&sort)` | yes |
+
+A `Sort` that was never resolved is refused rather than written into the query,
+so forgetting the step cannot quietly skip the allowlist.
 
 ## Why a tree and not a template
 
@@ -115,13 +160,16 @@ Every one of these is raised before the database is touched.
 | `Grouped` | there is a `GROUP BY`, so a predicate could mean `WHERE` or `HAVING` and the fragment does not say which |
 | `Arity` | the statement has a different number of placeholders than values bound |
 | `Orphaned` | a value has no placeholder to bind to -- the base query skips a number, or `limit()` replaced a `LIMIT` that held one |
+| `Sort` | an `order_by` value did not parse |
+| `Field` | a request named a field the column map does not have |
+| `Unresolved` | a `Sort` reached the query still holding field names |
 | `NotQuery`, `Query` | the base SQL was not a single parseable query |
 
 ## Status
 
-A spike. The API is `QueryWriter` and nothing else yet; the AIP-shaped layer
-above it -- CEL filters, AIP-132 ordering, keyset cursors -- is not here, and
-neither is targeting a filter at a named CTE rather than the outermost
-`SELECT`.
+A spike. `QueryWriter` and `QueryBuilder` are here, with AIP-132 ordering.
+Still to come: keyset cursors (`seek_by`) and CEL filters (`filter_by`) on the
+builder. Filtering into a named CTE rather than the outermost `SELECT` is not
+planned.
 
 [sqlx]: https://github.com/launchbadge/sqlx

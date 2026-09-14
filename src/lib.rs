@@ -19,7 +19,7 @@
 //! writer
 //!     .bind(7_i64)
 //!     .filter_by("read_count > 100")
-//!     .order_by("title desc")
+//!     .sort_by("title desc")
 //!     .limit(50);
 //!
 //! assert_eq!(
@@ -33,6 +33,44 @@
 //! # }
 //! # Ok::<_, sqlx_query::Error>(())
 //! ```
+//!
+//! # Two layers
+//!
+//! [`QueryWriter`] takes SQL fragments, which you wrote and therefore vouch
+//! for. [`QueryBuilder`] takes what a client asked for -- a [`Sort`], and in
+//! time a filter and a cursor -- already parsed and checked against a map of
+//! the fields you chose to offer.
+//!
+//! ```
+//! # #[cfg(feature = "postgres")] {
+//! # use std::collections::HashMap;
+//! use sqlx::Postgres;
+//! use sqlx_query::{QueryBuilder, Sort};
+//!
+//! // What a request may order by, and the column each name means. Anything
+//! // not here is refused rather than passed through.
+//! let columns = HashMap::from([("title", "title"), ("id", "id")]);
+//!
+//! let sort = Sort::parse("title desc")?.asc("id").resolve(&columns)?;
+//!
+//! let mut query = QueryBuilder::<Postgres>::new(
+//!     "SELECT id, title FROM volumes WHERE tenant_id = $1",
+//! )?;
+//! query.bind(7_i64).sort_by(&sort).limit(50);
+//!
+//! assert_eq!(
+//!     query.sql()?,
+//!     "SELECT id, title FROM volumes WHERE tenant_id = $1 \
+//!      ORDER BY \"title\" DESC, \"id\" ASC LIMIT 50",
+//! );
+//! # }
+//! # Ok::<_, sqlx_query::Error>(())
+//! ```
+//!
+//! They are separate types because an AIP `order_by` value and a SQL
+//! `ORDER BY` fragment look identical -- `"title desc"` is both -- so one type
+//! offering both would let a client's string reach the unchecked path with
+//! nothing at the call site looking wrong.
 //!
 //! # Why a tree and not a template
 //!
@@ -100,4 +138,4 @@ compile_error!(
 
 mod writer;
 
-pub use writer::{Error, QueryWriter, Syntax};
+pub use writer::{Error, QueryBuilder, QueryWriter, Sort, SortDirection, SortKey, Syntax};

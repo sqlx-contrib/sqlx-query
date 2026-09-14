@@ -3,8 +3,8 @@ use std::fmt;
 use std::ops::{ControlFlow, Range};
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, GroupByExpr, LimitClause, OrderBy, OrderByExpr, OrderByKind, Query,
-    SetExpr, Statement, Value, VisitMut, visit_expressions_mut,
+    BinaryOperator, Expr, GroupByExpr, Ident, LimitClause, OrderBy, OrderByExpr, OrderByKind,
+    OrderByOptions, OrderBySort, Query, SetExpr, Statement, Value, VisitMut, visit_expressions_mut,
 };
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
@@ -144,7 +144,7 @@ impl Render for Vec<OrderByExpr> {
 ///     "SELECT id, name, role FROM users WHERE tenant_id = $1 ORDER BY id",
 /// )?;
 ///
-/// writer.bind(7_i64).filter_by("role = 'admin'").order_by("name asc");
+/// writer.bind(7_i64).filter_by("role = 'admin'").sort_by("name asc");
 ///
 /// assert_eq!(
 ///     writer.sql()?,
@@ -268,7 +268,8 @@ impl<DB: Syntax> QueryWriter<DB> {
     /// make the order total, which it still does from second place. A column
     /// named by both is only ordered by once, at the position the fragment
     /// gave it.
-    pub fn order_by(&mut self, fragment: &str) -> &mut Self {
+    #[doc(alias = "order_by")]
+    pub fn sort_by(&mut self, fragment: &str) -> &mut Self {
         match self.parse(fragment, |parser| {
             parser.parse_comma_separated(Parser::parse_order_by_expr)
         }) {
@@ -468,14 +469,11 @@ impl<DB: Syntax> QueryWriter<DB> {
         // by a column twice is not an error, it is just the second one having
         // nothing left to say.
         //
-        // Compared as rendered text: `name` and `"name"` are different
-        // orderings to the database too, so matching them here would be the
-        // wrong kind of clever.
         let mut seen: Vec<String> = Vec::new();
         let mut exprs: Vec<OrderByExpr> = Vec::new();
 
         for candidate in self.order_by.iter().cloned().chain(base) {
-            let column = candidate.expr.to_string();
+            let column = ordering_key(&candidate.expr);
             if !seen.contains(&column) {
                 seen.push(column);
                 exprs.push(candidate);
@@ -655,6 +653,398 @@ fn parenthesize(expr: Expr) -> Expr {
     expr
 }
 
+/// A column's identity, for the purpose of ordering by it only once.
+///
+/// Quoting is ignored: a [`Sort`] writes `"id"` and a hand-written query
+/// writes `id`, and they are the same column to the database. Anything that is
+/// not a plain column -- `lower(name)`, say -- falls back to its text, which is
+/// as close to an identity as an expression gets.
+fn ordering_key(expr: &Expr) -> String {
+    match expr {
+        Expr::Identifier(ident) => ident.value.clone(),
+        Expr::CompoundIdentifier(parts) => parts
+            .iter()
+            .map(|part| part.value.as_str())
+            .collect::<Vec<_>>()
+            .join("."),
+        other => other.to_string(),
+    }
+}
+
+/// Which way a column sorts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    /// `ASC`, and what a request means by naming a field with no direction.
+    Asc,
+    /// `DESC`.
+    Desc,
+}
+
+/// One column of an ordering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortKey {
+    /// The field a request named, or -- once [`Sort::resolve`] has run -- the
+    /// column it stands for.
+    pub name: String,
+    /// Which way it sorts.
+    pub direction: SortDirection,
+}
+
+/// An ordering, as a request asked for it.
+///
+/// Parsed from [AIP-132]'s `order_by`: fields separated by commas, each
+/// optionally followed by `asc` or `desc`.
+///
+/// ```
+/// # use std::collections::HashMap;
+/// # use sqlx_query::Sort;
+/// let columns = HashMap::from([("readCount", "read_count"), ("id", "id")]);
+///
+/// let sort = Sort::parse("readCount desc")?.asc("id").resolve(&columns)?;
+/// # Ok::<_, sqlx_query::Error>(())
+/// ```
+///
+/// # Parsed, then resolved
+///
+/// [`parse`](Self::parse) reads the syntax and nothing else, so it can run
+/// wherever a request is validated, knowing about no database at all. What it
+/// holds afterwards is the field names the client used.
+///
+/// [`resolve`](Self::resolve) turns those into columns and refuses any field
+/// the map does not name. That refusal is the point: the map is an allowlist,
+/// so a request can only order by what you chose to offer. A `Sort` that was
+/// never resolved is refused by [`QueryBuilder::sort_by`] rather than written
+/// into a query, so forgetting the step cannot quietly skip the allowlist.
+///
+/// [AIP-132]: https://google.aip.dev/132
+#[derive(Debug, Clone, Default)]
+pub struct Sort {
+    keys: Vec<SortKey>,
+    resolved: bool,
+}
+
+impl Sort {
+    /// Reads an `order_by` value.
+    ///
+    /// Blank means no ordering was asked for rather than being an error --
+    /// that is what an absent query parameter looks like by the time it
+    /// arrives here.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sort`] if a term is empty, or carries anything other than a
+    /// field and an optional `asc` or `desc`.
+    pub fn parse(order_by: &str) -> Result<Self, Error> {
+        let mut keys = Vec::new();
+
+        if !order_by.trim().is_empty() {
+            for term in order_by.split(',') {
+                keys.push(SortKey::parse(term, order_by)?);
+            }
+        }
+
+        Ok(Self {
+            keys,
+            resolved: false,
+        })
+    }
+
+    /// An ordering this program decided rather than parsed.
+    ///
+    /// The names are columns, not fields, so this is already resolved -- there
+    /// is no client input here for an allowlist to check.
+    #[must_use]
+    pub fn new(keys: Vec<SortKey>) -> Self {
+        Self {
+            keys,
+            resolved: true,
+        }
+    }
+
+    /// Adds a field to order by, ascending.
+    ///
+    /// Appended, so it acts as a tiebreaker behind whatever the request asked
+    /// for. A field the request already named stays where the request put it,
+    /// in the direction the request chose: this can follow a client, never
+    /// overrule one.
+    ///
+    /// Keyset pagination is only correct over a total ordering, which in
+    /// practice means ending one with a unique column.
+    #[must_use]
+    pub fn asc(self, field: &str) -> Self {
+        self.push(field, SortDirection::Asc)
+    }
+
+    /// Adds a field to order by, descending. As [`asc`](Self::asc) otherwise.
+    #[must_use]
+    pub fn desc(self, field: &str) -> Self {
+        self.push(field, SortDirection::Desc)
+    }
+
+    /// Renames every field to the column it stands for.
+    ///
+    /// The map is the allowlist: a field it does not name is refused, so a
+    /// request cannot order by a column you did not offer. A column may be
+    /// qualified -- `v.created_at` is written as `"v"."created_at"`.
+    ///
+    /// Calling this twice does nothing the second time; the names are already
+    /// columns by then.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Field`], naming the first field the map does not have.
+    pub fn resolve(mut self, columns: &HashMap<&str, &str>) -> Result<Self, Error> {
+        if self.resolved {
+            return Ok(self);
+        }
+
+        for key in &mut self.keys {
+            let column = columns
+                .get(key.name.as_str())
+                .ok_or_else(|| Error::Field(key.name.clone()))?;
+            key.name = (*column).to_owned();
+        }
+
+        self.resolved = true;
+        Ok(self)
+    }
+
+    /// The columns being ordered by, in order.
+    #[must_use]
+    pub fn keys(&self) -> &[SortKey] {
+        &self.keys
+    }
+
+    /// Whether nothing is being ordered by.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    fn push(mut self, field: &str, direction: SortDirection) -> Self {
+        if !self.keys.iter().any(|key| key.name == field) {
+            self.keys.push(SortKey {
+                name: field.to_owned(),
+                direction,
+            });
+        }
+        self
+    }
+
+    /// The ordering as syntax, ready to graft onto a query.
+    fn order_by(&self) -> Vec<OrderByExpr> {
+        self.keys
+            .iter()
+            .map(|key| OrderByExpr {
+                expr: quoted(&key.name),
+                // Written out even for ascending, which is already the
+                // default: the request said which way round it wanted, and a
+                // query that says so too is easier to read back.
+                options: OrderByOptions {
+                    sort: Some(match key.direction {
+                        SortDirection::Asc => OrderBySort::Asc,
+                        SortDirection::Desc => OrderBySort::Desc,
+                    }),
+                    nulls_first: None,
+                },
+                with_fill: None,
+            })
+            .collect()
+    }
+}
+
+impl SortKey {
+    /// `order_by` is carried along only so an error can quote what was
+    /// actually sent, rather than one term out of context.
+    fn parse(term: &str, order_by: &str) -> Result<Self, Error> {
+        let mut words = term.split_whitespace();
+
+        let Some(name) = words.next() else {
+            return Err(Error::Sort(format!(
+                "`{order_by}` has an empty term; each one is a field, optionally \
+                 followed by `asc` or `desc`"
+            )));
+        };
+
+        let direction = match words.next() {
+            None => SortDirection::Asc,
+            Some(word) if word.eq_ignore_ascii_case("asc") => SortDirection::Asc,
+            Some(word) if word.eq_ignore_ascii_case("desc") => SortDirection::Desc,
+            Some(word) => {
+                return Err(Error::Sort(format!(
+                    "`{order_by}` says `{word}` after `{name}`, which is neither `asc` nor `desc`"
+                )));
+            }
+        };
+
+        if let Some(extra) = words.next() {
+            return Err(Error::Sort(format!(
+                "`{order_by}` has `{extra}` after `{name}`, which is one word too many"
+            )));
+        }
+
+        Ok(Self {
+            name: name.to_owned(),
+            direction,
+        })
+    }
+}
+
+/// Writes a column name as syntax, quoted so a column called `order` is still
+/// a column.
+///
+/// A dotted name is a qualified one: `v.created_at` is `"v"."created_at"`,
+/// rather than one column with a dot in its name.
+fn quoted(name: &str) -> Expr {
+    let mut parts: Vec<Ident> = name
+        .split('.')
+        .map(|part| Ident::with_quote('"', part))
+        .collect();
+
+    if parts.len() == 1 {
+        Expr::Identifier(parts.remove(0))
+    } else {
+        Expr::CompoundIdentifier(parts)
+    }
+}
+
+/// Adds what a request asked for to a query you already wrote.
+///
+/// The same rewrite [`QueryWriter`] performs, but taking what a client sent --
+/// already parsed and checked against an allowlist -- instead of SQL you wrote
+/// yourself. That is the whole difference between the two:
+///
+/// | | takes |
+/// | --- | --- |
+/// | [`QueryWriter`] | SQL fragments, which you vouch for |
+/// | `QueryBuilder` | [`Sort`] and the like, which went through an allowlist |
+///
+/// Keeping them apart matters because an AIP `order_by` and a SQL `ORDER BY`
+/// fragment look identical -- `"title desc"` is both -- so a single type
+/// offering both would let a client's string reach the unchecked path without
+/// anything looking wrong.
+///
+/// ```
+/// # #[cfg(feature = "postgres")] {
+/// # use std::collections::HashMap;
+/// use sqlx::Postgres;
+/// use sqlx_query::{QueryBuilder, Sort};
+///
+/// let columns = HashMap::from([("title", "title"), ("id", "id")]);
+/// let sort = Sort::parse("title desc")?.asc("id").resolve(&columns)?;
+///
+/// let mut query = QueryBuilder::<Postgres>::new(
+///     "SELECT id, title FROM volumes WHERE tenant_id = $1",
+/// )?;
+/// query.bind(7_i64).sort_by(&sort).limit(50);
+///
+/// assert_eq!(
+///     query.sql()?,
+///     "SELECT id, title FROM volumes WHERE tenant_id = $1 \
+///      ORDER BY \"title\" DESC, \"id\" ASC LIMIT 50",
+/// );
+/// # }
+/// # Ok::<_, sqlx_query::Error>(())
+/// ```
+///
+/// For a fragment you wrote yourself, reach for [`QueryWriter`] instead.
+pub struct QueryBuilder<DB: Syntax> {
+    writer: QueryWriter<DB>,
+}
+
+impl<DB: Syntax> QueryBuilder<DB> {
+    /// Parses the query to add to.
+    ///
+    /// # Errors
+    ///
+    /// As [`QueryWriter::new`].
+    pub fn new(sql: &str) -> Result<Self, Error> {
+        Ok(Self {
+            writer: QueryWriter::new(sql)?,
+        })
+    }
+
+    /// Binds the next value, as [`QueryWriter::bind`].
+    pub fn bind<'t, T>(&mut self, value: T) -> &mut Self
+    where
+        T: Encode<'t, DB> + Type<DB>,
+    {
+        self.writer.bind(value);
+        self
+    }
+
+    /// Orders by what the request asked for.
+    ///
+    /// Whatever the query already ordered by drops behind it as a tiebreaker,
+    /// and a column named by both is ordered by once, where the request put
+    /// it.
+    ///
+    /// A [`Sort`] that was never resolved is refused -- see
+    /// [`Error::Unresolved`] -- because its names are still the client's
+    /// fields, and writing those into a query is exactly what the allowlist
+    /// exists to prevent.
+    pub fn sort_by(&mut self, sort: &Sort) -> &mut Self {
+        if sort.resolved {
+            self.writer.order_by.extend(sort.order_by());
+        } else {
+            self.writer.fail(Error::Unresolved);
+        }
+        self
+    }
+
+    /// Sets `LIMIT`, as [`QueryWriter::limit`].
+    pub fn limit(&mut self, rows: u64) -> &mut Self {
+        self.writer.limit(rows);
+        self
+    }
+
+    /// Renders the query.
+    ///
+    /// # Errors
+    ///
+    /// As [`QueryWriter::sql`], and [`Error::Unresolved`].
+    pub fn sql(&self) -> Result<String, Error> {
+        self.writer.sql()
+    }
+
+    /// Renders the query and hands it to sqlx, as [`QueryWriter::build`].
+    ///
+    /// # Errors
+    ///
+    /// As [`sql`](Self::sql).
+    pub fn build(self) -> Result<SqlxQuery<'static, DB, DB::Arguments>, Error> {
+        self.writer.build()
+    }
+
+    /// As [`build`](Self::build), mapping rows to `O`.
+    ///
+    /// # Errors
+    ///
+    /// As [`sql`](Self::sql).
+    pub fn build_as<O>(self) -> Result<QueryAs<'static, DB, O, DB::Arguments>, Error>
+    where
+        O: for<'r> FromRow<'r, DB::Row>,
+    {
+        self.writer.build_as()
+    }
+
+    /// The query underneath, for anything this layer does not cover.
+    ///
+    /// Its methods take SQL fragments rather than request objects, so whatever
+    /// goes in through here is yours to vouch for.
+    pub fn writer(&mut self) -> &mut QueryWriter<DB> {
+        &mut self.writer
+    }
+}
+
+impl<DB: Syntax> fmt::Debug for QueryBuilder<DB> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryBuilder")
+            .field("writer", &self.writer)
+            .finish()
+    }
+}
+
 /// What can go wrong between a query you wrote and the one that runs.
 ///
 /// Every variant is raised before the database is touched: a rewrite either
@@ -717,6 +1107,21 @@ pub enum Error {
     /// this one has to survive being reported from more than one call.
     Encode(String),
 
+    /// An `order_by` value did not parse.
+    Sort(String),
+
+    /// A request named a field the column map does not have.
+    ///
+    /// The map is an allowlist, so this is what stops a request ordering by a
+    /// column you did not offer.
+    Field(String),
+
+    /// A [`Sort`] reached the query without being resolved.
+    ///
+    /// Its names are still the client's field names, which is exactly what
+    /// [`Sort::resolve`] exists to turn into columns -- and to refuse.
+    Unresolved,
+
     /// The statement wants a different number of values than were bound.
     ///
     /// Placeholders are claimed as they are parsed -- the base query's first,
@@ -764,6 +1169,17 @@ impl fmt::Display for Error {
                  to filter; wrap it in `SELECT * FROM (...) AS t` and rewrite that instead",
             ),
             Self::Encode(message) => write!(f, "a bound value could not be encoded: {message}"),
+            Self::Sort(message) => write!(f, "the ordering did not parse: {message}"),
+            Self::Field(field) => write!(
+                f,
+                "`{field}` is not a field this query offers; only the ones named in its \
+                 column map can be ordered or filtered by",
+            ),
+            Self::Unresolved => f.write_str(
+                "this ordering still holds the field names a request sent; call \
+                 `Sort::resolve` so they are checked against the column map and turned \
+                 into columns",
+            ),
             Self::Arity { wanted, given } => write!(
                 f,
                 "the statement has {wanted} placeholders but {given} values were bound; \

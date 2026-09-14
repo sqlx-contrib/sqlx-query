@@ -107,9 +107,9 @@ mod postgres {
         }
 
         #[test]
-        fn order_by_goes_in_front_and_the_base_becomes_a_tiebreaker() {
+        fn sort_by_goes_in_front_and_the_base_becomes_a_tiebreaker() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("name desc");
+                w.sort_by("name desc");
             })
             .unwrap();
 
@@ -117,9 +117,9 @@ mod postgres {
         }
 
         #[test]
-        fn order_by_takes_a_list() {
+        fn sort_by_takes_a_list() {
             let sql = rewrite("SELECT id FROM users", |w| {
-                w.order_by("name desc, created_at asc");
+                w.sort_by("name desc, created_at asc");
             })
             .unwrap();
 
@@ -131,9 +131,9 @@ mod postgres {
 
         /// Repeated calls append, in the order they were made.
         #[test]
-        fn order_by_accumulates() {
+        fn sort_by_accumulates() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("name desc").order_by("created_at asc");
+                w.sort_by("name desc").sort_by("created_at asc");
             })
             .unwrap();
 
@@ -144,9 +144,9 @@ mod postgres {
         }
 
         #[test]
-        fn order_by_does_not_repeat_a_column_the_base_already_named() {
+        fn sort_by_does_not_repeat_a_column_the_base_already_named() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("id asc");
+                w.sort_by("id asc");
             })
             .unwrap();
 
@@ -158,9 +158,9 @@ mod postgres {
         /// base query. Ordering by a column twice is not an error; the second one just
         /// has nothing left to say.
         #[test]
-        fn order_by_does_not_repeat_a_column_an_earlier_call_named() {
+        fn sort_by_does_not_repeat_a_column_an_earlier_call_named() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("name asc").order_by("name desc");
+                w.sort_by("name asc").sort_by("name desc");
             })
             .unwrap();
 
@@ -202,9 +202,9 @@ mod postgres {
         }
 
         #[test]
-        fn a_trailing_fragment_in_order_by_is_refused() {
+        fn a_trailing_fragment_in_sort_by_is_refused() {
             let error = rewrite("SELECT id FROM users", |w| {
-                w.order_by("name asc; DROP TABLE users");
+                w.sort_by("name asc; DROP TABLE users");
             })
             .unwrap_err();
 
@@ -249,7 +249,7 @@ mod postgres {
         #[test]
         fn a_union_can_still_be_ordered() {
             let sql = rewrite("SELECT id FROM a UNION SELECT id FROM b", |w| {
-                w.order_by("id desc");
+                w.sort_by("id desc");
             })
             .unwrap();
 
@@ -321,6 +321,334 @@ mod postgres {
                 .filter_by("role = 'admin'; DROP TABLE users");
 
             assert!(matches!(writer.sql(), Err(Error::Fragment { .. })));
+        }
+    }
+
+    /// AIP-132 ordering. Nothing here is PostgreSQL-specific -- `Sort` has no
+    /// driver at all until a query renders it -- but the file is laid out by
+    /// driver, so it lives with the one that renders it below.
+    mod sort {
+        use sqlx_query::{Error, Sort, SortDirection, SortKey};
+        use std::collections::HashMap;
+
+        fn columns() -> HashMap<&'static str, &'static str> {
+            HashMap::from([
+                ("title", "title"),
+                ("readCount", "read_count"),
+                ("created", "v.created_at"),
+                ("id", "id"),
+            ])
+        }
+
+        /// What the sort actually holds, which is the only thing that matters
+        /// before it is rendered.
+        fn keys(sort: &Sort) -> Vec<(String, SortDirection)> {
+            sort.keys()
+                .iter()
+                .map(|key| (key.name.clone(), key.direction))
+                .collect()
+        }
+
+        #[test]
+        fn a_field_on_its_own_is_ascending() {
+            let sort = Sort::parse("title").unwrap();
+            assert_eq!(keys(&sort), [("title".into(), SortDirection::Asc)]);
+        }
+
+        #[test]
+        fn a_direction_is_read_whichever_way_it_is_written() {
+            for input in ["title desc", "title DESC", "title Desc"] {
+                let sort = Sort::parse(input).unwrap();
+                assert_eq!(
+                    keys(&sort),
+                    [("title".into(), SortDirection::Desc)],
+                    "{input}"
+                );
+            }
+        }
+
+        #[test]
+        fn terms_keep_the_order_they_arrived_in() {
+            let sort = Sort::parse("readCount desc, title").unwrap();
+            assert_eq!(
+                keys(&sort),
+                [
+                    ("readCount".into(), SortDirection::Desc),
+                    ("title".into(), SortDirection::Asc),
+                ]
+            );
+        }
+
+        #[test]
+        fn whitespace_is_not_significant() {
+            let sort = Sort::parse("  readCount   desc ,title  ").unwrap();
+            assert_eq!(
+                keys(&sort),
+                [
+                    ("readCount".into(), SortDirection::Desc),
+                    ("title".into(), SortDirection::Asc),
+                ]
+            );
+        }
+
+        /// An absent query parameter arrives as a blank string, not as an
+        /// error.
+        #[test]
+        fn a_blank_value_means_no_ordering() {
+            for input in ["", "   "] {
+                assert!(Sort::parse(input).unwrap().is_empty(), "{input:?}");
+            }
+        }
+
+        // -- the tiebreaker ------------------------------------------------
+
+        #[test]
+        fn asc_appends_a_field() {
+            let sort = Sort::parse("title desc").unwrap().asc("id");
+            assert_eq!(
+                keys(&sort),
+                [
+                    ("title".into(), SortDirection::Desc),
+                    ("id".into(), SortDirection::Asc),
+                ]
+            );
+        }
+
+        #[test]
+        fn desc_appends_a_field() {
+            let sort = Sort::parse("title").unwrap().desc("id");
+            assert_eq!(
+                keys(&sort),
+                [
+                    ("title".into(), SortDirection::Asc),
+                    ("id".into(), SortDirection::Desc),
+                ]
+            );
+        }
+
+        /// A tiebreaker follows a client rather than overruling one: the
+        /// request asked for `id` descending, and keeps it.
+        #[test]
+        fn a_field_the_request_already_named_is_left_where_it_is() {
+            let sort = Sort::parse("id desc").unwrap().asc("id");
+            assert_eq!(keys(&sort), [("id".into(), SortDirection::Desc)]);
+        }
+
+        #[test]
+        fn a_tiebreaker_alone_is_the_whole_ordering() {
+            let sort = Sort::parse("").unwrap().asc("id");
+            assert_eq!(keys(&sort), [("id".into(), SortDirection::Asc)]);
+        }
+
+        // -- resolution ----------------------------------------------------
+
+        #[test]
+        fn resolve_renames_fields_to_columns() {
+            let sort = Sort::parse("readCount desc")
+                .unwrap()
+                .resolve(&columns())
+                .unwrap();
+
+            assert_eq!(keys(&sort), [("read_count".into(), SortDirection::Desc)]);
+        }
+
+        #[test]
+        fn a_field_the_map_does_not_name_is_refused() {
+            let error = Sort::parse("password_hash")
+                .unwrap()
+                .resolve(&columns())
+                .unwrap_err();
+
+            assert!(
+                matches!(&error, Error::Field(field) if field == "password_hash"),
+                "{error:?}"
+            );
+        }
+
+        /// The allowlist is over fields, so asking for the column behind one is
+        /// refused too -- otherwise the map would be a suggestion.
+        #[test]
+        fn naming_the_column_instead_of_the_field_is_refused() {
+            let error = Sort::parse("read_count")
+                .unwrap()
+                .resolve(&columns())
+                .unwrap_err();
+
+            assert!(matches!(error, Error::Field(_)), "{error:?}");
+        }
+
+        #[test]
+        fn a_tiebreaker_is_resolved_like_anything_else() {
+            let error = Sort::parse("title")
+                .unwrap()
+                .asc("nope")
+                .resolve(&columns())
+                .unwrap_err();
+
+            assert!(matches!(error, Error::Field(_)), "{error:?}");
+        }
+
+        #[test]
+        fn resolving_twice_changes_nothing() {
+            let once = Sort::parse("title").unwrap().resolve(&columns()).unwrap();
+            let twice = once.clone().resolve(&columns()).unwrap();
+
+            assert_eq!(keys(&once), keys(&twice));
+        }
+
+        /// An ordering this program decided has no client input in it, so
+        /// there is nothing for an allowlist to check.
+        #[test]
+        fn a_sort_built_directly_needs_no_resolving() {
+            let sort = Sort::new(vec![SortKey {
+                name: "created_at".into(),
+                direction: SortDirection::Desc,
+            }]);
+
+            assert_eq!(keys(&sort), [("created_at".into(), SortDirection::Desc)]);
+        }
+
+        // -- malformed -----------------------------------------------------
+
+        #[test]
+        fn a_direction_that_is_not_one_is_refused() {
+            let error = Sort::parse("title sideways").unwrap_err();
+            assert!(matches!(error, Error::Sort(_)), "{error:?}");
+        }
+
+        #[test]
+        fn an_empty_term_is_refused() {
+            for input in ["title,", ",title", "title,,created"] {
+                let error = Sort::parse(input).unwrap_err();
+                assert!(matches!(error, Error::Sort(_)), "{input:?} gave {error:?}");
+            }
+        }
+
+        #[test]
+        fn a_third_word_is_refused() {
+            let error = Sort::parse("title desc extra").unwrap_err();
+            assert!(matches!(error, Error::Sort(_)), "{error:?}");
+        }
+    }
+
+    /// The builder, which is the writer with request objects instead of SQL.
+    mod builder {
+        use sqlx::Postgres;
+        use sqlx_query::{Error, QueryBuilder, Sort};
+        use std::collections::HashMap;
+
+        fn columns() -> HashMap<&'static str, &'static str> {
+            HashMap::from([
+                ("title", "title"),
+                ("readCount", "read_count"),
+                ("created", "v.created_at"),
+                ("order", "order"),
+                ("id", "id"),
+            ])
+        }
+
+        fn sorted(base: &str, order_by: &str, tiebreak: &str) -> Result<String, Error> {
+            let sort = Sort::parse(order_by)?.asc(tiebreak).resolve(&columns())?;
+            let mut query = QueryBuilder::<Postgres>::new(base)?;
+            query.sort_by(&sort);
+            query.sql()
+        }
+
+        #[test]
+        fn a_sort_becomes_the_ordering() {
+            let sql = sorted("SELECT id FROM v", "title desc", "id").unwrap();
+            assert_eq!(sql, r#"SELECT id FROM v ORDER BY "title" DESC, "id" ASC"#);
+        }
+
+        /// A qualified column is two identifiers, not one with a dot in it.
+        #[test]
+        fn a_qualified_column_is_quoted_in_parts() {
+            let sql = sorted("SELECT id FROM v", "created", "id").unwrap();
+            assert_eq!(
+                sql,
+                r#"SELECT id FROM v ORDER BY "v"."created_at" ASC, "id" ASC"#
+            );
+        }
+
+        /// Why columns are quoted at all.
+        #[test]
+        fn a_column_named_after_a_keyword_survives() {
+            let sql = sorted("SELECT id FROM v", "order", "id").unwrap();
+            assert_eq!(sql, r#"SELECT id FROM v ORDER BY "order" ASC, "id" ASC"#);
+        }
+
+        /// What the query already ordered by drops behind the request's
+        /// ordering, exactly as a `sort_by` fragment does.
+        #[test]
+        fn the_querys_own_ordering_becomes_a_tiebreaker() {
+            let sql = sorted("SELECT id FROM v ORDER BY rank", "title desc", "id").unwrap();
+            assert_eq!(
+                sql,
+                r#"SELECT id FROM v ORDER BY "title" DESC, "id" ASC, rank"#
+            );
+        }
+
+        /// Quoting is not part of a column's identity: the `"id"` a `Sort`
+        /// writes and the `id` the query wrote are one column, and it is
+        /// ordered by once.
+        #[test]
+        fn quoting_does_not_make_a_second_column() {
+            let sql = sorted("SELECT id FROM v ORDER BY id", "title desc", "id").unwrap();
+            assert_eq!(sql, r#"SELECT id FROM v ORDER BY "title" DESC, "id" ASC"#);
+        }
+
+        /// The check that makes the allowlist worth having: a sort still
+        /// holding the client's field names never reaches the query.
+        #[test]
+        fn an_unresolved_sort_is_refused() {
+            let sort = Sort::parse("title desc").unwrap();
+            let mut query = QueryBuilder::<Postgres>::new("SELECT id FROM v").unwrap();
+            query.sort_by(&sort);
+
+            assert!(matches!(query.sql(), Err(Error::Unresolved)));
+        }
+
+        #[test]
+        fn an_empty_sort_leaves_the_query_alone() {
+            let sql = Sort::parse("")
+                .and_then(|sort| sort.resolve(&columns()))
+                .and_then(|sort| {
+                    let mut query = QueryBuilder::<Postgres>::new("SELECT id FROM v")?;
+                    query.sort_by(&sort);
+                    query.sql()
+                })
+                .unwrap();
+
+            assert_eq!(sql, "SELECT id FROM v");
+        }
+
+        #[test]
+        fn binds_and_limits_reach_the_writer() {
+            let sort = Sort::parse("title").unwrap().resolve(&columns()).unwrap();
+            let mut query =
+                QueryBuilder::<Postgres>::new("SELECT id FROM v WHERE tenant = $1").unwrap();
+            query.bind(7_i64).sort_by(&sort).limit(50);
+
+            assert_eq!(
+                query.sql().unwrap(),
+                r#"SELECT id FROM v WHERE tenant = $1 ORDER BY "title" ASC LIMIT 50"#
+            );
+            assert!(query.build().is_ok());
+        }
+
+        /// The escape hatch: a predicate this program decided, alongside an
+        /// ordering the client did.
+        #[test]
+        fn the_writer_underneath_still_takes_fragments() {
+            let sort = Sort::parse("title").unwrap().resolve(&columns()).unwrap();
+            let mut query = QueryBuilder::<Postgres>::new("SELECT id FROM v").unwrap();
+            query.sort_by(&sort);
+            query.writer().filter_by("visible");
+
+            assert_eq!(
+                query.sql().unwrap(),
+                r#"SELECT id FROM v WHERE visible ORDER BY "title" ASC"#
+            );
         }
     }
 
@@ -587,7 +915,7 @@ mod sqlite {
         #[test]
         fn ordering_may_move_a_limit_placeholder() {
             let sql = rewrite("SELECT id FROM users LIMIT ?", |w| {
-                w.order_by("? asc");
+                w.sort_by("? asc");
             })
             .unwrap();
 
@@ -798,7 +1126,7 @@ mod sqlite {
 
             let mut writer =
                 QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users ORDER BY id").unwrap();
-            writer.order_by("name asc");
+            writer.sort_by("name asc");
 
             let users: Vec<User> = writer
                 .build_as::<User>()

@@ -46,7 +46,7 @@ where
         writer.filter_by(filter);
     }
     if let Some(order) = request.order {
-        writer.order_by(order);
+        writer.sort_by(order);
     }
     if let Some(limit) = request.limit {
         writer.limit(limit);
