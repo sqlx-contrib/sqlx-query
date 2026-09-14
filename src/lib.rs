@@ -18,8 +18,8 @@
 //! // the query.
 //! writer
 //!     .bind(7_i64)
-//!     .filter_by("read_count > 100")
-//!     .sort_by("title desc")
+//!     .and_where("read_count > 100")
+//!     .order_by("title desc")
 //!     .limit(50);
 //!
 //! assert_eq!(
@@ -56,7 +56,7 @@
 //! let mut query = QueryBuilder::<Postgres>::new(
 //!     "SELECT id, title FROM volumes WHERE tenant_id = $1",
 //! )?;
-//! query.bind(7_i64).sort_by(&sort).limit(50);
+//! query.bind(7_i64).sort(&sort).limit(50);
 //!
 //! assert_eq!(
 //!     query.sql()?,
@@ -88,7 +88,7 @@
 //!
 //! # What a fragment is allowed to be
 //!
-//! Exactly one expression. [`filter_by`](QueryWriter::filter_by) parses its
+//! Exactly one expression. [`and_where`](QueryWriter::and_where) parses its
 //! argument and then insists the parser reached the end of it, so
 //! `role = 'admin'` is accepted and `role = 'admin'; DROP TABLE users` is
 //! [`Error::Trailing`] -- the statement after the expression has nowhere to go.

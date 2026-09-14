@@ -16,8 +16,8 @@ let mut writer = QueryWriter::<Postgres>::new(
 
 writer
     .bind(7_i64)
-    .filter_by("read_count > 100")
-    .sort_by("title desc")
+    .and_where("read_count > 100")
+    .order_by("title desc")
     .limit(50);
 
 assert_eq!(
@@ -51,7 +51,7 @@ let sort = Sort::parse(&request.order_by)?   // AIP-132: "readCount desc"
 let mut query = QueryBuilder::<Postgres>::new(
     "SELECT id, title, read_count FROM volumes WHERE tenant_id = $1",
 )?;
-query.bind(tenant).sort_by(&sort).limit(50);
+query.bind(tenant).sort(&sort).limit(50);
 
 let rows = query.build_as::<Volume>()?.fetch_all(&pool).await?;
 ```
@@ -69,8 +69,8 @@ at the call site looking wrong.
 
 | | takes | checked against the map |
 | --- | --- | --- |
-| `QueryWriter` | `filter_by("role = 'admin'")` | no -- you wrote it |
-| `QueryBuilder` | `sort_by(&sort)` | yes |
+| `QueryWriter` | `and_where("role = 'admin'")` | no -- you wrote it |
+| `QueryBuilder` | `sort(&sort)` | yes |
 
 A `Sort` that was never resolved is refused rather than written into the query,
 so forgetting the step cannot quietly skip the allowlist.
@@ -101,7 +101,7 @@ SELECT id FROM users WHERE (a = 1 OR b = 2) AND role = 'admin'
 
 ## What a fragment is allowed to be
 
-Exactly one expression. `filter_by` parses its argument and then insists the
+Exactly one expression. `and_where` parses its argument and then insists the
 parser reached the end of it:
 
 | fragment | result |
@@ -168,7 +168,7 @@ Every one of these is raised before the database is touched.
 ## Status
 
 A spike. `QueryWriter` and `QueryBuilder` are here, with AIP-132 ordering.
-Still to come: keyset cursors (`seek_by`) and CEL filters (`filter_by`) on the
+Still to come: keyset cursors (`seek_by`) and CEL filters (`and_where`) on the
 builder. Filtering into a named CTE rather than the outermost `SELECT` is not
 planned.
 

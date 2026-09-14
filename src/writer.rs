@@ -144,7 +144,7 @@ impl Render for Vec<OrderByExpr> {
 ///     "SELECT id, name, role FROM users WHERE tenant_id = $1 ORDER BY id",
 /// )?;
 ///
-/// writer.bind(7_i64).filter_by("role = 'admin'").sort_by("name asc");
+/// writer.bind(7_i64).and_where("role = 'admin'").order_by("name asc");
 ///
 /// assert_eq!(
 ///     writer.sql()?,
@@ -253,7 +253,8 @@ impl<DB: Syntax> QueryWriter<DB> {
     /// Called more than once, the fragments are `AND`ed together. An existing
     /// `WHERE` is kept and joined the same way -- this adds a condition, it
     /// never replaces one.
-    pub fn filter_by(&mut self, fragment: &str) -> &mut Self {
+    #[doc(alias = "where")]
+    pub fn and_where(&mut self, fragment: &str) -> &mut Self {
         match self.parse(fragment, Parser::parse_expr) {
             Ok(expr) => self.filters.push(expr),
             Err(error) => self.fail(error),
@@ -268,8 +269,7 @@ impl<DB: Syntax> QueryWriter<DB> {
     /// make the order total, which it still does from second place. A column
     /// named by both is only ordered by once, at the position the fragment
     /// gave it.
-    #[doc(alias = "order_by")]
-    pub fn sort_by(&mut self, fragment: &str) -> &mut Self {
+    pub fn order_by(&mut self, fragment: &str) -> &mut Self {
         match self.parse(fragment, |parser| {
             parser.parse_comma_separated(Parser::parse_order_by_expr)
         }) {
@@ -713,7 +713,7 @@ pub struct SortKey {
 /// [`resolve`](Self::resolve) turns those into columns and refuses any field
 /// the map does not name. That refusal is the point: the map is an allowlist,
 /// so a request can only order by what you chose to offer. A `Sort` that was
-/// never resolved is refused by [`QueryBuilder::sort_by`] rather than written
+/// never resolved is refused by [`QueryBuilder::sort`] rather than written
 /// into a query, so forgetting the step cannot quietly skip the allowlist.
 ///
 /// [AIP-132]: https://google.aip.dev/132
@@ -936,7 +936,7 @@ fn quoted(name: &str) -> Expr {
 /// let mut query = QueryBuilder::<Postgres>::new(
 ///     "SELECT id, title FROM volumes WHERE tenant_id = $1",
 /// )?;
-/// query.bind(7_i64).sort_by(&sort).limit(50);
+/// query.bind(7_i64).sort(&sort).limit(50);
 ///
 /// assert_eq!(
 ///     query.sql()?,
@@ -983,7 +983,7 @@ impl<DB: Syntax> QueryBuilder<DB> {
     /// [`Error::Unresolved`] -- because its names are still the client's
     /// fields, and writing those into a query is exactly what the allowlist
     /// exists to prevent.
-    pub fn sort_by(&mut self, sort: &Sort) -> &mut Self {
+    pub fn sort(&mut self, sort: &Sort) -> &mut Self {
         if sort.resolved {
             self.writer.order_by.extend(sort.order_by());
         } else {
