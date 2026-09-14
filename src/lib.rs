@@ -106,10 +106,6 @@ compile_error!(
      Without one there is no syntax to parse with and no `Arguments` to bind against."
 );
 
-mod error;
-mod syntax;
 mod writer;
 
-pub use error::Error;
-pub use syntax::Syntax;
-pub use writer::QueryWriter;
+pub use writer::{Error, QueryWriter, Syntax};
