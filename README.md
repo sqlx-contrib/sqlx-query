@@ -72,8 +72,14 @@ allowlist of columns, with values bound rather than written in.
 
 ## Placeholder numbering is not the same everywhere
 
+Values are given in the order the placeholders claim them: the base query's
+first, then each fragment's, in the order the fragments were added. What
+happens after that depends on the driver, and neither case is something you
+have to think about.
+
 PostgreSQL's `$N` names the *N*th bound value, so a fragment spliced ahead of a
-`$2` leaves it pointing at the same thing:
+`$2` leaves it pointing at the same thing, and only the fragment's own
+placeholders are renumbered:
 
 ```
 base      SELECT id FROM users WHERE tenant_id = $1 LIMIT $2
@@ -81,12 +87,21 @@ fragment  role = $1
 result    SELECT id FROM users WHERE tenant_id = $1 AND role = $3 LIMIT $2
 ```
 
-MySQL's and SQLite's `?` names the *N*th placeholder *in the text*, so the same
-rewrite would shift what `LIMIT ?` binds. That is `Error::Positional` rather
-than a query that runs and is wrong.
+MySQL's and SQLite's `?` takes a value per placeholder, in the order they
+appear. The same rewrite leaves the values wanted in a different order than
+they were given, so they are replayed to match:
 
-Values are bound in the order the placeholders claim them: the base query's
-first, then each fragment's, in the order the fragments were added.
+```
+base      SELECT id FROM users WHERE tenant_id = ? LIMIT ?
+fragment  role = ?
+result    SELECT id FROM users WHERE tenant_id = ? AND role = ? LIMIT ?
+given     tenant, limit, role
+sent      tenant, role, limit
+```
+
+The one thing `?` cannot express is a value wanted twice: `$1` used in two
+places is ordinary in PostgreSQL and has no `?` equivalent. That is
+`Error::Positional`.
 
 ## What it refuses
 
@@ -97,8 +112,9 @@ Every one of these is raised before the database is touched.
 | `Trailing`, `Fragment` | the fragment was not one complete expression |
 | `SetOperation` | the outermost level is a `UNION`, so there is no single `SELECT` to filter -- wrap it in `SELECT * FROM (...) AS t` |
 | `Grouped` | there is a `GROUP BY`, so a predicate could mean `WHERE` or `HAVING` and the fragment does not say which |
-| `Positional` | the rewrite would rebind a `?` to the wrong value |
+| `Positional` | one value is wanted by two placeholders, which `?` cannot express |
 | `Orphaned` | the rewrite removed a placeholder that still has a value bound to it |
+| `Unbound` | fewer values were bound than the statement has placeholders |
 | `NotQuery`, `Query` | the base SQL was not a single parseable query |
 
 ## Status

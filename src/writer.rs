@@ -7,11 +7,22 @@ use sqlparser::ast::{
 };
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
+use sqlx::error::BoxDynError;
 use sqlx::query::{Query as SqlxQuery, QueryAs};
 use sqlx::{Arguments, AssertSqlSafe, Encode, FromRow, Type};
 
 use crate::dialect::Dialect;
 use crate::{Error, placeholder};
+
+/// One value, kept until the statement is rendered.
+///
+/// The values cannot go straight into `DB::Arguments`, because that is
+/// append-only and the order they are bound in is not known until the SQL has
+/// been laid out -- a fragment spliced into the middle of a `?` query shifts
+/// everything after it. Holding each one as a closure lets them be replayed in
+/// whatever order the finished statement asks for.
+type Bind<'a, DB> =
+    Box<dyn FnOnce(&mut <DB as sqlx::Database>::Arguments) -> Result<(), BoxDynError> + Send + 'a>;
 
 /// Adds filters and ordering to a query you already wrote.
 ///
@@ -59,7 +70,7 @@ use crate::{Error, placeholder};
 /// line. A fragment that does not parse is remembered and returned from
 /// [`sql`](Self::sql), [`build`](Self::build) or [`build_as`](Self::build_as)
 /// -- the first failure, every time it is asked.
-pub struct QueryWriter<DB: Dialect> {
+pub struct QueryWriter<'a, DB: Dialect> {
     statement: Statement,
     filters: Vec<Expr>,
     order_by: Vec<OrderByExpr>,
@@ -73,11 +84,11 @@ pub struct QueryWriter<DB: Dialect> {
     next_marker: usize,
     arity: usize,
 
-    arguments: DB::Arguments,
+    binds: Vec<Bind<'a, DB>>,
     failure: Option<Error>,
 }
 
-impl<DB: Dialect> QueryWriter<DB> {
+impl<'a, DB: Dialect> QueryWriter<'a, DB> {
     /// Parses the query to rewrite.
     ///
     /// # Errors
@@ -115,28 +126,27 @@ impl<DB: Dialect> QueryWriter<DB> {
             slots: base.slots,
             next_marker,
             arity: base.arity,
-            arguments: DB::Arguments::default(),
+            binds: Vec::new(),
             failure: None,
         })
     }
 
     /// Binds the next value.
     ///
-    /// Values are bound in the order the placeholders claim them: the base
+    /// Values are given in the order the placeholders claim them: the base
     /// query's first, then each fragment's, in the order the fragments were
     /// added. A fragment numbers its own placeholders from `$1`, and they are
     /// renumbered to follow whatever came before.
-    pub fn bind<'t, T>(&mut self, value: T) -> &mut Self
+    ///
+    /// That is the order they are *given* in, not necessarily the order they
+    /// are sent in. A fragment spliced into the middle of the query renders
+    /// its placeholder there, and for a driver that binds `?` by position the
+    /// values are replayed to match. Nothing about that is visible here.
+    pub fn bind<T>(&mut self, value: T) -> &mut Self
     where
-        T: Encode<'t, DB> + Type<DB>,
+        T: Encode<'a, DB> + Type<DB> + Send + 'a,
     {
-        if let Err(error) = self.arguments.add(value) {
-            // `Arguments::add` fails when a value cannot be encoded at all --
-            // out of range for the wire format, say. Nothing later can fix it,
-            // and it reads better next to the fragment errors than as a
-            // separate result on every `bind`.
-            self.fail(Error::Encode(error.to_string()));
-        }
+        self.binds.push(Box::new(move |args| args.add(value)));
         self
     }
 
@@ -186,8 +196,41 @@ impl<DB: Dialect> QueryWriter<DB> {
     ///
     /// The first failure from any fragment, or one of the rewrites this crate
     /// refuses to guess at: [`Error::SetOperation`], [`Error::Grouped`],
-    /// [`Error::Positional`].
+    /// [`Error::Orphaned`].
     pub fn sql(&self) -> Result<String, Error> {
+        Ok(self.render()?.0)
+    }
+
+    /// Renders the query and hands it to sqlx with its bound values.
+    ///
+    /// # Errors
+    ///
+    /// As [`sql`](Self::sql), and [`Error::Encode`] if a value cannot be
+    /// encoded for this driver.
+    pub fn build(self) -> Result<SqlxQuery<'static, DB, DB::Arguments>, Error> {
+        // `AssertSqlSafe` is sqlx asking who vouches for a string built at
+        // runtime. This crate does: every part of it was either the query the
+        // caller wrote or a fragment that parsed, and each value is bound.
+        let (sql, arguments) = self.finish()?;
+        Ok(sqlx::query_with(AssertSqlSafe(sql), arguments))
+    }
+
+    /// As [`build`](Self::build), mapping rows to `O`.
+    ///
+    /// # Errors
+    ///
+    /// As [`build`](Self::build).
+    pub fn build_as<O>(self) -> Result<QueryAs<'static, DB, O, DB::Arguments>, Error>
+    where
+        O: for<'r> FromRow<'r, DB::Row>,
+    {
+        let (sql, arguments) = self.finish()?;
+        Ok(sqlx::query_as_with(AssertSqlSafe(sql), arguments))
+    }
+
+    /// Assembles the statement and reports which value each placeholder takes,
+    /// in the order they render.
+    fn render(&self) -> Result<(String, Vec<usize>), Error> {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
         }
@@ -205,30 +248,36 @@ impl<DB: Dialect> QueryWriter<DB> {
         placeholder::write::<DB>(&statement.to_string(), &self.slots, self.arity)
     }
 
-    /// Renders the query and hands it to sqlx with its bound values.
+    /// Renders the statement and replays the values into it.
     ///
-    /// # Errors
-    ///
-    /// As [`sql`](Self::sql).
-    pub fn build(self) -> Result<SqlxQuery<'static, DB, DB::Arguments>, Error> {
-        // `AssertSqlSafe` is sqlx asking who vouches for a string built at
-        // runtime. This crate does: every part of it was either the query the
-        // caller wrote or a fragment that parsed, and each value is bound.
-        let sql = self.sql()?;
-        Ok(sqlx::query_with(AssertSqlSafe(sql), self.arguments))
-    }
+    /// A driver that numbers its placeholders takes the values in the order
+    /// they were given, since each placeholder says which one it wants. One
+    /// that binds by position takes them in the order they render, which is
+    /// the only thing that says the same.
+    fn finish(mut self) -> Result<(String, DB::Arguments), Error> {
+        let (sql, order) = self.render()?;
 
-    /// As [`build`](Self::build), mapping rows to `O`.
-    ///
-    /// # Errors
-    ///
-    /// As [`sql`](Self::sql).
-    pub fn build_as<O>(self) -> Result<QueryAs<'static, DB, O, DB::Arguments>, Error>
-    where
-        O: for<'r> FromRow<'r, DB::Row>,
-    {
-        let sql = self.sql()?;
-        Ok(sqlx::query_as_with(AssertSqlSafe(sql), self.arguments))
+        let mut arguments = DB::Arguments::default();
+        let sequence: Vec<usize> = if DB::positional() {
+            order
+        } else {
+            (0..self.arity).collect()
+        };
+
+        // Draining by slot rather than in order, because the closures are
+        // `FnOnce` and the sequence is a permutation rather than a walk.
+        let mut binds: Vec<Option<Bind<'a, DB>>> = self.binds.drain(..).map(Some).collect();
+        for slot in sequence {
+            let Some(bind) = binds.get_mut(slot).and_then(Option::take) else {
+                return Err(Error::Unbound {
+                    wanted: self.arity,
+                    given: binds.len(),
+                });
+            };
+            bind(&mut arguments).map_err(|error| Error::Encode(error.to_string()))?;
+        }
+
+        Ok((sql, arguments))
     }
 
     /// Parses a fragment, marks its placeholders, and claims the slots they
@@ -366,7 +415,7 @@ impl<DB: Dialect> QueryWriter<DB> {
 /// Written out rather than derived for two reasons: `DB::Arguments` is not
 /// `Debug` for every driver, and bound values are the part of a query most
 /// likely to be something that should not reach a log.
-impl<DB: Dialect> fmt::Debug for QueryWriter<DB> {
+impl<DB: Dialect> fmt::Debug for QueryWriter<'_, DB> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryWriter")
             .field("statement", &self.statement.to_string())

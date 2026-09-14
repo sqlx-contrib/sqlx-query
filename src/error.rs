@@ -74,12 +74,22 @@ pub enum Error {
     /// the `LIMIT` out of the base query, or keep it and do not call `limit`.
     Orphaned,
 
-    /// The rewrite would have reordered the values bound to a `?` dialect.
+    /// Fewer values were bound than the statement has placeholders.
+    Unbound {
+        /// How many the statement asks for.
+        wanted: usize,
+        /// How many were given.
+        given: usize,
+    },
+
+    /// One value is wanted by two placeholders, which `?` cannot express.
     ///
-    /// MySQL and SQLite number placeholders by position in the text, so a
-    /// fragment spliced ahead of an existing `?` shifts every one after it.
-    /// PostgreSQL's `$N` names the *N*th bound value instead, so it is immune
-    /// and never raises this.
+    /// `$1` twice is ordinary, and PostgreSQL binds one value to both. `?`
+    /// takes a value per placeholder and has no way to name an earlier one, so
+    /// there is nothing to render this as.
+    ///
+    /// Reordering, which this used to mean, is no longer an error: values are
+    /// replayed in the order the finished statement asks for.
     Positional,
 }
 
@@ -110,10 +120,14 @@ impl fmt::Display for Error {
                 "the query has a GROUP BY, so a filter could mean WHERE or HAVING; \
                  put the predicate in the query itself",
             ),
+            Self::Unbound { wanted, given } => write!(
+                f,
+                "the statement has {wanted} placeholders but {given} values were bound",
+            ),
             Self::Positional => f.write_str(
-                "this rewrite moves a `?` placeholder, which would rebind it to the wrong \
-                 value; bind the values the base query needs after the ones the fragments do, \
-                 or use PostgreSQL, whose `$N` is not positional",
+                "one value is wanted by two placeholders, and this driver's `?` takes a value \
+                 per placeholder with no way to name an earlier one; bind it twice, or use \
+                 PostgreSQL, whose `$1` can repeat",
             ),
         }
     }

@@ -121,27 +121,35 @@ pub(crate) fn region(rendered: &str, origins: &HashMap<usize, String>) -> Region
     }
 }
 
-/// Writes the final placeholders into the assembled statement.
+/// Writes the final placeholders into the assembled statement, and says which
+/// value each one takes.
 ///
-/// This is also where a rewrite is checked for having stayed sound. Every slot
-/// that was claimed has to still be somewhere in the statement, or a value was
-/// bound for a placeholder that no longer exists. And for a `?` dialect the
-/// slots have to come out in the order they were bound, since that is the only
-/// thing saying which value each one takes -- `$N` carries its own number and
-/// is free to move.
+/// The returned slots are in render order, which is the order a `?` dialect
+/// binds in. Handing that back -- rather than insisting the rewrite produced
+/// it -- is what lets a fragment land in the middle of a query whose driver
+/// numbers placeholders by position: the values are bound in this order
+/// instead of the order they were given.
+///
+/// Every slot that was claimed still has to be somewhere in the statement, or
+/// a value was bound for a placeholder that no longer exists.
 pub(crate) fn write<DB: Dialect>(
     sql: &str,
     slots: &HashMap<usize, usize>,
     arity: usize,
-) -> Result<String, Error> {
+) -> Result<(String, Vec<usize>), Error> {
     let found = scan(sql);
+    let order: Vec<usize> = found.iter().map(|(_, id)| slots[id]).collect();
 
-    let present: HashSet<usize> = found.iter().map(|(_, id)| slots[id]).collect();
+    let present: HashSet<usize> = order.iter().copied().collect();
     if present.len() != arity {
         return Err(Error::Orphaned);
     }
 
-    if DB::positional() && !found.iter().enumerate().all(|(i, (_, id))| slots[id] == i) {
+    // `?` consumes a value per placeholder, so it has no way to say "the same
+    // one again". `$1` twice is fine and common; `?` twice for one value is
+    // not expressible, and quietly binding it twice would shift everything
+    // after it.
+    if DB::positional() && order.len() != present.len() {
         return Err(Error::Positional);
     }
 
@@ -155,5 +163,5 @@ pub(crate) fn write<DB: Dialect>(
     }
     out.push_str(&sql[at..]);
 
-    Ok(out)
+    Ok((out, order))
 }

@@ -61,11 +61,35 @@
 //!
 //! # Placeholder numbering is not the same everywhere
 //!
+//! Values are given in the order the placeholders claim them: the base query's
+//! first, then each fragment's. What happens next depends on the driver, and
+//! neither case is something you have to think about.
+//!
 //! PostgreSQL's `$N` names the *N*th bound value, so a fragment spliced ahead
-//! of a `$2` leaves it pointing at the same thing. MySQL's and SQLite's `?`
-//! names the *N*th placeholder *in the text*, so splicing ahead of one shifts
-//! what it binds. Where a rewrite would do that, this crate returns
-//! [`Error::Positional`] rather than a query that runs and is wrong.
+//! of a `$2` leaves it pointing at the same thing and only the fragment's own
+//! placeholders are renumbered:
+//!
+//! ```text
+//! base      SELECT id FROM users WHERE tenant_id = $1 LIMIT $2
+//! fragment  role = $1
+//! result    SELECT id FROM users WHERE tenant_id = $1 AND role = $3 LIMIT $2
+//! ```
+//!
+//! MySQL's and SQLite's `?` takes a value per placeholder, in the order they
+//! appear, so the same rewrite leaves the values wanted in a different order
+//! than they were given. They are replayed to match:
+//!
+//! ```text
+//! base      SELECT id FROM users WHERE tenant_id = ? LIMIT ?
+//! fragment  role = ?
+//! result    SELECT id FROM users WHERE tenant_id = ? AND role = ? LIMIT ?
+//! given     tenant, limit, role
+//! sent      tenant, role, limit
+//! ```
+//!
+//! The one thing `?` cannot express is a value wanted twice -- `$1` used in
+//! two places is ordinary in PostgreSQL and has no `?` equivalent. That is
+//! [`Error::Positional`].
 //!
 //! [sqlx]: https://github.com/launchbadge/sqlx
 

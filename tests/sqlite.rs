@@ -81,6 +81,88 @@ async fn a_filter_binds_its_own_value() {
     );
 }
 
+/// The case that decides whether replaying values is right.
+///
+/// The filter renders between `tenant_id = ?` and `LIMIT ?`, so the three
+/// values are wanted in the order tenant, role, limit -- but they were given
+/// as tenant, limit, role, because a fragment's values follow the base
+/// query's. Binding in the order they were given would put the page size on
+/// `role` and the string `admin` on `LIMIT`.
+#[tokio::test]
+async fn values_are_replayed_in_the_order_the_statement_wants() {
+    let pool = seed().await;
+
+    let mut writer = QueryWriter::<sqlx::Sqlite>::new(
+        "SELECT id, name FROM users WHERE tenant_id = ? ORDER BY id LIMIT ?",
+    )
+    .unwrap();
+    writer
+        .bind(1_i64) // base: tenant_id
+        .bind(2_i64) // base: limit
+        .filter_by("role = ?")
+        .bind("admin"); // fragment
+
+    assert_eq!(
+        writer.sql().unwrap(),
+        "SELECT id, name FROM users WHERE tenant_id = ? AND role = ? ORDER BY id LIMIT ?"
+    );
+
+    let users: Vec<User> = writer
+        .build_as::<User>()
+        .unwrap()
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+    // Tenant 1 has two admins and one member; the limit of 2 is not what
+    // trimmed this, but a mis-bound limit would have.
+    assert_eq!(
+        users,
+        vec![
+            User {
+                id: 1,
+                name: "ada".into()
+            },
+            User {
+                id: 2,
+                name: "grace".into()
+            },
+        ]
+    );
+}
+
+/// The same shape, with a limit small enough that binding it to the wrong
+/// placeholder could not go unnoticed.
+#[tokio::test]
+async fn a_replayed_limit_still_limits() {
+    let pool = seed().await;
+
+    let mut writer = QueryWriter::<sqlx::Sqlite>::new(
+        "SELECT id, name FROM users WHERE tenant_id = ? ORDER BY id LIMIT ?",
+    )
+    .unwrap();
+    writer
+        .bind(1_i64)
+        .bind(1_i64)
+        .filter_by("role = ?")
+        .bind("admin");
+
+    let users: Vec<User> = writer
+        .build_as::<User>()
+        .unwrap()
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        users,
+        vec![User {
+            id: 1,
+            name: "ada".into()
+        }]
+    );
+}
+
 /// Ordering by the fragment first, with the base `ORDER BY id` behind it.
 #[tokio::test]
 async fn ordering_puts_the_fragment_first() {
