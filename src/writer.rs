@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 
 use sqlparser::ast::{
@@ -76,12 +75,8 @@ pub struct QueryWriter<'a, DB: Dialect> {
     order_by: Vec<OrderByExpr>,
     limit: Option<u64>,
 
-    // Marker bookkeeping. `slots` maps every marker installed so far to the
-    // value it binds; `arity` is how many values have been claimed, and so
-    // where the next fragment's own numbering starts from.
-    origins: HashMap<usize, String>,
-    slots: HashMap<usize, usize>,
-    next_marker: usize,
+    // How many values have been claimed so far, and so where the next
+    // fragment's own numbering starts from.
     arity: usize,
 
     binds: Vec<Bind<'a, DB>>,
@@ -109,23 +104,16 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
             return Err(Error::NotQuery);
         }
 
-        let mut origins = HashMap::new();
-        let mut next_marker = 0;
-        placeholder::mark(&mut statement, &mut next_marker, &mut origins);
-
-        // The base query's own numbering, read back from how it renders. Its
-        // placeholders are bound first, so its slots are the global ones.
-        let base = placeholder::region(&statement.to_string(), &origins);
+        // The base query's placeholders are claimed first, so they are
+        // numbered from zero and every fragment follows them.
+        let arity = placeholder::number(&mut statement, 0);
 
         Ok(Self {
             statement,
             filters: Vec::new(),
             order_by: Vec::new(),
             limit: None,
-            origins,
-            slots: base.slots,
-            next_marker,
-            arity: base.arity,
+            arity,
             binds: Vec::new(),
             failure: None,
         })
@@ -245,7 +233,7 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
         self.apply_order_by(query);
         self.apply_limit(query);
 
-        placeholder::write::<DB>(&statement.to_string(), &self.slots, self.arity)
+        placeholder::write::<DB>(&statement.to_string(), self.arity)
     }
 
     /// Renders the statement and replays the values into it.
@@ -288,7 +276,7 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
     /// fragment, so the slots are offset by everything claimed before it.
     fn parse<T, F>(&mut self, fragment: &str, parse: F) -> Result<T, Error>
     where
-        T: Rendered + sqlparser::ast::VisitMut,
+        T: placeholder::Render + sqlparser::ast::VisitMut,
         // `'static` rather than elided: the dialect is a `&'static dyn`, so
         // the parser built from it is too, and leaving the lifetime open
         // would ask `parse_expr` to work for every parser rather than this one.
@@ -314,15 +302,7 @@ impl<'a, DB: Dialect> QueryWriter<'a, DB> {
             });
         }
 
-        let mut origins = HashMap::new();
-        placeholder::mark(&mut parsed, &mut self.next_marker, &mut origins);
-
-        let region = placeholder::region(&parsed.rendered(), &origins);
-        for (id, slot) in region.slots {
-            self.slots.insert(id, self.arity + slot);
-        }
-        self.origins.extend(origins);
-        self.arity += region.arity;
+        self.arity += placeholder::number(&mut parsed, self.arity);
 
         Ok(parsed)
     }
@@ -425,30 +405,6 @@ impl<DB: Dialect> fmt::Debug for QueryWriter<'_, DB> {
             .field("binds", &self.arity)
             .field("failure", &self.failure)
             .finish_non_exhaustive()
-    }
-}
-
-/// Renders a freshly parsed fragment, so its placeholders can be read back in
-/// the order they will print.
-///
-/// `Expr` has a `Display`; a list of `OrderByExpr` does not, because sqlparser
-/// only ever prints one inside a clause.
-trait Rendered {
-    fn rendered(&self) -> String;
-}
-
-impl Rendered for Expr {
-    fn rendered(&self) -> String {
-        self.to_string()
-    }
-}
-
-impl Rendered for Vec<OrderByExpr> {
-    fn rendered(&self) -> String {
-        self.iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 }
 

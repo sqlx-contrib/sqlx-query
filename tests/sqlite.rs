@@ -81,15 +81,15 @@ async fn a_filter_binds_its_own_value() {
     );
 }
 
-/// The case that decides whether replaying values is right.
+/// The case numbering exists for.
 ///
-/// The filter renders between `tenant_id = ?` and `LIMIT ?`, so the three
-/// values are wanted in the order tenant, role, limit -- but they were given
-/// as tenant, limit, role, because a fragment's values follow the base
-/// query's. Binding in the order they were given would put the page size on
-/// `role` and the string `admin` on `LIMIT`.
+/// The filter renders between `tenant_id = ?` and `LIMIT ?`. Left bare, the
+/// second placeholder in the text would be `role` while the second value given
+/// is the page size -- so the limit would land on `role` and `admin` on
+/// `LIMIT`. Numbering the output says which value each one means, and nothing
+/// has to be reordered.
 #[tokio::test]
-async fn values_are_replayed_in_the_order_the_statement_wants() {
+async fn numbering_keeps_each_value_on_its_own_placeholder() {
     let pool = seed().await;
 
     let mut writer = QueryWriter::<sqlx::Sqlite>::new(
@@ -104,7 +104,7 @@ async fn values_are_replayed_in_the_order_the_statement_wants() {
 
     assert_eq!(
         writer.sql().unwrap(),
-        "SELECT id, name FROM users WHERE tenant_id = ? AND role = ? ORDER BY id LIMIT ?"
+        "SELECT id, name FROM users WHERE tenant_id = ?1 AND role = ?3 ORDER BY id LIMIT ?2"
     );
 
     let users: Vec<User> = writer
@@ -134,7 +134,7 @@ async fn values_are_replayed_in_the_order_the_statement_wants() {
 /// The same shape, with a limit small enough that binding it to the wrong
 /// placeholder could not go unnoticed.
 #[tokio::test]
-async fn a_replayed_limit_still_limits() {
+async fn a_renumbered_limit_still_limits() {
     let pool = seed().await;
 
     let mut writer = QueryWriter::<sqlx::Sqlite>::new(

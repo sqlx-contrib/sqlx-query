@@ -23,12 +23,16 @@ pub trait Dialect: sqlx::Database<Arguments: sqlx::IntoArguments<Self>> + sealed
 
     /// Whether placeholders are bound by their position in the text.
     ///
-    /// `?` is: the third one in the statement takes the third value, so moving
-    /// it moves what it binds. `$N` is not: it names the *N*th value wherever
-    /// it appears, and may appear more than once or not at all.
+    /// MySQL's `?` is: the third one in the statement takes the third value,
+    /// so moving it moves what it binds, and it has no way to ask for a value
+    /// twice. PostgreSQL's `$N` and SQLite's `?N` are not: each names the
+    /// *N*th value wherever it appears, and may appear more than once or not
+    /// at all.
     ///
-    /// This is the difference that decides whether a rewrite which reorders
-    /// placeholders is harmless or is [`Error::Positional`](crate::Error::Positional).
+    /// This decides how the values are sent. A driver that numbers takes them
+    /// in the order they were given; one that does not takes them in the order
+    /// the finished statement renders, which is the only thing that says which
+    /// value each placeholder means.
     fn positional() -> bool;
 }
 
@@ -98,15 +102,17 @@ mod sqlite {
             &DIALECT
         }
 
-        // SQLite accepts `?NNN`, but only `?` is portable across the three
-        // drivers here and sqlx binds it the same way, so there is nothing to
-        // gain from the numbered form.
-        fn placeholder(_index: usize) -> String {
-            "?".to_owned()
+        // `?NNN`, not bare `?`. SQLite is the only one of the three whose
+        // placeholder can be both a question mark and numbered, which puts it
+        // on the same footing as PostgreSQL: a placeholder names the value it
+        // wants, so a fragment spliced ahead of it does not disturb it and
+        // nothing has to be replayed in a different order.
+        fn placeholder(index: usize) -> String {
+            format!("?{}", index + 1)
         }
 
         fn positional() -> bool {
-            true
+            false
         }
     }
 }

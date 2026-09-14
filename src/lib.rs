@@ -59,36 +59,41 @@
 //! run: `role = 'admin' OR 1=1` is well-formed. Fragments should be built from
 //! an allowlist of columns, with values bound rather than written in.
 //!
-//! # Placeholder numbering is not the same everywhere
+//! # Placeholders are numbered, then written back out
 //!
-//! Values are given in the order the placeholders claim them: the base query's
-//! first, then each fragment's. What happens next depends on the driver, and
-//! neither case is something you have to think about.
+//! Whatever the driver spells them as, placeholders are numbered on the way in
+//! and written back in that driver's form at the end. In between there is one
+//! kind of placeholder and the rewrite is arithmetic: a fragment's `$1` becomes
+//! `$3` because two values were claimed before it.
 //!
-//! PostgreSQL's `$N` names the *N*th bound value, so a fragment spliced ahead
-//! of a `$2` leaves it pointing at the same thing and only the fragment's own
-//! placeholders are renumbered:
+//! Values are given in the order the placeholders claim them -- the base
+//! query's first, then each fragment's. What comes out depends only on what the
+//! driver can say.
 //!
-//! ```text
-//! base      SELECT id FROM users WHERE tenant_id = $1 LIMIT $2
-//! fragment  role = $1
-//! result    SELECT id FROM users WHERE tenant_id = $1 AND role = $3 LIMIT $2
-//! ```
-//!
-//! MySQL's and SQLite's `?` takes a value per placeholder, in the order they
-//! appear, so the same rewrite leaves the values wanted in a different order
-//! than they were given. They are replayed to match:
+//! PostgreSQL's `$N` and SQLite's `?N` each name the value they want, so the
+//! numbering survives to the wire and a fragment spliced into the middle
+//! disturbs nothing:
 //!
 //! ```text
 //! base      SELECT id FROM users WHERE tenant_id = ? LIMIT ?
 //! fragment  role = ?
-//! result    SELECT id FROM users WHERE tenant_id = ? AND role = ? LIMIT ?
+//! sqlite    SELECT id FROM users WHERE tenant_id = ?1 AND role = ?3 LIMIT ?2
+//! postgres  SELECT id FROM users WHERE tenant_id = $1 AND role = $3 LIMIT $2
+//! ```
+//!
+//! MySQL has no numbered form -- `?1` is a syntax error and `$1` is read as a
+//! column -- so its placeholders go out bare and take a value each, in the
+//! order they appear. The values are sent in that order rather than the order
+//! they were given:
+//!
+//! ```text
+//! mysql     SELECT id FROM users WHERE tenant_id = ? AND role = ? LIMIT ?
 //! given     tenant, limit, role
 //! sent      tenant, role, limit
 //! ```
 //!
-//! The one thing `?` cannot express is a value wanted twice -- `$1` used in
-//! two places is ordinary in PostgreSQL and has no `?` equivalent. That is
+//! The one thing a bare `?` cannot express is a value wanted twice. `$1` or
+//! `?1` used in two places is ordinary elsewhere; on MySQL it is
 //! [`Error::Positional`].
 //!
 //! [sqlx]: https://github.com/launchbadge/sqlx

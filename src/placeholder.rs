@@ -1,112 +1,141 @@
-//! Placeholder bookkeeping.
+//! Placeholder numbering.
 //!
-//! A rewrite moves placeholders around, and both dialect families care about
-//! that in different ways, so every placeholder is replaced by a unique marker
-//! on the way in and written back out once the final statement is assembled.
+//! Every placeholder is numbered on the way in, whatever the driver wrote it
+//! as, and written back out in the driver's own form once the statement is
+//! assembled. In between there is one kind of placeholder and the rewrite does
+//! arithmetic on it: a fragment's `$1` becomes `$4` because three values were
+//! claimed before it, and that is the whole of it.
 //!
-//! The marker is what makes this a tree operation instead of a text one. Text
-//! has to decide whether the `$1` it just found is a placeholder or four
-//! characters inside a string literal; a marker was installed at a
-//! [`Value::Placeholder`] node, so nothing else can be mistaken for one.
+//! The number is not spelled `$4`, because the last step has to find it in the
+//! rendered SQL and a string literal is allowed to contain `$4`. It is spelled
+//! distinctively instead, so that the thing being searched for cannot occur by
+//! accident -- the numbering is the idea, and this is only how it is written.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 
-use sqlparser::ast::{Expr, Value, VisitMut, visit_expressions_mut};
+use sqlparser::ast::{Expr, OrderByExpr, Statement, Value, VisitMut, visit_expressions_mut};
 
 use crate::Error;
 use crate::dialect::Dialect;
 
-// Chosen to be something no one writes by accident: `$` keeps it lexing as a
-// placeholder in the dialects that have one, and the rest is not valid in an
-// identifier that anybody would reach for.
+/// A numbered placeholder, as it appears while the statement is being built.
 const PREFIX: &str = "$__sqlxq_";
 const SUFFIX: &str = "__";
 
-fn marker(id: usize) -> String {
-    format!("{PREFIX}{id}{SUFFIX}")
+/// The same, before the numbers are known: one per placeholder node, so they
+/// can be told apart while their order is being worked out.
+const TEMP: &str = "$__sqlxqt_";
+
+fn numbered(n: usize) -> String {
+    format!("{PREFIX}{n}{SUFFIX}")
 }
 
-/// Replaces every placeholder under `node` with a fresh marker, recording what
-/// each one used to say.
-///
-/// The original text is kept because it is what says which value the
-/// placeholder wanted: `$2` asks for the second, `?` asks for the next one.
-pub(crate) fn mark<V: VisitMut>(
-    node: &mut V,
-    next: &mut usize,
-    origins: &mut HashMap<usize, String>,
-) {
-    let _: ControlFlow<()> = visit_expressions_mut(node, |expr| {
-        if let Expr::Value(value) = expr
-            && let Value::Placeholder(text) = &mut value.value
-        {
-            let id = *next;
-            *next += 1;
-            origins.insert(id, std::mem::replace(text, marker(id)));
-        }
-        ControlFlow::Continue(())
-    });
+fn temporary(id: usize) -> String {
+    format!("{TEMP}{id}{SUFFIX}")
 }
 
-/// Finds every marker in `sql`, in the order it renders.
+/// Renders a node so its placeholders can be read in the order they print.
 ///
-/// Display order is the only order that matters -- it is what the database
-/// will see -- and it is not necessarily the order the markers were installed
-/// in, which is why this scans the rendered text rather than the tree.
-fn scan(sql: &str) -> Vec<(Range<usize>, usize)> {
+/// Display order is the order the database sees, and it is the only authority
+/// on it -- sqlparser's `Select` prints `top` before `distinct` or after it
+/// depending on a runtime flag, so no traversal of the tree can stand in for
+/// this.
+pub(crate) trait Render {
+    fn render(&self) -> String;
+}
+
+impl Render for Statement {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for Expr {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for Vec<OrderByExpr> {
+    fn render(&self) -> String {
+        self.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Finds every placeholder written with `prefix`, in the order it renders.
+fn scan(sql: &str, prefix: &str) -> Vec<(Range<usize>, usize)> {
     let mut found = Vec::new();
     let mut at = 0;
 
-    while let Some(offset) = sql[at..].find(PREFIX) {
+    while let Some(offset) = sql[at..].find(prefix) {
         let start = at + offset;
-        let digits = start + PREFIX.len();
+        let digits = start + prefix.len();
 
         let Some(end) = sql[digits..].find(SUFFIX) else {
             at = digits;
             continue;
         };
-        let Ok(id) = sql[digits..digits + end].parse::<usize>() else {
+        let Ok(n) = sql[digits..digits + end].parse::<usize>() else {
             at = digits;
             continue;
         };
 
         let stop = digits + end + SUFFIX.len();
-        found.push((start..stop, id));
+        found.push((start..stop, n));
         at = stop;
     }
 
     found
 }
 
-/// Which value each marker in one fragment -- or in the base query -- asks for,
-/// numbered from zero within that fragment.
-pub(crate) struct Region {
-    /// Marker id to the value it binds, relative to the start of the region.
-    pub(crate) slots: HashMap<usize, usize>,
-    /// How many values the region consumes.
-    pub(crate) arity: usize,
+/// Replaces every placeholder under `node`, handing each to `next`.
+fn rewrite<V: VisitMut>(node: &mut V, mut next: impl FnMut(&str) -> String) {
+    let _: ControlFlow<()> = visit_expressions_mut(node, |expr| {
+        if let Expr::Value(value) = expr
+            && let Value::Placeholder(text) = &mut value.value
+        {
+            *text = next(text);
+        }
+        ControlFlow::Continue(())
+    });
 }
 
-/// Reads a region's placeholder numbering out of its own rendered SQL.
+/// Numbers every placeholder under `node`, continuing from `base`, and returns
+/// how many values it claims.
 ///
-/// `$N` is taken at its word, so `$1` twice binds one value twice. `?` is
-/// counted, because that is all it says.
-pub(crate) fn region(rendered: &str, origins: &HashMap<usize, String>) -> Region {
-    let mut slots = HashMap::new();
+/// A placeholder that came in numbered is taken at its word, so `$2` asks for
+/// the second value of this fragment and `$1` twice asks for the first one
+/// twice. A bare `?` asks for the next one, counted in the order it renders.
+pub(crate) fn number<V: VisitMut + Render>(node: &mut V, base: usize) -> usize {
+    // Tell the nodes apart first. Which value each one wants depends on where
+    // it renders, and that is not known until it has been rendered.
+    let mut origins = HashMap::new();
+    let mut id = 0;
+    rewrite(node, |text| {
+        origins.insert(id, text.to_owned());
+        id += 1;
+        temporary(id - 1)
+    });
+
+    let mut slots: HashMap<usize, usize> = HashMap::new();
     let mut counted = 0;
     let mut named = 0;
 
-    for (_, id) in scan(rendered) {
-        let origin = origins.get(&id).map_or("?", String::as_str);
+    for (_, id) in scan(&node.render(), TEMP) {
+        // `$2` and SQLite's `?2` both say which value they want; a bare `?`
+        // says only that it wants one.
+        let asked = origins
+            .get(&id)
+            .and_then(|origin| origin.strip_prefix(['$', '?']))
+            .and_then(|digits| digits.parse::<usize>().ok());
 
-        let numbered = origin
-            .strip_prefix('$')
-            .and_then(|n| n.parse::<usize>().ok());
-
-        let slot = if let Some(n) = numbered {
+        let slot = if let Some(n) = asked {
             named = named.max(n);
-            n.saturating_sub(1)
+            n - 1
         } else {
             counted += 1;
             counted - 1
@@ -115,50 +144,46 @@ pub(crate) fn region(rendered: &str, origins: &HashMap<usize, String>) -> Region
         slots.insert(id, slot);
     }
 
-    Region {
-        arity: named.max(counted),
-        slots,
-    }
+    rewrite(node, |text| {
+        let id = text
+            .strip_prefix(TEMP)
+            .and_then(|rest| rest.strip_suffix(SUFFIX))
+            .and_then(|digits| digits.parse::<usize>().ok())
+            .expect("every placeholder was just given a temporary number");
+        numbered(base + slots[&id])
+    });
+
+    named.max(counted)
 }
 
-/// Writes the final placeholders into the assembled statement, and says which
-/// value each one takes.
+/// Writes the placeholders out in the driver's own form, and says which value
+/// each one takes.
 ///
-/// The returned slots are in render order, which is the order a `?` dialect
-/// binds in. Handing that back -- rather than insisting the rewrite produced
-/// it -- is what lets a fragment land in the middle of a query whose driver
-/// numbers placeholders by position: the values are bound in this order
-/// instead of the order they were given.
-///
-/// Every slot that was claimed still has to be somewhere in the statement, or
-/// a value was bound for a placeholder that no longer exists.
-pub(crate) fn write<DB: Dialect>(
-    sql: &str,
-    slots: &HashMap<usize, usize>,
-    arity: usize,
-) -> Result<(String, Vec<usize>), Error> {
-    let found = scan(sql);
-    let order: Vec<usize> = found.iter().map(|(_, id)| slots[id]).collect();
+/// The returned numbers are in render order. For a driver whose placeholder
+/// carries no number that is the order it binds in, so this is also what says
+/// how the values have to be sent.
+pub(crate) fn write<DB: Dialect>(sql: &str, arity: usize) -> Result<(String, Vec<usize>), Error> {
+    let found = scan(sql, PREFIX);
+    let order: Vec<usize> = found.iter().map(|(_, slot)| *slot).collect();
 
-    let present: HashSet<usize> = order.iter().copied().collect();
-    if present.len() != arity {
+    let distinct: HashSet<usize> = order.iter().copied().collect();
+    if distinct.len() != arity {
         return Err(Error::Orphaned);
     }
 
-    // `?` consumes a value per placeholder, so it has no way to say "the same
-    // one again". `$1` twice is fine and common; `?` twice for one value is
-    // not expressible, and quietly binding it twice would shift everything
-    // after it.
-    if DB::positional() && order.len() != present.len() {
+    // A placeholder with no number of its own takes a value per appearance and
+    // has no way to ask for an earlier one, so one value in two places cannot
+    // be written at all.
+    if DB::positional() && order.len() != distinct.len() {
         return Err(Error::Positional);
     }
 
     let mut out = String::with_capacity(sql.len());
     let mut at = 0;
 
-    for (span, id) in found {
+    for (span, slot) in found {
         out.push_str(&sql[at..span.start]);
-        out.push_str(&DB::placeholder(slots[&id]));
+        out.push_str(&DB::placeholder(slot));
         at = span.end;
     }
     out.push_str(&sql[at..]);
