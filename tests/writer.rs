@@ -328,7 +328,94 @@ mod postgres {
     /// of the query renumbers only itself.
     mod placeholders {
         use super::rewrite;
-        use sqlx_query::Error;
+        use sqlx::Postgres;
+        use sqlx_query::{Error, QueryWriter};
+
+        /// Counting is checked on the way to the driver, so a forgotten
+        /// fragment value is named here rather than surfacing from the driver
+        /// in its own terms.
+        #[test]
+        fn binding_too_few_values_is_refused() {
+            let mut writer =
+                QueryWriter::<Postgres>::new("SELECT id FROM t WHERE a = $1 AND b = $2").unwrap();
+            writer.bind(1_i64);
+
+            let Err(error) = writer.build() else {
+                panic!("expected an error")
+            };
+            assert!(
+                matches!(
+                    error,
+                    Error::Arity {
+                        wanted: 2,
+                        given: 1
+                    }
+                ),
+                "{error:?}"
+            );
+        }
+
+        #[test]
+        fn binding_too_many_values_is_refused() {
+            let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM t WHERE a = $1").unwrap();
+            writer.bind(1_i64).bind(2_i64);
+
+            let Err(error) = writer.build() else {
+                panic!("expected an error")
+            };
+            assert!(
+                matches!(
+                    error,
+                    Error::Arity {
+                        wanted: 1,
+                        given: 2
+                    }
+                ),
+                "{error:?}"
+            );
+        }
+
+        /// A fragment's values are counted too, so forgetting them is caught.
+        #[test]
+        fn forgetting_a_fragments_value_is_refused() {
+            let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM t WHERE a = $1").unwrap();
+            writer.bind(1_i64).filter_by("b = $1");
+
+            let Err(error) = writer.build() else {
+                panic!("expected an error")
+            };
+            assert!(
+                matches!(
+                    error,
+                    Error::Arity {
+                        wanted: 2,
+                        given: 1
+                    }
+                ),
+                "{error:?}"
+            );
+        }
+
+        /// `sql()` renders without the check, so a query can be inspected or
+        /// logged before anything is bound.
+        #[test]
+        fn rendering_does_not_require_the_values() {
+            let sql = rewrite("SELECT id FROM t WHERE a = $1", |w| {
+                w.filter_by("b = $1");
+            })
+            .unwrap();
+
+            assert_eq!(sql, "SELECT id FROM t WHERE a = $1 AND b = $2");
+        }
+
+        /// A base query that skips a number claims two values and uses one.
+        /// PostgreSQL refuses this as well, for the same reason.
+        #[test]
+        fn a_base_query_that_skips_a_number_is_refused() {
+            let error = rewrite("SELECT id FROM t WHERE a = $2", |_| {}).unwrap_err();
+
+            assert!(matches!(error, Error::Orphaned), "{error:?}");
+        }
 
         #[test]
         fn postgres_renumbers_the_fragment_and_leaves_the_base_alone() {

@@ -113,7 +113,8 @@ Every one of these is raised before the database is touched.
 | `Trailing`, `Fragment` | the fragment was not one complete expression |
 | `SetOperation` | the outermost level is a `UNION`, so there is no single `SELECT` to filter -- wrap it in `SELECT * FROM (...) AS t` |
 | `Grouped` | there is a `GROUP BY`, so a predicate could mean `WHERE` or `HAVING` and the fragment does not say which |
-| `Orphaned` | the rewrite removed a placeholder that still has a value bound to it |
+| `Arity` | the statement has a different number of placeholders than values bound |
+| `Orphaned` | a value has no placeholder to bind to -- the base query skips a number, or `limit()` replaced a `LIMIT` that held one |
 | `NotQuery`, `Query` | the base SQL was not a single parseable query |
 
 ## Status

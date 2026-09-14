@@ -309,8 +309,8 @@ impl<DB: Syntax> QueryWriter<DB> {
         // `AssertSqlSafe` is sqlx asking who vouches for a string built at
         // runtime. This crate does: every part of it was either the query the
         // caller wrote or a fragment that parsed, and each value is bound.
-        let sql = self.render()?;
-        Ok(sqlx::query_with(AssertSqlSafe(sql), self.arguments))
+        let (sql, arguments) = self.finish()?;
+        Ok(sqlx::query_with(AssertSqlSafe(sql), arguments))
     }
 
     /// As [`build`](Self::build), mapping rows to `O`.
@@ -322,8 +322,29 @@ impl<DB: Syntax> QueryWriter<DB> {
     where
         O: for<'r> FromRow<'r, DB::Row>,
     {
+        let (sql, arguments) = self.finish()?;
+        Ok(sqlx::query_as_with(AssertSqlSafe(sql), arguments))
+    }
+
+    /// Renders the statement and checks that it has as many values as it has
+    /// places to put them.
+    ///
+    /// Only on the way to the driver. [`sql`](Self::sql) renders without this,
+    /// so a query can be inspected or logged before anything is bound.
+    fn finish(self) -> Result<(String, DB::Arguments), Error> {
         let sql = self.render()?;
-        Ok(sqlx::query_as_with(AssertSqlSafe(sql), self.arguments))
+
+        // Counting is all a positional API can check. Two values of the same
+        // type given the wrong way round is still a silent mistake, and only
+        // naming the placeholders would catch it.
+        if self.arguments.len() != self.arity {
+            return Err(Error::Arity {
+                wanted: self.arity,
+                given: self.arguments.len(),
+            });
+        }
+
+        Ok((sql, self.arguments))
     }
 
     /// Assembles the statement.
@@ -696,13 +717,32 @@ pub enum Error {
     /// this one has to survive being reported from more than one call.
     Encode(String),
 
-    /// The rewrite removed a placeholder, leaving a value with nothing to bind
-    /// to.
+    /// The statement wants a different number of values than were bound.
     ///
-    /// [`limit`](crate::QueryWriter::limit) replaces the query's own `LIMIT`,
-    /// so a base query that said `LIMIT $2` loses `$2` -- and the driver would
-    /// then be handed one more value than the statement has places for. Take
-    /// the `LIMIT` out of the base query, or keep it and do not call `limit`.
+    /// Placeholders are claimed as they are parsed -- the base query's first,
+    /// then each fragment's -- and the values are given in that same order, so
+    /// a mismatch usually means a fragment's were forgotten or given twice.
+    ///
+    /// Counting is as far as this goes. Two values of the same type supplied
+    /// the wrong way round is still a silent mistake, and only naming the
+    /// placeholders rather than numbering them would catch it.
+    Arity {
+        /// How many placeholders the statement has.
+        wanted: usize,
+        /// How many values were bound.
+        given: usize,
+    },
+
+    /// Some value the statement asks for has no placeholder left to bind to.
+    ///
+    /// Two ways to arrive here. [`limit`](QueryWriter::limit) replaces the
+    /// query's own `LIMIT`, so a base query that said `LIMIT $2` loses `$2`
+    /// and the value bound for it has nowhere to go -- take the `LIMIT` out of
+    /// the base query, or keep it and do not call `limit`.
+    ///
+    /// Or the base query skipped a number: `WHERE a = $2` with no `$1` claims
+    /// two values and uses one. PostgreSQL refuses that too, for the same
+    /// reason.
     Orphaned,
 }
 
@@ -724,10 +764,16 @@ impl fmt::Display for Error {
                  to filter; wrap it in `SELECT * FROM (...) AS t` and rewrite that instead",
             ),
             Self::Encode(message) => write!(f, "a bound value could not be encoded: {message}"),
+            Self::Arity { wanted, given } => write!(
+                f,
+                "the statement has {wanted} placeholders but {given} values were bound; \
+                 values are given in the order the placeholders claim them, the base \
+                 query's first and then each fragment's",
+            ),
             Self::Orphaned => f.write_str(
-                "this rewrite removed a placeholder the base query had, which would leave a \
-                 bound value with nothing to bind to; if the base query ends in `LIMIT $n`, \
-                 either drop it or do not call `limit()`",
+                "a value this statement asks for has no placeholder to bind to: either the \
+                 base query skips a number, as `WHERE a = $2` does with no `$1`, or `limit()` \
+                 replaced a `LIMIT` that held one",
             ),
             Self::Grouped => f.write_str(
                 "the query has a GROUP BY, so a filter could mean WHERE or HAVING; \
