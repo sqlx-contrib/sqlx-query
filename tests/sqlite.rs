@@ -1,66 +1,39 @@
-//! Pagination against a real database.
+//! The rewrite against a real database.
 //!
-//! Everything else in this crate asserts on generated SQL, which proves the
-//! shape and not the behaviour. The property that matters cannot be checked
-//! that way: paging through a table has to visit every row exactly once,
-//! including rows that tie on the sort column.
-#![cfg(all(feature = "sqlite", feature = "cel"))]
+//! SQLite in memory, so this needs no server and runs everywhere the rest of
+//! the suite does. It is here to check the parts the string assertions cannot:
+//! that the SQL is accepted, that the values land on the placeholders they
+//! were meant for, and that `build` hands sqlx something it will execute.
 
-use sqlx::{AssertSqlSafe, Row as _, Sqlite, SqlitePool};
-use sqlx_query::{Column, ColumnType, Cursor, Filter, QueryMapping, QueryTemplate, Sort};
+#![cfg(feature = "sqlite")]
 
-/// Note `LIMIT 3` is a literal, not a bind. SQLite numbers placeholders by
-/// their position in the text, so a `?` after a slot would be shifted by
-/// whatever the slot splices in front of it -- which the crate now refuses
-/// rather than binding wrongly.
-const PAGE: &str = "SELECT id, title, read_count FROM volumes \
-                    WHERE tenant_id = ? \
-                    /* AND query.filter */ \
-                    /* ORDER BY query.order */ \
-                    LIMIT 3";
+use sqlx::{Row, SqlitePool};
+use sqlx_query::QueryWriter;
 
-fn mapping() -> QueryMapping {
-    QueryMapping::new()
-        .key("id", ColumnType::Int)
-        .column("title", ColumnType::Text)
-        .add("readCount", Column::new("read_count", ColumnType::Int))
-}
+const SCHEMA: &str = "
+    CREATE TABLE users (
+        id        INTEGER PRIMARY KEY,
+        tenant_id INTEGER NOT NULL,
+        name      TEXT    NOT NULL,
+        role      TEXT    NOT NULL
+    )
+";
 
 async fn seed() -> SqlitePool {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::query(SCHEMA).execute(&pool).await.unwrap();
 
-    sqlx::raw_sql(
-        "CREATE TABLE volumes (
-             id INTEGER PRIMARY KEY,
-             tenant_id INTEGER NOT NULL,
-             title TEXT NOT NULL,
-             read_count INTEGER NOT NULL
-         )",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // `read_count` ties deliberately: without a tiebreaker these rows have no
-    // defined order, which is the failure keyset pagination has to survive.
-    for (id, title, reads) in [
-        (1, "Alpha", 100),
-        (2, "Bravo", 100),
-        (3, "Charlie", 100),
-        (4, "Delta", 90),
-        (5, "Echo", 90),
-        (6, "Foxtrot", 80),
-        (7, "Golf", 80),
-        (8, "Hotel", 70),
-        (9, "India", 60),
-        // A different tenant, which must never appear.
-        (10, "Juliet", 999),
+    for (id, tenant, name, role) in [
+        (1, 1, "ada", "admin"),
+        (2, 1, "grace", "admin"),
+        (3, 1, "alan", "member"),
+        (4, 2, "edsger", "admin"),
     ] {
-        sqlx::query("INSERT INTO volumes (id, tenant_id, title, read_count) VALUES (?, ?, ?, ?)")
+        sqlx::query("INSERT INTO users (id, tenant_id, name, role) VALUES (?, ?, ?, ?)")
             .bind(id)
-            .bind(if id == 10 { 2_i64 } else { 1_i64 })
-            .bind(title)
-            .bind(reads)
+            .bind(tenant)
+            .bind(name)
+            .bind(role)
             .execute(&pool)
             .await
             .unwrap();
@@ -69,204 +42,125 @@ async fn seed() -> SqlitePool {
     pool
 }
 
-/// Page through with a small page size and check the concatenation against the
-/// same query run in one go.
-async fn page_through(pool: &SqlitePool, order_by: &str, filter: &str) -> Vec<i64> {
-    let template = QueryTemplate::<Sqlite>::parse(PAGE).unwrap();
-    let mapping = mapping();
+#[derive(sqlx::FromRow, Debug, PartialEq, Eq)]
+struct User {
+    id: i64,
+    name: String,
+}
 
-    let filter = Filter::parse(filter).unwrap().resolve(&mapping).unwrap();
-    let sort = Sort::parse(order_by)
+/// The base query's value and the fragment's are bound in that order, and each
+/// lands on its own placeholder -- the thing a renumbering bug would break
+/// without any SQL error to show for it.
+#[tokio::test]
+async fn a_filter_binds_its_own_value() {
+    let pool = seed().await;
+
+    let mut writer =
+        QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users WHERE tenant_id = ?").unwrap();
+    writer.bind(1_i64).filter_by("role = ?").bind("admin");
+
+    let users: Vec<User> = writer
+        .build_as::<User>()
         .unwrap()
-        .asc("id")
-        .resolve(&mapping)
+        .fetch_all(&pool)
+        .await
         .unwrap();
 
-    let mut cursor = Cursor::parse("").unwrap().resolve(&mapping).unwrap();
-    let mut seen = Vec::new();
-
-    loop {
-        let rows = template
-            .builder()
-            .bind(1_i64)
-            .filter(&filter)
-            .seek(&cursor)
-            .order(&sort)
-            .build()
-            .unwrap()
-            .fetch_all(pool)
-            .await
-            .unwrap();
-
-        let Some(last) = rows.last() else { break };
-
-        seen.extend(rows.iter().map(|row| row.get::<i64, _>("id")));
-
-        // The token for the next page, read out of the row by the mapping's
-        // own field-to-column mapping.
-        cursor = Cursor::new(&sort).after(last).unwrap();
-    }
-
-    seen
+    assert_eq!(
+        users,
+        vec![
+            User {
+                id: 1,
+                name: "ada".into()
+            },
+            User {
+                id: 2,
+                name: "grace".into()
+            },
+        ]
+    );
 }
 
-async fn all_at_once(pool: &SqlitePool, order_sql: &str, where_sql: &str) -> Vec<i64> {
-    sqlx::query(AssertSqlSafe(format!(
-        "SELECT id FROM volumes WHERE tenant_id = 1 {where_sql} ORDER BY {order_sql}"
-    )))
-    .fetch_all(pool)
-    .await
-    .unwrap()
-    .iter()
-    .map(|row| row.get::<i64, _>("id"))
-    .collect()
-}
-
+/// Ordering by the fragment first, with the base `ORDER BY id` behind it.
 #[tokio::test]
-async fn paging_visits_every_row_exactly_once() {
+async fn ordering_puts_the_fragment_first() {
     let pool = seed().await;
 
-    let paged = page_through(&pool, "readCount desc", "").await;
-    let whole = all_at_once(&pool, r#""read_count" DESC, "id" ASC"#, "").await;
+    let mut writer =
+        QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users ORDER BY id").unwrap();
+    writer.order_by("name asc");
 
-    assert_eq!(paged, whole);
-    assert_eq!(paged.len(), 9, "the other tenant's row leaked in");
-}
-
-/// Mixed directions are the case a row-value comparison cannot express, so the
-/// seek condition expands into an OR-chain. This is what proves the chain.
-#[tokio::test]
-async fn paging_survives_mixed_directions() {
-    let pool = seed().await;
-
-    let paged = page_through(&pool, "readCount asc", "").await;
-    let whole = all_at_once(&pool, r#""read_count" ASC, "id" ASC"#, "").await;
-
-    assert_eq!(paged, whole);
-}
-
-#[tokio::test]
-async fn paging_holds_with_a_filter_applied() {
-    let pool = seed().await;
-
-    let paged = page_through(&pool, "readCount desc", "readCount >= 80").await;
-    let whole = all_at_once(
-        &pool,
-        r#""read_count" DESC, "id" ASC"#,
-        "AND read_count >= 80",
-    )
-    .await;
-
-    assert_eq!(paged, whole);
-    assert_eq!(paged.len(), 7);
-}
-
-/// A LIKE needle containing a wildcard must match literally, not everything.
-#[tokio::test]
-async fn like_wildcards_in_a_filter_are_escaped() {
-    let pool = seed().await;
-
-    sqlx::query(
-        "INSERT INTO volumes (id, tenant_id, title, read_count) VALUES (11, 1, '100%', 50)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let paged = page_through(&pool, "readCount desc", "title.contains('100%')").await;
-
-    assert_eq!(paged, [11]);
-}
-
-// ---------------------------------------------------------------------------
-// Joins
-// ---------------------------------------------------------------------------
-
-/// A joined column needs `"a"."name"` in the `WHERE`, because SQL evaluates it
-/// before `SELECT` and the alias is not in scope there — while the cursor reads
-/// `author_name`, because that is what the returned row calls it. One field,
-/// two names, used in different places.
-const JOINED: &str = "SELECT v.id, v.title, a.name AS author_name \
-                      FROM volumes v JOIN authors a ON a.id = v.author_id \
-                      WHERE v.tenant_id = ? \
-                      /* AND query.filter */ \
-                      /* ORDER BY query.order */ \
-                      LIMIT 2";
-
-fn joined_mapping() -> QueryMapping {
-    QueryMapping::new()
-        .add("id", Column::key("id", ColumnType::Int).with_qualifier("v"))
-        .add(
-            "title",
-            Column::new("title", ColumnType::Text).with_qualifier("v"),
-        )
-        .add(
-            "authorName",
-            Column::new("name", ColumnType::Text)
-                .with_qualifier("a")
-                .with_alias("author_name"),
-        )
-}
-
-async fn seed_authors(pool: &SqlitePool) {
-    sqlx::raw_sql(
-        "CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
-         ALTER TABLE volumes ADD COLUMN author_id INTEGER NOT NULL DEFAULT 1;
-         INSERT INTO authors (id, name) VALUES (1, 'Herbert'), (2, 'Le Guin');
-         UPDATE volumes SET author_id = 2 WHERE id % 2 = 0;",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn a_join_pages_by_a_qualified_and_aliased_column() {
-    let pool = seed().await;
-    seed_authors(&pool).await;
-
-    let template = QueryTemplate::<Sqlite>::parse(JOINED).unwrap();
-    let mapping = joined_mapping();
-    let sort = Sort::parse("authorName desc")
+    let users: Vec<User> = writer
+        .build_as::<User>()
         .unwrap()
-        .asc("id")
-        .resolve(&mapping)
+        .fetch_all(&pool)
+        .await
         .unwrap();
 
-    let mut cursor = Cursor::parse("").unwrap().resolve(&mapping).unwrap();
-    let mut seen = Vec::new();
+    let names: Vec<&str> = users.iter().map(|u| u.name.as_str()).collect();
+    assert_eq!(names, ["ada", "alan", "edsger", "grace"]);
+}
 
-    loop {
-        let rows = template
-            .builder()
-            .bind(1_i64)
-            .seek(&cursor)
-            .order(&sort)
-            .build()
-            .unwrap()
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+#[tokio::test]
+async fn limit_applies() {
+    let pool = seed().await;
 
-        let Some(last) = rows.last() else { break };
+    let mut writer =
+        QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users ORDER BY id").unwrap();
+    writer.limit(2);
 
-        seen.extend(rows.iter().map(|row| row.get::<i64, _>("id")));
+    let users: Vec<User> = writer
+        .build_as::<User>()
+        .unwrap()
+        .fetch_all(&pool)
+        .await
+        .unwrap();
 
-        // Reads `author_name` from the row, not `a.name`.
-        cursor = Cursor::new(&sort).after(last).unwrap();
-    }
+    assert_eq!(users.len(), 2);
+}
 
-    let whole: Vec<i64> = sqlx::query(
-        "SELECT v.id FROM volumes v JOIN authors a ON a.id = v.author_id \
-         WHERE v.tenant_id = 1 ORDER BY a.name DESC, v.id ASC",
+/// The `OR` case, executed rather than compared as text. Without the
+/// parentheses this returns every admin in every tenant, which is a data leak
+/// and not a syntax error -- nothing in the SQL would look wrong.
+#[tokio::test]
+async fn an_or_in_the_base_query_keeps_its_grouping() {
+    let pool = seed().await;
+
+    let mut writer = QueryWriter::<sqlx::Sqlite>::new(
+        "SELECT id, name FROM users WHERE name = 'edsger' OR name = 'alan'",
     )
-    .fetch_all(&pool)
-    .await
-    .unwrap()
-    .iter()
-    .map(|row| row.get::<i64, _>("id"))
-    .collect();
+    .unwrap();
+    writer.filter_by("tenant_id = ?").bind(1_i64);
 
-    assert_eq!(seen, whole);
-    assert_eq!(seen.len(), 9);
+    let users: Vec<User> = writer
+        .build_as::<User>()
+        .unwrap()
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+    // Only alan: edsger is in tenant 2, and the tenant filter applies to both
+    // sides of the OR rather than just the last one.
+    assert_eq!(
+        users,
+        vec![User {
+            id: 3,
+            name: "alan".into()
+        }]
+    );
+}
+
+/// `build` rather than `build_as`, to cover the other constructor.
+#[tokio::test]
+async fn build_returns_a_runnable_query() {
+    let pool = seed().await;
+
+    let mut writer =
+        QueryWriter::<sqlx::Sqlite>::new("SELECT count(*) AS n FROM users WHERE tenant_id = ?")
+            .unwrap();
+    writer.bind(1_i64);
+
+    let row = writer.build().unwrap().fetch_one(&pool).await.unwrap();
+
+    assert_eq!(row.get::<i64, _>("n"), 3);
 }

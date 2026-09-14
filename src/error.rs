@@ -1,147 +1,128 @@
-//! The one error type this crate returns.
-
+use std::error::Error as StdError;
 use std::fmt;
 
-use sqlx::error::BoxDynError;
+use sqlparser::parser::ParserError;
 
-/// Anything that can go wrong turning a skeleton and some fragments into a
-/// query.
-#[derive(Debug)]
+/// What can go wrong between a query you wrote and the one that runs.
+///
+/// Every variant is raised before the database is touched: a rewrite either
+/// produces a statement this crate is willing to vouch for, or it produces
+/// this.
+// `Clone` so that a rewrite which failed while the chain was still being built
+// can report the same failure from every later `sql()` or `build()`, rather
+// than reporting it once and then appearing to succeed.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
-    /// The skeleton could not be parsed: a malformed sentinel, an unterminated
-    /// literal or comment, or the same slot declared twice.
+    /// The base query did not parse.
+    Query(ParserError),
+
+    /// A fragment did not parse as SQL.
     ///
-    /// `offset` is a byte offset into the skeleton. It points at the *start* of
-    /// the construct that went wrong, not at the character that proved it, so
-    /// that an unterminated literal points at its opening quote.
-    Template {
-        /// What went wrong.
-        message: String,
-        /// Byte offset into the skeleton.
-        offset: usize,
+    /// The fragment is carried along because the caller usually did not write
+    /// it by hand -- it arrived from a filter compiler, and the text is the
+    /// only way to see what that compiler emitted.
+    Fragment {
+        /// The fragment as given.
+        fragment: String,
+        /// Why the parser rejected it.
+        source: ParserError,
     },
 
-    /// A slot was filled that the skeleton does not declare.
+    /// A fragment parsed, but only a prefix of it was an expression.
     ///
-    /// The available names come along because the cause is nearly always a
-    /// typo, and the fix is visible from the list.
-    UnknownSlot {
-        /// The name that was asked for.
-        asked: String,
-        /// Every slot the skeleton declares.
-        available: Vec<String>,
+    /// This is the variant that makes fragments safe to accept as text.
+    /// `role = 'admin'` parses and consumes everything; `role = 'admin';
+    /// DROP TABLE users` parses an expression and leaves a statement behind,
+    /// and that leftover is refused here rather than spliced.
+    Trailing {
+        /// The fragment as given.
+        fragment: String,
+        /// The first token that was not part of the expression.
+        rest: String,
     },
 
-    /// A CEL filter, or a constant inside one, could not be parsed.
-    Parse(String),
+    /// The base SQL was not a query, so there is no `WHERE` to add to.
+    NotQuery,
 
-    /// A comparison the mapping says cannot work.
-    TypeMismatch(String),
-
-    /// A construct with no faithful SQL lowering.
+    /// The base query's outermost level is a `UNION`, `INTERSECT` or `EXCEPT`.
     ///
-    /// Rejected rather than approximated: a filter that quietly means something
-    /// else is worse than one that does not run.
-    Unsupported(String),
+    /// There is no single `SELECT` to attach a filter to, and picking one of
+    /// the branches would silently filter half the result. Wrap the set
+    /// operation in an outer `SELECT ... FROM (...) AS t` and rewrite that.
+    SetOperation,
 
-    /// An `order_by` string could not be parsed.
-    Sort(String),
-
-    /// A request named a column the mapping does not expose.
+    /// The base query has a `GROUP BY`, so a filter is ambiguous.
     ///
-    /// Carries the request-facing path, not the database name: the caller has
-    /// no idea what the latter is, and telling them would export the mapping.
-    UnknownColumn(String),
+    /// A predicate over a grouping column belongs in `WHERE`, one over an
+    /// aggregate belongs in `HAVING`, and the two run at different times
+    /// against different rows. Nothing in the fragment says which was meant.
+    Grouped,
 
-    /// A page token was malformed, or does not belong to this request.
-    Cursor(String),
-
-    /// A keyset was asked to page through an ordering that is not total.
+    /// A bound value could not be encoded for this driver.
     ///
-    /// Without a unique column among its keys, a cursor cannot name an exact
-    /// row, and pagination silently skips or repeats rows that tie.
-    NotUnique(String),
+    /// Carried as text because sqlx's own encode error is not `Clone`, and
+    /// this one has to survive being reported from more than one call.
+    Encode(String),
 
-    /// A column could not be read from a row.
+    /// The rewrite removed a placeholder, leaving a value with nothing to bind
+    /// to.
     ///
-    /// Usually because it was not in the `SELECT` list: a sort key's column has
-    /// to come back with the row for a page token to be built from it.
-    Column(String),
+    /// [`limit`](crate::QueryWriter::limit) replaces the query's own `LIMIT`,
+    /// so a base query that said `LIMIT $2` loses `$2` -- and the driver would
+    /// then be handed one more value than the statement has places for. Take
+    /// the `LIMIT` out of the base query, or keep it and do not call `limit`.
+    Orphaned,
 
-    /// A splice that only numbered placeholders can express was attempted on a
-    /// driver that numbers them positionally.
+    /// The rewrite would have reordered the values bound to a `?` dialect.
     ///
-    /// MySQL and SQLite bind `?` by its position in the text, so anything
-    /// spliced ahead of a `?` moves it onto the wrong value. PostgreSQL binds
-    /// `$N` by index and is unaffected, which is why this is a driver-specific
-    /// error rather than a rule everywhere.
-    Positional(String),
-
-    /// Something was used before it was resolved against a mapping.
-    ///
-    /// A sort or a filter arrives from a request as field paths; `resolve`
-    /// turns those into columns. Rendering one that skipped that step would
-    /// have nothing to render against.
-    Unresolved,
-
-    /// A driver refused to encode a bind value.
-    Encode(BoxDynError),
+    /// MySQL and SQLite number placeholders by position in the text, so a
+    /// fragment spliced ahead of an existing `?` shifts every one after it.
+    /// PostgreSQL's `$N` names the *N*th bound value instead, so it is immune
+    /// and never raises this.
+    Positional,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Template { message, offset } => {
-                write!(f, "invalid query template at byte {offset}: {message}")
+            Self::Query(source) => write!(f, "the query did not parse: {source}"),
+            Self::Fragment { fragment, source } => {
+                write!(f, "the fragment `{fragment}` did not parse: {source}")
             }
-            Self::UnknownSlot { asked, available } if available.is_empty() => {
-                write!(f, "no slot named `{asked}`: this template declares none")
-            }
-            Self::UnknownSlot { asked, available } => {
-                write!(f, "no slot named `{asked}`: expected one of {}", {
-                    available
-                        .iter()
-                        .map(|name| format!("`{name}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-            }
-            Self::Sort(message) => write!(f, "invalid order_by: {message}"),
-            Self::UnknownColumn(field) => {
-                write!(f, "no such sortable or filterable field: `{field}`")
-            }
-            Self::Parse(message) => write!(f, "invalid filter: {message}"),
-            Self::TypeMismatch(message) => write!(f, "type mismatch: {message}"),
-            Self::Unsupported(message) => write!(f, "unsupported filter: {message}"),
-            Self::Column(message) => write!(f, "cannot read column: {message}"),
-            Self::Cursor(message) => write!(f, "invalid page token: {message}"),
-            Self::NotUnique(message) => write!(f, "cannot paginate: {message}"),
-            Self::Positional(message) => {
-                write!(f, "this driver uses positional `?` placeholders: {message}")
-            }
-            Self::Unresolved => {
-                f.write_str("used before being resolved against a mapping: call `resolve` first")
-            }
-            Self::Encode(error) => write!(f, "failed to encode a bind value: {error}"),
+            Self::Trailing { fragment, rest } => write!(
+                f,
+                "the fragment `{fragment}` is an expression followed by `{rest}`; \
+                 a fragment has to be one complete expression and nothing else",
+            ),
+            Self::NotQuery => f.write_str("the SQL is not a query, so it has no WHERE to add to"),
+            Self::SetOperation => f.write_str(
+                "the query's outermost level is a set operation, which has no single SELECT \
+                 to filter; wrap it in `SELECT * FROM (...) AS t` and rewrite that instead",
+            ),
+            Self::Encode(message) => write!(f, "a bound value could not be encoded: {message}"),
+            Self::Orphaned => f.write_str(
+                "this rewrite removed a placeholder the base query had, which would leave a \
+                 bound value with nothing to bind to; if the base query ends in `LIMIT $n`, \
+                 either drop it or do not call `limit()`",
+            ),
+            Self::Grouped => f.write_str(
+                "the query has a GROUP BY, so a filter could mean WHERE or HAVING; \
+                 put the predicate in the query itself",
+            ),
+            Self::Positional => f.write_str(
+                "this rewrite moves a `?` placeholder, which would rebind it to the wrong \
+                 value; bind the values the base query needs after the ones the fragments do, \
+                 or use PostgreSQL, whose `$N` is not positional",
+            ),
         }
     }
 }
 
-impl Error {
-    /// Shorthand for the scanner.
-    pub(crate) fn template(message: impl Into<String>, offset: usize) -> Self {
-        Self::Template {
-            message: message.into(),
-            offset,
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Self::Encode(error) => Some(&**error),
+            Self::Query(source) | Self::Fragment { source, .. } => Some(source),
             _ => None,
         }
     }
