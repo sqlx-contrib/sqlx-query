@@ -54,6 +54,12 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+# Shows the same code against both drivers, so it needs both. Without this the
+# per-driver lint pass tries to build it with one and fails.
+[[example]]
+name = "listing"
+required-features = ["postgres", "sqlite"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
