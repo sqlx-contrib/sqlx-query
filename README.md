@@ -79,8 +79,8 @@ since it only names columns.
 
 ## Filters
 
-Behind the `cel` feature. A request's `filter` is [CEL], as [AIP-160] describes
-it, resolved against the same column map a `Sort` uses.
+A request's `filter` is [CEL], as [AIP-160] describes it, resolved against the
+same column map a `Sort` uses.
 
 ```rust
 let filter = Filter::parse(&request.filter)?   // readCount > 100 && title.startsWith("D")

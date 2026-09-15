@@ -703,8 +703,7 @@ mod postgres {
         }
     }
 
-    /// CEL filters. Gated on the feature, since `Filter` is.
-    #[cfg(feature = "cel")]
+    /// CEL filters.
     mod filtering {
         use sqlx::Postgres;
         use sqlx_query::{Error, Filter, QueryWriter};
@@ -1517,7 +1516,6 @@ mod sqlite {
 
         /// A filter's values reach the database as values. The SQL is the
         /// same whatever the client searched for, which is the point.
-        #[cfg(feature = "cel")]
         #[tokio::test]
         async fn a_filter_binds_its_values() {
             use sqlx_query::Filter;
@@ -1551,7 +1549,6 @@ mod sqlite {
         /// The case escaping exists for. Searching for a name beginning `50%`
         /// must not match every name beginning `50` -- and only a database can
         /// say whether the escape was written correctly.
-        #[cfg(feature = "cel")]
         #[tokio::test]
         async fn a_wildcard_in_a_search_term_is_not_a_wildcard() {
             use sqlx_query::Filter;
@@ -1593,7 +1590,7 @@ mod sqlite {
         /// A date reaches the database as a date. SQLite has no timestamp
         /// type -- sqlx stores a `DateTime<Utc>` as ISO-8601 text -- so this
         /// is also the check that the comparison still orders correctly.
-        #[cfg(all(feature = "cel", feature = "chrono"))]
+        #[cfg(feature = "chrono")]
         #[tokio::test]
         async fn a_date_filter_selects_by_date() {
             use sqlx_query::Filter;

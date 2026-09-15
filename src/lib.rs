@@ -138,14 +138,12 @@ compile_error!(
      Without one there is no syntax to parse with and no `Arguments` to bind against."
 );
 
-#[cfg(feature = "cel")]
-mod filter;
+mod syntax;
 mod writer;
 
-#[cfg(feature = "cel")]
-#[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
-pub use filter::Filter;
-pub use writer::{
-    Error, FilterExpr, IntoFilterExpr, IntoSortExpr, Literal, QueryWriter, Sort, SortDirection,
-    SortExpr, SortKey, Syntax,
+pub use syntax::Filter;
+pub use syntax::{
+    Error, FilterExpr, IntoFilterExpr, IntoSortExpr, Literal, Sort, SortDirection, SortExpr,
+    SortKey, Syntax,
 };
+pub use writer::QueryWriter;
