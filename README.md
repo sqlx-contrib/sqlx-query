@@ -77,6 +77,55 @@ so forgetting the step cannot quietly skip the allowlist. A fragment may also
 order by an expression -- `sort("lower(name) asc")` -- which a `Sort` cannot,
 since it only names columns.
 
+## Filters
+
+Behind the `cel` feature. A request's `filter` is [CEL], as [AIP-160] describes
+it, resolved against the same column map a `Sort` uses.
+
+```rust
+let filter = Filter::parse(&request.filter)?   // readCount > 100 && title.startsWith("D")
+    .resolve(&columns)?;
+
+writer.bind(tenant).filter(&filter).sort(&sort).limit(50);
+```
+
+```sql
+SELECT id, title, read_count FROM volumes WHERE tenant_id = $1
+  AND "read_count" > $2 AND "title" LIKE $3 ESCAPE '!'
+ORDER BY "read_count" DESC, "id" ASC
+LIMIT 50
+```
+
+Values are bound, never written into the SQL. That is not only about escaping
+-- sqlparser escapes what it prints -- but about the query text staying the
+same whatever the client searched for, so a prepared statement cache has
+something to reuse.
+
+| CEL | SQL |
+| --- | --- |
+| `==` `!=` `<` `<=` `>` `>=` | the same, either argument order |
+| `&&` `\|\|` `!` | `AND` `OR` `NOT`, parenthesised only where precedence needs it |
+| `field == null` | `IS NULL` -- nothing equals null in SQL, including null |
+| `field in [a, b]` | `IN ($1, $2)` |
+| `startsWith` `endsWith` `contains` | `LIKE` with the pattern escaped and bound |
+| a bare field | the column, for one that is already boolean |
+| `timestamp("…")` | an RFC 3339 date, bound -- needs the `chrono` feature |
+
+Refused rather than guessed at: arithmetic, macros, comparing two literals,
+`matches()` (regex is dialect-specific), and `in []` (which matches nothing).
+
+A date is parsed where the request is handled, so `timestamp("soon")` is
+refused there rather than surfacing later as a database complaint about a
+column nobody mentioned. Without the `chrono` feature, `timestamp()` is simply
+a call the language does not have.
+
+SQLite has no timestamp type -- sqlx stores a date as ISO-8601 text -- so the
+comparison is over text there. That is right for a column sqlx itself wrote,
+and wrong for one holding epoch integers, which nothing here can tell apart.
+
+[CEL]: https://github.com/google/cel-spec
+[AIP-160]: https://google.aip.dev/160
+
 ## Why a tree and not a template
 
 The query above has no holes, no markers and no escaping. That is the point: a
@@ -163,6 +212,7 @@ Every one of these is raised before the database is touched.
 | `Arity` | the statement has a different number of placeholders than values bound |
 | `Orphaned` | a value has no placeholder to bind to -- the base query skips a number, or `limit()` replaced a `LIMIT` that held one |
 | `Sort` | an `order_by` value did not parse |
+| `Filter` | a `filter` value did not parse, or asked for something with no meaning as SQL |
 | `Field` | a request named a field the column map does not have |
 | `Unresolved` | a `Sort` reached the query still holding field names |
 | `NotQuery`, `Query` | the base SQL was not a single parseable query |

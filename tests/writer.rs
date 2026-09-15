@@ -703,6 +703,282 @@ mod postgres {
         }
     }
 
+    /// CEL filters. Gated on the feature, since `Filter` is.
+    #[cfg(feature = "cel")]
+    mod filtering {
+        use sqlx::Postgres;
+        use sqlx_query::{Error, Filter, QueryWriter};
+        use std::collections::HashMap;
+
+        fn columns() -> HashMap<&'static str, &'static str> {
+            HashMap::from([
+                ("readCount", "read_count"),
+                ("title", "title"),
+                ("visible", "visible"),
+                ("tier", "t.tier"),
+                ("created", "created_at"),
+            ])
+        }
+
+        /// The condition alone, which is all these are about.
+        fn filtered(cel: &str) -> Result<String, Error> {
+            let filter = Filter::parse(cel)?.resolve(&columns())?;
+            let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM v")?;
+            writer.filter(&filter);
+
+            Ok(writer
+                .sql()?
+                .trim_start_matches("SELECT id FROM v")
+                .trim_start()
+                .trim_start_matches("WHERE ")
+                .to_owned())
+        }
+
+        #[test]
+        fn comparisons_become_the_operators_they_name() {
+            for (cel, sql) in [
+                ("readCount == 1", r#""read_count" = $1"#),
+                ("readCount != 1", r#""read_count" <> $1"#),
+                ("readCount < 1", r#""read_count" < $1"#),
+                ("readCount <= 1", r#""read_count" <= $1"#),
+                ("readCount > 1", r#""read_count" > $1"#),
+                ("readCount >= 1", r#""read_count" >= $1"#),
+            ] {
+                assert_eq!(filtered(cel).unwrap(), sql, "{cel}");
+            }
+        }
+
+        /// `100 < readCount` says the same as `readCount > 100`, and a request
+        /// may write it either way round.
+        #[test]
+        fn a_comparison_reads_in_either_order() {
+            assert_eq!(filtered("100 < readCount").unwrap(), r#""read_count" < $1"#);
+        }
+
+        #[test]
+        fn a_bare_field_is_the_column_itself() {
+            assert_eq!(filtered("visible").unwrap(), r#""visible""#);
+        }
+
+        #[test]
+        fn a_qualified_column_is_quoted_in_parts() {
+            assert_eq!(filtered(r#"tier == "gold""#).unwrap(), r#""t"."tier" = $1"#);
+        }
+
+        /// Nothing equals null in SQL, including null, so the obvious
+        /// translation would match nothing at all.
+        #[test]
+        fn comparing_to_null_becomes_is_null() {
+            assert_eq!(
+                filtered("readCount == null").unwrap(),
+                r#""read_count" IS NULL"#
+            );
+            assert_eq!(
+                filtered("readCount != null").unwrap(),
+                r#""read_count" IS NOT NULL"#
+            );
+        }
+
+        #[test]
+        fn a_list_becomes_in() {
+            assert_eq!(
+                filtered("readCount in [1, 2, 3]").unwrap(),
+                r#""read_count" IN ($1, $2, $3)"#
+            );
+        }
+
+        #[test]
+        fn the_string_methods_become_like() {
+            for cel in [
+                r#"title.startsWith("D")"#,
+                r#"title.endsWith("D")"#,
+                r#"title.contains("D")"#,
+            ] {
+                assert_eq!(
+                    filtered(cel).unwrap(),
+                    r#""title" LIKE $1 ESCAPE '!'"#,
+                    "{cel}"
+                );
+            }
+        }
+
+        // -- shape ----------------------------------------------------------
+
+        /// Only an `OR` under an `AND` needs parentheses; anything else would
+        /// be noise in SQL someone has to read.
+        #[test]
+        fn parentheses_appear_only_where_precedence_needs_them() {
+            assert_eq!(
+                filtered("readCount > 1 && visible").unwrap(),
+                r#""read_count" > $1 AND "visible""#
+            );
+            // On its own an `OR` is the whole clause, so it needs nothing.
+            assert_eq!(
+                filtered("readCount > 1 || visible").unwrap(),
+                r#""read_count" > $1 OR "visible""#
+            );
+            assert_eq!(
+                filtered(r#"readCount > 1 && (title == "a" || title == "b")"#).unwrap(),
+                r#""read_count" > $1 AND ("title" = $2 OR "title" = $3)"#
+            );
+        }
+
+        /// But joined onto a condition the query already had, it does -- `AND`
+        /// binds tighter, and without them the query would mean something else.
+        #[test]
+        fn an_or_is_parenthesised_when_it_joins_an_existing_where() {
+            let filter = Filter::parse("readCount > 1 || visible")
+                .unwrap()
+                .resolve(&columns())
+                .unwrap();
+            let mut writer =
+                QueryWriter::<Postgres>::new("SELECT id FROM v WHERE tenant = $1").unwrap();
+            writer.bind(7_i64).filter(&filter);
+
+            assert_eq!(
+                writer.sql().unwrap(),
+                r#"SELECT id FROM v WHERE tenant = $1 AND ("read_count" > $2 OR "visible")"#
+            );
+        }
+
+        #[test]
+        fn not_wraps_only_a_joined_condition() {
+            assert_eq!(filtered("!visible").unwrap(), r#"NOT "visible""#);
+            assert_eq!(
+                filtered("!(visible && readCount > 1)").unwrap(),
+                r#"NOT ("visible" AND "read_count" > $1)"#
+            );
+        }
+
+        /// An absent filter adds no condition, rather than a `TRUE` for the
+        /// planner to discard and a reader to wonder about.
+        #[test]
+        fn a_blank_filter_adds_nothing() {
+            let filter = Filter::parse("").unwrap().resolve(&columns()).unwrap();
+            let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM v").unwrap();
+            writer.filter(&filter);
+
+            assert!(filter.is_empty());
+            assert_eq!(writer.sql().unwrap(), "SELECT id FROM v");
+        }
+
+        /// A filter's placeholders continue from whatever the query already
+        /// claimed, like any other fragment's.
+        #[test]
+        fn values_are_numbered_after_the_querys_own() {
+            let filter = Filter::parse("readCount > 1 && title == \"a\"")
+                .unwrap()
+                .resolve(&columns())
+                .unwrap();
+            let mut writer =
+                QueryWriter::<Postgres>::new("SELECT id FROM v WHERE tenant = $1").unwrap();
+            writer.bind(7_i64).filter(&filter);
+
+            assert_eq!(
+                writer.sql().unwrap(),
+                r#"SELECT id FROM v WHERE tenant = $1 AND "read_count" > $2 AND "title" = $3"#
+            );
+        }
+
+        // -- timestamps ------------------------------------------------------
+
+        /// The one call that is a value rather than a condition.
+        #[cfg(feature = "chrono")]
+        #[test]
+        fn timestamp_folds_into_a_bound_value() {
+            assert_eq!(
+                filtered(r#"created > timestamp("2024-01-01T00:00:00Z")"#).unwrap(),
+                r#""created_at" > $1"#
+            );
+        }
+
+        /// Parsed where the request is handled, rather than passed through to
+        /// surface later as a database complaint about a column nobody
+        /// mentioned.
+        #[cfg(feature = "chrono")]
+        #[test]
+        fn a_date_that_is_not_a_date_is_refused() {
+            let error = filtered(r#"created > timestamp("soon")"#).unwrap_err();
+            assert!(matches!(error, Error::Filter(_)), "{error:?}");
+        }
+
+        #[cfg(feature = "chrono")]
+        #[test]
+        fn timestamp_takes_exactly_one_string() {
+            for cel in [
+                "created > timestamp()",
+                r#"created > timestamp("a", "b")"#,
+                "created > timestamp(created)",
+            ] {
+                assert!(
+                    matches!(filtered(cel), Err(Error::Filter(_))),
+                    "{cel} was accepted"
+                );
+            }
+        }
+
+        /// Without the feature there is no date to fold into, so it is simply
+        /// a call the language does not have -- not a silent pass-through.
+        #[cfg(not(feature = "chrono"))]
+        #[test]
+        fn timestamp_is_not_a_call_this_language_has() {
+            let error = filtered(r#"created > timestamp("2024-01-01T00:00:00Z")"#).unwrap_err();
+            assert!(matches!(error, Error::Filter(_)), "{error:?}");
+        }
+
+        // -- refusals --------------------------------------------------------
+
+        /// The reason the allowlist exists: a request cannot filter on a
+        /// column the query did not offer.
+        #[test]
+        fn a_field_the_map_does_not_name_is_refused() {
+            let error = Filter::parse(r#"password_hash == "x""#)
+                .unwrap()
+                .resolve(&columns())
+                .unwrap_err();
+
+            assert!(
+                matches!(&error, Error::Field(field) if field == "password_hash"),
+                "{error:?}"
+            );
+        }
+
+        #[test]
+        fn an_unresolved_filter_never_reaches_the_query() {
+            let filter = Filter::parse("visible").unwrap();
+            let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM v").unwrap();
+            writer.filter(&filter);
+
+            assert!(matches!(writer.sql(), Err(Error::Unresolved)));
+        }
+
+        #[test]
+        fn what_has_no_meaning_as_a_condition_is_refused() {
+            for cel in [
+                "readCount + 1 > 2",          // arithmetic
+                "1 == 1",                     // two literals
+                "readCount",                  // fine, but see below
+                r#"readCount.matches("^D")"#, // regex, which is dialect-specific
+                "readCount in []",            // matches nothing
+                "[1, 2]",                     // not a condition at all
+            ] {
+                if cel == "readCount" {
+                    continue;
+                }
+                assert!(
+                    matches!(filtered(cel), Err(Error::Filter(_) | Error::Field(_))),
+                    "{cel} was accepted"
+                );
+            }
+        }
+
+        #[test]
+        fn cel_that_does_not_parse_is_refused() {
+            let error = Filter::parse("readCount >").unwrap_err();
+            assert!(matches!(error, Error::Filter(_)), "{error:?}");
+        }
+    }
+
     /// `$N` names the value it wants, so a fragment spliced into the middle
     /// of the query renumbers only itself.
     mod placeholders {
@@ -1237,6 +1513,131 @@ mod sqlite {
                     name: "alan".into()
                 }]
             );
+        }
+
+        /// A filter's values reach the database as values. The SQL is the
+        /// same whatever the client searched for, which is the point.
+        #[cfg(feature = "cel")]
+        #[tokio::test]
+        async fn a_filter_binds_its_values() {
+            use sqlx_query::Filter;
+            let pool = seed().await;
+
+            let columns = std::collections::HashMap::from([
+                ("role", "role"),
+                ("name", "name"),
+                ("tenantId", "tenant_id"),
+            ]);
+            let filter = Filter::parse(r#"role == "admin" && tenantId == 1"#)
+                .unwrap()
+                .resolve(&columns)
+                .unwrap();
+
+            let mut writer =
+                QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users ORDER BY id").unwrap();
+            writer.filter(&filter);
+
+            let users: Vec<User> = writer
+                .build_as::<User>()
+                .unwrap()
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+            let names: Vec<&str> = users.iter().map(|u| u.name.as_str()).collect();
+            assert_eq!(names, ["ada", "grace"]);
+        }
+
+        /// The case escaping exists for. Searching for a name beginning `50%`
+        /// must not match every name beginning `50` -- and only a database can
+        /// say whether the escape was written correctly.
+        #[cfg(feature = "cel")]
+        #[tokio::test]
+        async fn a_wildcard_in_a_search_term_is_not_a_wildcard() {
+            use sqlx_query::Filter;
+            let pool = seed().await;
+
+            for (id, name) in [(10, "50% off"), (11, "5000 off"), (12, "a_b"), (13, "axb")] {
+                sqlx::query("INSERT INTO users (id, tenant_id, name, role) VALUES (?, 1, ?, 'x')")
+                    .bind(id)
+                    .bind(name)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+
+            let columns = std::collections::HashMap::from([("name", "name")]);
+
+            for (cel, expected) in [
+                (r#"name.startsWith("50%")"#, vec!["50% off"]),
+                (r#"name.contains("a_b")"#, vec!["a_b"]),
+            ] {
+                let filter = Filter::parse(cel).unwrap().resolve(&columns).unwrap();
+                let mut writer =
+                    QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users ORDER BY id")
+                        .unwrap();
+                writer.filter(&filter);
+
+                let users: Vec<User> = writer
+                    .build_as::<User>()
+                    .unwrap()
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+
+                let names: Vec<&str> = users.iter().map(|u| u.name.as_str()).collect();
+                assert_eq!(names, expected, "{cel}");
+            }
+        }
+
+        /// A date reaches the database as a date. SQLite has no timestamp
+        /// type -- sqlx stores a `DateTime<Utc>` as ISO-8601 text -- so this
+        /// is also the check that the comparison still orders correctly.
+        #[cfg(all(feature = "cel", feature = "chrono"))]
+        #[tokio::test]
+        async fn a_date_filter_selects_by_date() {
+            use sqlx_query::Filter;
+            let pool = seed().await;
+
+            sqlx::query("CREATE TABLE events (id INTEGER PRIMARY KEY, at TEXT NOT NULL)")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            for (id, at) in [
+                (1, "2023-06-01T00:00:00+00:00"),
+                (2, "2024-06-01T00:00:00+00:00"),
+                (3, "2025-06-01T00:00:00+00:00"),
+            ] {
+                sqlx::query("INSERT INTO events (id, at) VALUES (?, ?)")
+                    .bind(id)
+                    .bind(at)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+
+            let columns = std::collections::HashMap::from([("at", "at")]);
+            let filter = Filter::parse(r#"at > timestamp("2024-01-01T00:00:00Z")"#)
+                .unwrap()
+                .resolve(&columns)
+                .unwrap();
+
+            let mut writer =
+                QueryWriter::<sqlx::Sqlite>::new("SELECT id FROM events ORDER BY id").unwrap();
+            writer.filter(&filter);
+
+            let ids: Vec<i64> = writer
+                .build()
+                .unwrap()
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.get::<i64, _>("id"))
+                .collect();
+
+            assert_eq!(ids, [2, 3]);
         }
 
         /// `build` rather than `build_as`, to cover the other constructor.
