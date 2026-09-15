@@ -18,8 +18,8 @@
 //! // the query.
 //! writer
 //!     .bind(7_i64)
-//!     .filter_by("read_count > 100")
-//!     .order_by("title desc")
+//!     .filter("read_count > 100")
+//!     .sort("title desc")
 //!     .limit(50);
 //!
 //! assert_eq!(
@@ -33,6 +33,46 @@
 //! # }
 //! # Ok::<_, sqlx_query::Error>(())
 //! ```
+//!
+//! # Two kinds of argument
+//!
+//! [`filter`](QueryWriter::filter) and [`sort`](QueryWriter::sort) each take
+//! either a SQL fragment, which you wrote and vouch for, or something a client
+//! asked for that was checked against a map of the fields you chose to offer.
+//! The call site shows which.
+//!
+//! ```
+//! # #[cfg(feature = "postgres")] {
+//! # use std::collections::HashMap;
+//! use sqlx::Postgres;
+//! use sqlx_query::{QueryWriter, Sort};
+//!
+//! // What a request may order by, and the column each name means. Anything
+//! // not here is refused rather than passed through.
+//! let columns = HashMap::from([("title", "title"), ("id", "id")]);
+//! let sort = Sort::parse("title desc")?.asc("id").resolve(&columns)?;
+//!
+//! let mut writer = QueryWriter::<Postgres>::new(
+//!     "SELECT id, title FROM volumes WHERE tenant_id = $1",
+//! )?;
+//!
+//! writer
+//!     .bind(7_i64)
+//!     .filter("visible")   // a fragment: yours
+//!     .sort(&sort)         // a request: checked
+//!     .limit(50);
+//!
+//! assert_eq!(
+//!     writer.sql()?,
+//!     "SELECT id, title FROM volumes WHERE tenant_id = $1 AND visible \
+//!      ORDER BY \"title\" DESC, \"id\" ASC LIMIT 50",
+//! );
+//! # }
+//! # Ok::<_, sqlx_query::Error>(())
+//! ```
+//!
+//! A [`Sort`] that was never resolved is refused rather than written into the
+//! query, so forgetting the step cannot quietly skip the allowlist.
 //!
 //! # Why a tree and not a template
 //!
@@ -50,7 +90,7 @@
 //!
 //! # What a fragment is allowed to be
 //!
-//! Exactly one expression. [`filter_by`](QueryWriter::filter_by) parses its
+//! Exactly one expression. [`filter`](QueryWriter::filter) parses its
 //! argument and then insists the parser reached the end of it, so
 //! `role = 'admin'` is accepted and `role = 'admin'; DROP TABLE users` is
 //! [`Error::Trailing`] -- the statement after the expression has nowhere to go.
@@ -100,4 +140,7 @@ compile_error!(
 
 mod writer;
 
-pub use writer::{Error, QueryWriter, Syntax};
+pub use writer::{
+    Error, IntoFilter, IntoSort, Ordering, Predicate, QueryWriter, Sort, SortDirection, SortKey,
+    Syntax,
+};

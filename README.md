@@ -16,8 +16,8 @@ let mut writer = QueryWriter::<Postgres>::new(
 
 writer
     .bind(7_i64)
-    .filter_by("read_count > 100")
-    .order_by("title desc")
+    .filter("read_count > 100")
+    .sort("title desc")
     .limit(50);
 
 assert_eq!(
@@ -29,6 +29,53 @@ assert_eq!(
 
 let rows = writer.build_as::<Volume>()?.fetch_all(&pool).await?;
 ```
+
+## Two kinds of argument
+
+`filter` and `sort` each take either a SQL fragment, which you wrote and vouch
+for, or something a client asked for that was checked against a map of the
+fields you chose to offer. The call site shows which.
+
+```rust
+use sqlx::Postgres;
+use sqlx_query::{QueryWriter, Sort};
+
+// What a request may order by, and the column each name means. Anything not
+// here is refused rather than passed through.
+let columns = HashMap::from([("title", "title"), ("readCount", "read_count"), ("id", "id")]);
+
+let sort = Sort::parse(&request.order_by)?   // AIP-132: "readCount desc"
+    .asc("id")                               // a tiebreaker, so the order is total
+    .resolve(&columns)?;                     // fields become columns, or are refused
+
+let mut writer = QueryWriter::<Postgres>::new(
+    "SELECT id, title, read_count FROM volumes WHERE tenant_id = $1",
+)?;
+
+writer
+    .bind(tenant)
+    .filter("visible")   // a fragment: yours
+    .sort(&sort)         // a request: checked
+    .limit(50);
+
+let rows = writer.build_as::<Volume>()?.fetch_all(&pool).await?;
+```
+
+```sql
+SELECT id, title, read_count FROM volumes WHERE tenant_id = $1 AND visible
+ORDER BY "read_count" DESC, "id" ASC
+LIMIT 50
+```
+
+| argument | checked against the map |
+| --- | --- |
+| `filter("visible")`, `sort("name asc")` | no -- you wrote it |
+| `sort(&sort)` | yes |
+
+A `Sort` that was never resolved is refused rather than written into the query,
+so forgetting the step cannot quietly skip the allowlist. A fragment may also
+order by an expression -- `sort("lower(name) asc")` -- which a `Sort` cannot,
+since it only names columns.
 
 ## Why a tree and not a template
 
@@ -56,7 +103,7 @@ SELECT id FROM users WHERE (a = 1 OR b = 2) AND role = 'admin'
 
 ## What a fragment is allowed to be
 
-Exactly one expression. `filter_by` parses its argument and then insists the
+Exactly one expression. `filter` parses its argument and then insists the
 parser reached the end of it:
 
 | fragment | result |
@@ -115,13 +162,16 @@ Every one of these is raised before the database is touched.
 | `Grouped` | there is a `GROUP BY`, so a predicate could mean `WHERE` or `HAVING` and the fragment does not say which |
 | `Arity` | the statement has a different number of placeholders than values bound |
 | `Orphaned` | a value has no placeholder to bind to -- the base query skips a number, or `limit()` replaced a `LIMIT` that held one |
+| `Sort` | an `order_by` value did not parse |
+| `Field` | a request named a field the column map does not have |
+| `Unresolved` | a `Sort` reached the query still holding field names |
 | `NotQuery`, `Query` | the base SQL was not a single parseable query |
 
 ## Status
 
-A spike. The API is `QueryWriter` and nothing else yet; the AIP-shaped layer
-above it -- CEL filters, AIP-132 ordering, keyset cursors -- is not here, and
-neither is targeting a filter at a named CTE rather than the outermost
-`SELECT`.
+A spike. `QueryWriter` and `QueryBuilder` are here, with AIP-132 ordering.
+Still to come: keyset cursors (`seek_by`) and CEL filters (`filter`) on the
+builder. Filtering into a named CTE rather than the outermost `SELECT` is not
+planned.
 
 [sqlx]: https://github.com/launchbadge/sqlx
