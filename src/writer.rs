@@ -144,7 +144,7 @@ impl Render for Vec<OrderByExpr> {
 ///     "SELECT id, name, role FROM users WHERE tenant_id = $1 ORDER BY id",
 /// )?;
 ///
-/// writer.bind(7_i64).and_where("role = 'admin'").order_by("name asc");
+/// writer.bind(7_i64).filter("role = 'admin'").sort("name asc");
 ///
 /// assert_eq!(
 ///     writer.sql()?,
@@ -248,32 +248,38 @@ impl<DB: Syntax> QueryWriter<DB> {
         self
     }
 
-    /// Joins a fragment onto the query's `WHERE` with `AND`.
+    /// Joins a condition onto the query's `WHERE` with `AND`.
     ///
-    /// Called more than once, the fragments are `AND`ed together. An existing
-    /// `WHERE` is kept and joined the same way -- this adds a condition, it
-    /// never replaces one.
+    /// Takes either a SQL fragment, which you wrote and vouch for, or
+    /// something that was checked against an allowlist first. Called more than
+    /// once, the conditions are `AND`ed together; an existing `WHERE` is kept
+    /// and joined the same way. This adds a condition, it never replaces one.
     #[doc(alias = "where")]
-    pub fn and_where(&mut self, fragment: &str) -> &mut Self {
-        match self.parse(fragment, Parser::parse_expr) {
-            Ok(expr) => self.filters.push(expr),
+    pub fn filter(&mut self, filter: impl IntoFilter) -> &mut Self {
+        match filter.into_filter::<DB>() {
+            Ok(Predicate(mut expr)) => {
+                self.claim(&mut expr);
+                self.filters.push(expr);
+            }
             Err(error) => self.fail(error),
         }
         self
     }
 
-    /// Puts a fragment in front of the query's `ORDER BY`.
+    /// Puts an ordering in front of the query's own.
     ///
-    /// What the query already ordered by is kept, and moves behind the
-    /// fragment as a tiebreaker -- a base `ORDER BY id` is usually there to
-    /// make the order total, which it still does from second place. A column
-    /// named by both is only ordered by once, at the position the fragment
-    /// gave it.
-    pub fn order_by(&mut self, fragment: &str) -> &mut Self {
-        match self.parse(fragment, |parser| {
-            parser.parse_comma_separated(Parser::parse_order_by_expr)
-        }) {
-            Ok(exprs) => self.order_by.extend(exprs),
+    /// Takes either a SQL fragment or a resolved [`Sort`]. What the query
+    /// already ordered by is kept and moves behind it as a tiebreaker -- a
+    /// base `ORDER BY id` is usually there to make the order total, which it
+    /// still does from second place. A column named by both is ordered by
+    /// once, where this put it.
+    #[doc(alias = "order_by")]
+    pub fn sort(&mut self, sort: impl IntoSort) -> &mut Self {
+        match sort.into_sort::<DB>() {
+            Ok(Ordering(mut exprs)) => {
+                self.claim(&mut exprs);
+                self.order_by.extend(exprs);
+            }
             Err(error) => self.fail(error),
         }
         self
@@ -367,13 +373,20 @@ impl<DB: Syntax> QueryWriter<DB> {
         Self::write(&statement.to_string(), self.arity)
     }
 
-    /// Parses a fragment, marks its placeholders, and claims the slots they
-    /// bind.
+    /// Claims slots for a fragment's placeholders.
     ///
-    /// The fragment has to be the whole of what it parsed: anything after the
-    /// expression is [`Error::Trailing`]. Its own `$1` is relative to the
-    /// fragment, so the slots are offset by everything claimed before it.
-    fn parse<T, F>(&mut self, fragment: &str, parse: F) -> Result<T, Error>
+    /// A fragment numbers its own from `$1`, so the slots are offset by
+    /// everything claimed before it.
+    fn claim<T: Render + VisitMut>(&mut self, node: &mut T) {
+        self.arity += Self::number(node, self.arity);
+    }
+
+    /// Parses a fragment, and insists it was the whole of what it parsed.
+    ///
+    /// Anything left after the expression is [`Error::Trailing`]. This is what
+    /// makes a fragment safe to accept as text: `role = 'admin'` consumes
+    /// everything, and `role = 'admin'; DROP TABLE users` does not.
+    fn fragment<T, F>(sql: &str, parse: F) -> Result<T, Error>
     where
         T: Render + VisitMut,
         // `'static` rather than elided: the parser's grammar is a `&'static dyn`, so
@@ -382,26 +395,24 @@ impl<DB: Syntax> QueryWriter<DB> {
         F: FnOnce(&mut Parser<'static>) -> Result<T, ParserError>,
     {
         let mut parser = Parser::new(DB::parser())
-            .try_with_sql(fragment)
+            .try_with_sql(sql)
             .map_err(|source| Error::Fragment {
-                fragment: fragment.to_owned(),
+                fragment: sql.to_owned(),
                 source,
             })?;
 
-        let mut parsed = parse(&mut parser).map_err(|source| Error::Fragment {
-            fragment: fragment.to_owned(),
+        let parsed = parse(&mut parser).map_err(|source| Error::Fragment {
+            fragment: sql.to_owned(),
             source,
         })?;
 
         let rest = parser.peek_token();
         if rest.token != Token::EOF {
             return Err(Error::Trailing {
-                fragment: fragment.to_owned(),
+                fragment: sql.to_owned(),
                 rest: rest.to_string(),
             });
         }
-
-        self.arity += Self::number(&mut parsed, self.arity);
 
         Ok(parsed)
     }
@@ -713,7 +724,7 @@ pub struct SortKey {
 /// [`resolve`](Self::resolve) turns those into columns and refuses any field
 /// the map does not name. That refusal is the point: the map is an allowlist,
 /// so a request can only order by what you chose to offer. A `Sort` that was
-/// never resolved is refused by [`QueryBuilder::sort`] rather than written
+/// never resolved is refused by [`QueryWriter::sort`] rather than written
 /// into a query, so forgetting the step cannot quietly skip the allowlist.
 ///
 /// [AIP-132]: https://google.aip.dev/132
@@ -908,140 +919,74 @@ fn quoted(name: &str) -> Expr {
     }
 }
 
-/// Adds what a request asked for to a query you already wrote.
+/// A condition, ready to join onto a query's `WHERE`.
 ///
-/// The same rewrite [`QueryWriter`] performs, but taking what a client sent --
-/// already parsed and checked against an allowlist -- instead of SQL you wrote
-/// yourself. That is the whole difference between the two:
-///
-/// | | takes |
-/// | --- | --- |
-/// | [`QueryWriter`] | SQL fragments, which you vouch for |
-/// | `QueryBuilder` | [`Sort`] and the like, which went through an allowlist |
-///
-/// Keeping them apart matters because an AIP `order_by` and a SQL `ORDER BY`
-/// fragment look identical -- `"title desc"` is both -- so a single type
-/// offering both would let a client's string reach the unchecked path without
-/// anything looking wrong.
-///
-/// ```
-/// # #[cfg(feature = "postgres")] {
-/// # use std::collections::HashMap;
-/// use sqlx::Postgres;
-/// use sqlx_query::{QueryBuilder, Sort};
-///
-/// let columns = HashMap::from([("title", "title"), ("id", "id")]);
-/// let sort = Sort::parse("title desc")?.asc("id").resolve(&columns)?;
-///
-/// let mut query = QueryBuilder::<Postgres>::new(
-///     "SELECT id, title FROM volumes WHERE tenant_id = $1",
-/// )?;
-/// query.bind(7_i64).sort(&sort).limit(50);
-///
-/// assert_eq!(
-///     query.sql()?,
-///     "SELECT id, title FROM volumes WHERE tenant_id = $1 \
-///      ORDER BY \"title\" DESC, \"id\" ASC LIMIT 50",
-/// );
-/// # }
-/// # Ok::<_, sqlx_query::Error>(())
-/// ```
-///
-/// For a fragment you wrote yourself, reach for [`QueryWriter`] instead.
-pub struct QueryBuilder<DB: Syntax> {
-    writer: QueryWriter<DB>,
-}
+/// Opaque, and produced by [`IntoFilter`] rather than constructed: it is
+/// either a fragment that parsed, or something that came through an allowlist.
+pub struct Predicate(Expr);
 
-impl<DB: Syntax> QueryBuilder<DB> {
-    /// Parses the query to add to.
+/// An ordering, ready to write into a query.
+///
+/// Opaque, and produced by [`IntoSort`]. It holds syntax rather than field
+/// names, which is why a fragment may order by an expression -- `lower(name)
+/// desc` -- while a [`Sort`] may only name columns.
+pub struct Ordering(Vec<OrderByExpr>);
+
+/// Anything [`QueryWriter::filter`] will take.
+///
+/// A `&str` is a SQL fragment: it is parsed, it has to be one complete
+/// expression, and nothing checks what it names -- you wrote it, so you vouch
+/// for it. Anything that went through an allowlist implements this too, and
+/// the call site shows which you passed.
+pub trait IntoFilter {
+    /// Turns this into a condition, parsing it in `DB`'s syntax if it is text.
     ///
     /// # Errors
     ///
-    /// As [`QueryWriter::new`].
-    pub fn new(sql: &str) -> Result<Self, Error> {
-        Ok(Self {
-            writer: QueryWriter::new(sql)?,
+    /// [`Error::Fragment`] or [`Error::Trailing`] if a fragment does not parse
+    /// as exactly one expression.
+    fn into_filter<DB: Syntax>(self) -> Result<Predicate, Error>;
+}
+
+impl<S: AsRef<str>> IntoFilter for S {
+    fn into_filter<DB: Syntax>(self) -> Result<Predicate, Error> {
+        QueryWriter::<DB>::fragment(self.as_ref(), Parser::parse_expr).map(Predicate)
+    }
+}
+
+/// Anything [`QueryWriter::sort`] will take.
+///
+/// A `&str` is a SQL fragment, parsed as an `ORDER BY` list, so it may order
+/// by an expression as well as a column. A [`&Sort`](Sort) is what a request
+/// asked for, and has to have been resolved against a column map first --
+/// otherwise it still holds the client's field names, and writing those into a
+/// query is what the allowlist exists to prevent.
+pub trait IntoSort {
+    /// Turns this into an ordering, parsing it in `DB`'s syntax if it is text.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Fragment`] or [`Error::Trailing`] if a fragment does not parse,
+    /// and [`Error::Unresolved`] if a [`Sort`] was never resolved.
+    fn into_sort<DB: Syntax>(self) -> Result<Ordering, Error>;
+}
+
+impl<S: AsRef<str>> IntoSort for S {
+    fn into_sort<DB: Syntax>(self) -> Result<Ordering, Error> {
+        QueryWriter::<DB>::fragment(self.as_ref(), |parser| {
+            parser.parse_comma_separated(Parser::parse_order_by_expr)
         })
-    }
-
-    /// Binds the next value, as [`QueryWriter::bind`].
-    pub fn bind<'t, T>(&mut self, value: T) -> &mut Self
-    where
-        T: Encode<'t, DB> + Type<DB>,
-    {
-        self.writer.bind(value);
-        self
-    }
-
-    /// Orders by what the request asked for.
-    ///
-    /// Whatever the query already ordered by drops behind it as a tiebreaker,
-    /// and a column named by both is ordered by once, where the request put
-    /// it.
-    ///
-    /// A [`Sort`] that was never resolved is refused -- see
-    /// [`Error::Unresolved`] -- because its names are still the client's
-    /// fields, and writing those into a query is exactly what the allowlist
-    /// exists to prevent.
-    pub fn sort(&mut self, sort: &Sort) -> &mut Self {
-        if sort.resolved {
-            self.writer.order_by.extend(sort.order_by());
-        } else {
-            self.writer.fail(Error::Unresolved);
-        }
-        self
-    }
-
-    /// Sets `LIMIT`, as [`QueryWriter::limit`].
-    pub fn limit(&mut self, rows: u64) -> &mut Self {
-        self.writer.limit(rows);
-        self
-    }
-
-    /// Renders the query.
-    ///
-    /// # Errors
-    ///
-    /// As [`QueryWriter::sql`], and [`Error::Unresolved`].
-    pub fn sql(&self) -> Result<String, Error> {
-        self.writer.sql()
-    }
-
-    /// Renders the query and hands it to sqlx, as [`QueryWriter::build`].
-    ///
-    /// # Errors
-    ///
-    /// As [`sql`](Self::sql).
-    pub fn build(self) -> Result<SqlxQuery<'static, DB, DB::Arguments>, Error> {
-        self.writer.build()
-    }
-
-    /// As [`build`](Self::build), mapping rows to `O`.
-    ///
-    /// # Errors
-    ///
-    /// As [`sql`](Self::sql).
-    pub fn build_as<O>(self) -> Result<QueryAs<'static, DB, O, DB::Arguments>, Error>
-    where
-        O: for<'r> FromRow<'r, DB::Row>,
-    {
-        self.writer.build_as()
-    }
-
-    /// The query underneath, for anything this layer does not cover.
-    ///
-    /// Its methods take SQL fragments rather than request objects, so whatever
-    /// goes in through here is yours to vouch for.
-    pub fn writer(&mut self) -> &mut QueryWriter<DB> {
-        &mut self.writer
+        .map(Ordering)
     }
 }
 
-impl<DB: Syntax> fmt::Debug for QueryBuilder<DB> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("QueryBuilder")
-            .field("writer", &self.writer)
-            .finish()
+impl IntoSort for &Sort {
+    fn into_sort<DB: Syntax>(self) -> Result<Ordering, Error> {
+        if self.resolved {
+            Ok(Ordering(self.order_by()))
+        } else {
+            Err(Error::Unresolved)
+        }
     }
 }
 

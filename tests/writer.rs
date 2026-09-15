@@ -31,7 +31,7 @@ mod postgres {
         #[test]
         fn filter_becomes_the_where_when_there_is_none() {
             let sql = rewrite("SELECT id FROM users", |w| {
-                w.and_where("role = 'admin'");
+                w.filter("role = 'admin'");
             })
             .unwrap();
 
@@ -41,7 +41,7 @@ mod postgres {
         #[test]
         fn filter_joins_an_existing_where() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = $1", |w| {
-                w.and_where("role = 'admin'");
+                w.filter("role = 'admin'");
             })
             .unwrap();
 
@@ -54,9 +54,9 @@ mod postgres {
         #[test]
         fn filters_accumulate() {
             let sql = rewrite("SELECT id FROM users", |w| {
-                w.and_where("role = 'admin'")
-                    .and_where("active")
-                    .and_where("age > 18");
+                w.filter("role = 'admin'")
+                    .filter("active")
+                    .filter("age > 18");
             })
             .unwrap();
 
@@ -72,7 +72,7 @@ mod postgres {
         #[test]
         fn an_or_in_the_base_query_is_parenthesised() {
             let sql = rewrite("SELECT id FROM users WHERE a = 1 OR b = 2", |w| {
-                w.and_where("role = 'admin'");
+                w.filter("role = 'admin'");
             })
             .unwrap();
 
@@ -86,7 +86,7 @@ mod postgres {
         #[test]
         fn an_or_in_the_fragment_is_parenthesised() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = $1", |w| {
-                w.and_where("role = 'admin' OR role = 'owner'");
+                w.filter("role = 'admin' OR role = 'owner'");
             })
             .unwrap();
 
@@ -99,7 +99,7 @@ mod postgres {
         #[test]
         fn an_and_is_left_alone() {
             let sql = rewrite("SELECT id FROM users WHERE a = 1 AND b = 2", |w| {
-                w.and_where("c = 3");
+                w.filter("c = 3");
             })
             .unwrap();
 
@@ -109,7 +109,7 @@ mod postgres {
         #[test]
         fn order_by_goes_in_front_and_the_base_becomes_a_tiebreaker() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("name desc");
+                w.sort("name desc");
             })
             .unwrap();
 
@@ -119,7 +119,7 @@ mod postgres {
         #[test]
         fn order_by_takes_a_list() {
             let sql = rewrite("SELECT id FROM users", |w| {
-                w.order_by("name desc, created_at asc");
+                w.sort("name desc, created_at asc");
             })
             .unwrap();
 
@@ -133,7 +133,7 @@ mod postgres {
         #[test]
         fn order_by_accumulates() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("name desc").order_by("created_at asc");
+                w.sort("name desc").sort("created_at asc");
             })
             .unwrap();
 
@@ -146,7 +146,7 @@ mod postgres {
         #[test]
         fn order_by_does_not_repeat_a_column_the_base_already_named() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("id asc");
+                w.sort("id asc");
             })
             .unwrap();
 
@@ -160,7 +160,7 @@ mod postgres {
         #[test]
         fn order_by_does_not_repeat_a_column_an_earlier_call_named() {
             let sql = rewrite("SELECT id FROM users ORDER BY id", |w| {
-                w.order_by("name asc").order_by("name desc");
+                w.sort("name asc").sort("name desc");
             })
             .unwrap();
 
@@ -194,7 +194,7 @@ mod postgres {
         #[test]
         fn a_fragment_with_a_statement_after_it_is_refused() {
             let error = rewrite("SELECT id FROM users", |w| {
-                w.and_where("role = 'admin'; DROP TABLE users");
+                w.filter("role = 'admin'; DROP TABLE users");
             })
             .unwrap_err();
 
@@ -204,7 +204,7 @@ mod postgres {
         #[test]
         fn a_trailing_fragment_in_order_by_is_refused() {
             let error = rewrite("SELECT id FROM users", |w| {
-                w.order_by("name asc; DROP TABLE users");
+                w.sort("name asc; DROP TABLE users");
             })
             .unwrap_err();
 
@@ -214,7 +214,7 @@ mod postgres {
         #[test]
         fn a_fragment_that_is_not_an_expression_is_refused() {
             let error = rewrite("SELECT id FROM users", |w| {
-                w.and_where("= = =");
+                w.filter("= = =");
             })
             .unwrap_err();
 
@@ -227,7 +227,7 @@ mod postgres {
         #[test]
         fn a_fragment_of_bare_keywords_does_not_slip_through_as_an_identifier() {
             let error = rewrite("SELECT id FROM users", |w| {
-                w.and_where("FROM WHERE");
+                w.filter("FROM WHERE");
             })
             .unwrap_err();
 
@@ -237,7 +237,7 @@ mod postgres {
         #[test]
         fn a_union_has_no_single_select_to_filter() {
             let error = rewrite("SELECT id FROM a UNION SELECT id FROM b", |w| {
-                w.and_where("role = 'admin'");
+                w.filter("role = 'admin'");
             })
             .unwrap_err();
 
@@ -249,7 +249,7 @@ mod postgres {
         #[test]
         fn a_union_can_still_be_ordered() {
             let sql = rewrite("SELECT id FROM a UNION SELECT id FROM b", |w| {
-                w.order_by("id desc");
+                w.sort("id desc");
             })
             .unwrap();
 
@@ -262,7 +262,7 @@ mod postgres {
         #[test]
         fn a_group_by_makes_a_filter_ambiguous() {
             let error = rewrite("SELECT role, count(*) FROM users GROUP BY role", |w| {
-                w.and_where("count(*) > 5");
+                w.filter("count(*) > 5");
             })
             .unwrap_err();
 
@@ -287,7 +287,7 @@ mod postgres {
         #[test]
         fn a_trailing_semicolon_is_not_a_second_statement() {
             let sql = rewrite("SELECT id FROM users;", |w| {
-                w.and_where("active");
+                w.filter("active");
             })
             .unwrap();
 
@@ -306,7 +306,7 @@ mod postgres {
         #[test]
         fn a_failure_is_reported_every_time_it_is_asked_for() {
             let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM users").unwrap();
-            writer.and_where("role = 'admin'; DROP TABLE users");
+            writer.filter("role = 'admin'; DROP TABLE users");
 
             assert!(matches!(writer.sql(), Err(Error::Trailing { .. })));
             assert!(matches!(writer.sql(), Err(Error::Trailing { .. })));
@@ -317,8 +317,8 @@ mod postgres {
         fn the_first_failure_wins() {
             let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM users").unwrap();
             writer
-                .and_where("= = =")
-                .and_where("role = 'admin'; DROP TABLE users");
+                .filter("= = =")
+                .filter("role = 'admin'; DROP TABLE users");
 
             assert!(matches!(writer.sql(), Err(Error::Fragment { .. })));
         }
@@ -531,10 +531,10 @@ mod postgres {
         }
     }
 
-    /// The builder, which is the writer with request objects instead of SQL.
-    mod builder {
+    /// A resolved `Sort` handed to the writer, rather than a fragment.
+    mod sorting {
         use sqlx::Postgres;
-        use sqlx_query::{Error, QueryBuilder, Sort};
+        use sqlx_query::{Error, QueryWriter, Sort};
         use std::collections::HashMap;
 
         fn columns() -> HashMap<&'static str, &'static str> {
@@ -549,7 +549,7 @@ mod postgres {
 
         fn sorted(base: &str, order_by: &str, tiebreak: &str) -> Result<String, Error> {
             let sort = Sort::parse(order_by)?.asc(tiebreak).resolve(&columns())?;
-            let mut query = QueryBuilder::<Postgres>::new(base)?;
+            let mut query = QueryWriter::<Postgres>::new(base)?;
             query.sort(&sort);
             query.sql()
         }
@@ -597,12 +597,63 @@ mod postgres {
             assert_eq!(sql, r#"SELECT id FROM v ORDER BY "title" DESC, "id" ASC"#);
         }
 
+        /// Every string shape reaches the same impl, including the owned one
+        /// a deserialised request actually hands you.
+        #[test]
+        fn a_fragment_may_be_any_kind_of_string() {
+            let owned = String::from("name asc");
+
+            for sql in [
+                QueryWriter::<Postgres>::new("SELECT id FROM v")
+                    .unwrap()
+                    .sort("name asc")
+                    .sql(),
+                QueryWriter::<Postgres>::new("SELECT id FROM v")
+                    .unwrap()
+                    .sort(&owned)
+                    .sql(),
+                QueryWriter::<Postgres>::new("SELECT id FROM v")
+                    .unwrap()
+                    .sort(owned.clone())
+                    .sql(),
+            ] {
+                assert_eq!(sql.unwrap(), "SELECT id FROM v ORDER BY name ASC");
+            }
+        }
+
+        /// What a fragment can do that a `Sort` cannot: order by an
+        /// expression. `Sort` only ever names columns, so this is the reason
+        /// the two are not the same type.
+        #[test]
+        fn a_fragment_may_order_by_an_expression() {
+            let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM v").unwrap();
+            writer.sort("lower(name) asc, id desc");
+
+            assert_eq!(
+                writer.sql().unwrap(),
+                "SELECT id FROM v ORDER BY lower(name) ASC, id DESC"
+            );
+        }
+
+        /// A fragment and a `Sort` in the same query, the fragment first.
+        #[test]
+        fn a_fragment_and_a_sort_may_both_be_given() {
+            let sort = Sort::parse("title").unwrap().resolve(&columns()).unwrap();
+            let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM v").unwrap();
+            writer.sort("lower(name) asc").sort(&sort);
+
+            assert_eq!(
+                writer.sql().unwrap(),
+                r#"SELECT id FROM v ORDER BY lower(name) ASC, "title" ASC"#
+            );
+        }
+
         /// The check that makes the allowlist worth having: a sort still
         /// holding the client's field names never reaches the query.
         #[test]
         fn an_unresolved_sort_is_refused() {
             let sort = Sort::parse("title desc").unwrap();
-            let mut query = QueryBuilder::<Postgres>::new("SELECT id FROM v").unwrap();
+            let mut query = QueryWriter::<Postgres>::new("SELECT id FROM v").unwrap();
             query.sort(&sort);
 
             assert!(matches!(query.sql(), Err(Error::Unresolved)));
@@ -613,7 +664,7 @@ mod postgres {
             let sql = Sort::parse("")
                 .and_then(|sort| sort.resolve(&columns()))
                 .and_then(|sort| {
-                    let mut query = QueryBuilder::<Postgres>::new("SELECT id FROM v")?;
+                    let mut query = QueryWriter::<Postgres>::new("SELECT id FROM v")?;
                     query.sort(&sort);
                     query.sql()
                 })
@@ -626,7 +677,7 @@ mod postgres {
         fn binds_and_limits_reach_the_writer() {
             let sort = Sort::parse("title").unwrap().resolve(&columns()).unwrap();
             let mut query =
-                QueryBuilder::<Postgres>::new("SELECT id FROM v WHERE tenant = $1").unwrap();
+                QueryWriter::<Postgres>::new("SELECT id FROM v WHERE tenant = $1").unwrap();
             query.bind(7_i64).sort(&sort).limit(50);
 
             assert_eq!(
@@ -636,14 +687,14 @@ mod postgres {
             assert!(query.build().is_ok());
         }
 
-        /// The escape hatch: a predicate this program decided, alongside an
-        /// ordering the client did.
+        /// A predicate this program decided, alongside an ordering the client
+        /// did -- the case that used to need an escape hatch between layers.
         #[test]
-        fn the_writer_underneath_still_takes_fragments() {
+        fn a_fragment_and_a_sort_sit_side_by_side() {
             let sort = Sort::parse("title").unwrap().resolve(&columns()).unwrap();
-            let mut query = QueryBuilder::<Postgres>::new("SELECT id FROM v").unwrap();
+            let mut query = QueryWriter::<Postgres>::new("SELECT id FROM v").unwrap();
             query.sort(&sort);
-            query.writer().and_where("visible");
+            query.filter("visible");
 
             assert_eq!(
                 query.sql().unwrap(),
@@ -707,7 +758,7 @@ mod postgres {
         #[test]
         fn forgetting_a_fragments_value_is_refused() {
             let mut writer = QueryWriter::<Postgres>::new("SELECT id FROM t WHERE a = $1").unwrap();
-            writer.bind(1_i64).and_where("b = $1");
+            writer.bind(1_i64).filter("b = $1");
 
             let Err(error) = writer.build() else {
                 panic!("expected an error")
@@ -729,7 +780,7 @@ mod postgres {
         #[test]
         fn rendering_does_not_require_the_values() {
             let sql = rewrite("SELECT id FROM t WHERE a = $1", |w| {
-                w.and_where("b = $1");
+                w.filter("b = $1");
             })
             .unwrap();
 
@@ -748,7 +799,7 @@ mod postgres {
         #[test]
         fn postgres_renumbers_the_fragment_and_leaves_the_base_alone() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = $1 LIMIT $2", |w| {
-                w.and_where("role = $1");
+                w.filter("role = $1");
             })
             .unwrap();
 
@@ -761,7 +812,7 @@ mod postgres {
         #[test]
         fn a_fragment_numbers_from_one_and_is_renumbered_to_follow() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = $1", |w| {
-                w.and_where("role = $1");
+                w.filter("role = $1");
             })
             .unwrap();
 
@@ -776,7 +827,7 @@ mod postgres {
         #[test]
         fn a_base_placeholder_after_the_where_keeps_its_number() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = $1 LIMIT $2", |w| {
-                w.and_where("role = $1");
+                w.filter("role = $1");
             })
             .unwrap();
 
@@ -789,7 +840,7 @@ mod postgres {
         #[test]
         fn placeholders_from_several_fragments_are_numbered_in_order() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = $1", |w| {
-                w.and_where("role = $1").and_where("age > $1");
+                w.filter("role = $1").filter("age > $1");
             })
             .unwrap();
 
@@ -804,7 +855,7 @@ mod postgres {
         #[test]
         fn a_repeated_placeholder_claims_one_value() {
             let sql = rewrite("SELECT id FROM users WHERE a = $1 OR b = $1", |w| {
-                w.and_where("role = $1");
+                w.filter("role = $1");
             })
             .unwrap();
 
@@ -817,7 +868,7 @@ mod postgres {
         #[test]
         fn postgres_allows_one_value_in_two_places() {
             let sql = rewrite("SELECT id FROM users", |w| {
-                w.and_where("a = $1 OR b = $1");
+                w.filter("a = $1 OR b = $1");
             })
             .unwrap();
 
@@ -830,7 +881,7 @@ mod postgres {
         #[test]
         fn a_placeholder_inside_a_string_literal_is_not_a_placeholder() {
             let sql = rewrite("SELECT id FROM users WHERE note = '$1 of $2'", |w| {
-                w.and_where("role = $1");
+                w.filter("role = $1");
             })
             .unwrap();
 
@@ -877,7 +928,7 @@ mod sqlite {
         #[test]
         fn sqlite_numbers_placeholders_that_arrived_bare() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = ?", |w| {
-                w.and_where("role = ?");
+                w.filter("role = ?");
             })
             .unwrap();
 
@@ -890,7 +941,7 @@ mod sqlite {
         #[test]
         fn sqlite_does_the_same_with_question_marks() {
             let sql = rewrite("SELECT id FROM users WHERE tenant_id = ? LIMIT ?", |w| {
-                w.and_where("role = ?");
+                w.filter("role = ?");
             })
             .unwrap();
 
@@ -905,7 +956,7 @@ mod sqlite {
         #[test]
         fn sqlite_allows_one_value_in_two_places() {
             let sql = rewrite("SELECT id FROM users", |w| {
-                w.and_where("a = ?1 OR b = ?1");
+                w.filter("a = ?1 OR b = ?1");
             })
             .unwrap();
 
@@ -915,7 +966,7 @@ mod sqlite {
         #[test]
         fn ordering_may_move_a_limit_placeholder() {
             let sql = rewrite("SELECT id FROM users LIMIT ?", |w| {
-                w.order_by("? asc");
+                w.sort("? asc");
             })
             .unwrap();
 
@@ -928,7 +979,7 @@ mod sqlite {
         #[test]
         fn replacing_a_limit_that_held_a_placeholder_is_refused() {
             let error = rewrite("SELECT id FROM users WHERE t = ? LIMIT ?", |w| {
-                w.and_where("role = ?").limit(50);
+                w.filter("role = ?").limit(50);
             })
             .unwrap_err();
 
@@ -938,7 +989,7 @@ mod sqlite {
         #[test]
         fn replacing_a_literal_limit_is_fine() {
             let sql = rewrite("SELECT id FROM users WHERE t = ? LIMIT 10", |w| {
-                w.and_where("role = ?").limit(50);
+                w.filter("role = ?").limit(50);
             })
             .unwrap();
 
@@ -951,7 +1002,7 @@ mod sqlite {
         #[test]
         fn a_question_mark_in_a_string_literal_is_not_a_placeholder() {
             let sql = rewrite("SELECT id FROM users WHERE note = '? ?'", |w| {
-                w.and_where("role = ?");
+                w.filter("role = ?");
             })
             .unwrap();
 
@@ -1013,7 +1064,7 @@ mod sqlite {
             let mut writer =
                 QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users WHERE tenant_id = ?")
                     .unwrap();
-            writer.bind(1_i64).and_where("role = ?").bind("admin");
+            writer.bind(1_i64).filter("role = ?").bind("admin");
 
             let users: Vec<User> = writer
                 .build_as::<User>()
@@ -1055,7 +1106,7 @@ mod sqlite {
             writer
                 .bind(1_i64) // base: tenant_id
                 .bind(2_i64) // base: limit
-                .and_where("role = ?")
+                .filter("role = ?")
                 .bind("admin"); // fragment
 
             assert_eq!(
@@ -1100,7 +1151,7 @@ mod sqlite {
             writer
                 .bind(1_i64)
                 .bind(1_i64)
-                .and_where("role = ?")
+                .filter("role = ?")
                 .bind("admin");
 
             let users: Vec<User> = writer
@@ -1126,7 +1177,7 @@ mod sqlite {
 
             let mut writer =
                 QueryWriter::<sqlx::Sqlite>::new("SELECT id, name FROM users ORDER BY id").unwrap();
-            writer.order_by("name asc");
+            writer.sort("name asc");
 
             let users: Vec<User> = writer
                 .build_as::<User>()
@@ -1168,7 +1219,7 @@ mod sqlite {
                 "SELECT id, name FROM users WHERE name = 'edsger' OR name = 'alan'",
             )
             .unwrap();
-            writer.and_where("tenant_id = ?").bind(1_i64);
+            writer.filter("tenant_id = ?").bind(1_i64);
 
             let users: Vec<User> = writer
                 .build_as::<User>()

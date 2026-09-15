@@ -18,8 +18,8 @@
 //! // the query.
 //! writer
 //!     .bind(7_i64)
-//!     .and_where("read_count > 100")
-//!     .order_by("title desc")
+//!     .filter("read_count > 100")
+//!     .sort("title desc")
 //!     .limit(50);
 //!
 //! assert_eq!(
@@ -34,43 +34,45 @@
 //! # Ok::<_, sqlx_query::Error>(())
 //! ```
 //!
-//! # Two layers
+//! # Two kinds of argument
 //!
-//! [`QueryWriter`] takes SQL fragments, which you wrote and therefore vouch
-//! for. [`QueryBuilder`] takes what a client asked for -- a [`Sort`], and in
-//! time a filter and a cursor -- already parsed and checked against a map of
-//! the fields you chose to offer.
+//! [`filter`](QueryWriter::filter) and [`sort`](QueryWriter::sort) each take
+//! either a SQL fragment, which you wrote and vouch for, or something a client
+//! asked for that was checked against a map of the fields you chose to offer.
+//! The call site shows which.
 //!
 //! ```
 //! # #[cfg(feature = "postgres")] {
 //! # use std::collections::HashMap;
 //! use sqlx::Postgres;
-//! use sqlx_query::{QueryBuilder, Sort};
+//! use sqlx_query::{QueryWriter, Sort};
 //!
 //! // What a request may order by, and the column each name means. Anything
 //! // not here is refused rather than passed through.
 //! let columns = HashMap::from([("title", "title"), ("id", "id")]);
-//!
 //! let sort = Sort::parse("title desc")?.asc("id").resolve(&columns)?;
 //!
-//! let mut query = QueryBuilder::<Postgres>::new(
+//! let mut writer = QueryWriter::<Postgres>::new(
 //!     "SELECT id, title FROM volumes WHERE tenant_id = $1",
 //! )?;
-//! query.bind(7_i64).sort(&sort).limit(50);
+//!
+//! writer
+//!     .bind(7_i64)
+//!     .filter("visible")   // a fragment: yours
+//!     .sort(&sort)         // a request: checked
+//!     .limit(50);
 //!
 //! assert_eq!(
-//!     query.sql()?,
-//!     "SELECT id, title FROM volumes WHERE tenant_id = $1 \
+//!     writer.sql()?,
+//!     "SELECT id, title FROM volumes WHERE tenant_id = $1 AND visible \
 //!      ORDER BY \"title\" DESC, \"id\" ASC LIMIT 50",
 //! );
 //! # }
 //! # Ok::<_, sqlx_query::Error>(())
 //! ```
 //!
-//! They are separate types because an AIP `order_by` value and a SQL
-//! `ORDER BY` fragment look identical -- `"title desc"` is both -- so one type
-//! offering both would let a client's string reach the unchecked path with
-//! nothing at the call site looking wrong.
+//! A [`Sort`] that was never resolved is refused rather than written into the
+//! query, so forgetting the step cannot quietly skip the allowlist.
 //!
 //! # Why a tree and not a template
 //!
@@ -88,7 +90,7 @@
 //!
 //! # What a fragment is allowed to be
 //!
-//! Exactly one expression. [`and_where`](QueryWriter::and_where) parses its
+//! Exactly one expression. [`filter`](QueryWriter::filter) parses its
 //! argument and then insists the parser reached the end of it, so
 //! `role = 'admin'` is accepted and `role = 'admin'; DROP TABLE users` is
 //! [`Error::Trailing`] -- the statement after the expression has nowhere to go.
@@ -138,4 +140,7 @@ compile_error!(
 
 mod writer;
 
-pub use writer::{Error, QueryBuilder, QueryWriter, Sort, SortDirection, SortKey, Syntax};
+pub use writer::{
+    Error, IntoFilter, IntoSort, Ordering, Predicate, QueryWriter, Sort, SortDirection, SortKey,
+    Syntax,
+};

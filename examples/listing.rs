@@ -43,10 +43,10 @@ where
     writer.bind(tenant);
 
     if let Some(filter) = request.filter {
-        writer.and_where(filter);
+        writer.filter(filter);
     }
     if let Some(order) = request.order {
-        writer.order_by(order);
+        writer.sort(order);
     }
     if let Some(limit) = request.limit {
         writer.limit(limit);

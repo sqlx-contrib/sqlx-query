@@ -16,8 +16,8 @@ let mut writer = QueryWriter::<Postgres>::new(
 
 writer
     .bind(7_i64)
-    .and_where("read_count > 100")
-    .order_by("title desc")
+    .filter("read_count > 100")
+    .sort("title desc")
     .limit(50);
 
 assert_eq!(
@@ -30,15 +30,15 @@ assert_eq!(
 let rows = writer.build_as::<Volume>()?.fetch_all(&pool).await?;
 ```
 
-## Two layers
+## Two kinds of argument
 
-`QueryWriter` takes SQL fragments, which you wrote and therefore vouch for.
-`QueryBuilder` takes what a client asked for, already parsed and checked
-against a map of the fields you chose to offer.
+`filter` and `sort` each take either a SQL fragment, which you wrote and vouch
+for, or something a client asked for that was checked against a map of the
+fields you chose to offer. The call site shows which.
 
 ```rust
 use sqlx::Postgres;
-use sqlx_query::{QueryBuilder, Sort};
+use sqlx_query::{QueryWriter, Sort};
 
 // What a request may order by, and the column each name means. Anything not
 // here is refused rather than passed through.
@@ -48,32 +48,34 @@ let sort = Sort::parse(&request.order_by)?   // AIP-132: "readCount desc"
     .asc("id")                               // a tiebreaker, so the order is total
     .resolve(&columns)?;                     // fields become columns, or are refused
 
-let mut query = QueryBuilder::<Postgres>::new(
+let mut writer = QueryWriter::<Postgres>::new(
     "SELECT id, title, read_count FROM volumes WHERE tenant_id = $1",
 )?;
-query.bind(tenant).sort(&sort).limit(50);
 
-let rows = query.build_as::<Volume>()?.fetch_all(&pool).await?;
+writer
+    .bind(tenant)
+    .filter("visible")   // a fragment: yours
+    .sort(&sort)         // a request: checked
+    .limit(50);
+
+let rows = writer.build_as::<Volume>()?.fetch_all(&pool).await?;
 ```
 
 ```sql
-SELECT id, title, read_count FROM volumes WHERE tenant_id = $1
+SELECT id, title, read_count FROM volumes WHERE tenant_id = $1 AND visible
 ORDER BY "read_count" DESC, "id" ASC
 LIMIT 50
 ```
 
-The two are separate types because an AIP `order_by` value and a SQL
-`ORDER BY` fragment look identical -- `"title desc"` is both -- so one type
-offering both would let a client's string reach the unchecked path with nothing
-at the call site looking wrong.
-
-| | takes | checked against the map |
-| --- | --- | --- |
-| `QueryWriter` | `and_where("role = 'admin'")` | no -- you wrote it |
-| `QueryBuilder` | `sort(&sort)` | yes |
+| argument | checked against the map |
+| --- | --- |
+| `filter("visible")`, `sort("name asc")` | no -- you wrote it |
+| `sort(&sort)` | yes |
 
 A `Sort` that was never resolved is refused rather than written into the query,
-so forgetting the step cannot quietly skip the allowlist.
+so forgetting the step cannot quietly skip the allowlist. A fragment may also
+order by an expression -- `sort("lower(name) asc")` -- which a `Sort` cannot,
+since it only names columns.
 
 ## Why a tree and not a template
 
@@ -101,7 +103,7 @@ SELECT id FROM users WHERE (a = 1 OR b = 2) AND role = 'admin'
 
 ## What a fragment is allowed to be
 
-Exactly one expression. `and_where` parses its argument and then insists the
+Exactly one expression. `filter` parses its argument and then insists the
 parser reached the end of it:
 
 | fragment | result |
@@ -168,7 +170,7 @@ Every one of these is raised before the database is touched.
 ## Status
 
 A spike. `QueryWriter` and `QueryBuilder` are here, with AIP-132 ordering.
-Still to come: keyset cursors (`seek_by`) and CEL filters (`and_where`) on the
+Still to come: keyset cursors (`seek_by`) and CEL filters (`filter`) on the
 builder. Filtering into a named CTE rather than the outermost `SELECT` is not
 planned.
 
