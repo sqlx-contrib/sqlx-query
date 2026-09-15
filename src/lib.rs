@@ -146,6 +146,6 @@ mod writer;
 #[cfg_attr(docsrs, doc(cfg(feature = "cel")))]
 pub use filter::Filter;
 pub use writer::{
-    Error, IntoFilter, IntoSort, Ordering, Predicate, QueryWriter, Sort, SortDirection, SortKey,
-    Syntax,
+    Error, FilterExpr, IntoFilterExpr, IntoSortExpr, Literal, QueryWriter, Sort, SortDirection,
+    SortExpr, SortKey, Syntax,
 };

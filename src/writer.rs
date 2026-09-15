@@ -293,9 +293,9 @@ impl<DB: Syntax> QueryWriter<DB> {
     /// once, the conditions are `AND`ed together; an existing `WHERE` is kept
     /// and joined the same way. This adds a condition, it never replaces one.
     #[doc(alias = "where")]
-    pub fn filter(&mut self, filter: impl IntoFilter) -> &mut Self {
-        match filter.into_filter::<DB>() {
-            Ok(Predicate {
+    pub fn filter(&mut self, filter: impl IntoFilterExpr) -> &mut Self {
+        match filter.into_filter_expr::<DB>() {
+            Ok(FilterExpr {
                 expr: Some(mut expr),
                 values,
             }) => {
@@ -310,7 +310,7 @@ impl<DB: Syntax> QueryWriter<DB> {
                     }
                 }
             }
-            Ok(Predicate { expr: None, .. }) => {}
+            Ok(FilterExpr { expr: None, .. }) => {}
             Err(error) => self.fail(error),
         }
         self
@@ -324,9 +324,9 @@ impl<DB: Syntax> QueryWriter<DB> {
     /// still does from second place. A column named by both is ordered by
     /// once, where this put it.
     #[doc(alias = "order_by")]
-    pub fn sort(&mut self, sort: impl IntoSort) -> &mut Self {
-        match sort.into_sort::<DB>() {
-            Ok(Ordering(mut exprs)) => {
+    pub fn sort(&mut self, sort: impl IntoSortExpr) -> &mut Self {
+        match sort.into_sort_expr::<DB>() {
+            Ok(SortExpr(mut exprs)) => {
                 self.claim(&mut exprs);
                 self.order_by.extend(exprs);
             }
@@ -986,9 +986,9 @@ pub enum Literal {
 
 /// A condition, ready to join onto a query's `WHERE`, and the values it binds.
 ///
-/// Opaque, and produced by [`IntoFilter`] rather than constructed: it is
+/// Opaque, and produced by [`IntoFilterExpr`] rather than constructed: it is
 /// either a fragment that parsed, or something that came through an allowlist.
-pub struct Predicate {
+pub struct FilterExpr {
     /// `None` when nothing was asked for, so that an absent filter adds no
     /// condition rather than a `TRUE` for the planner to discard.
     pub(crate) expr: Option<Expr>,
@@ -999,10 +999,10 @@ pub struct Predicate {
 
 /// An ordering, ready to write into a query.
 ///
-/// Opaque, and produced by [`IntoSort`]. It holds syntax rather than field
+/// Opaque, and produced by [`IntoSortExpr`]. It holds syntax rather than field
 /// names, which is why a fragment may order by an expression -- `lower(name)
 /// desc` -- while a [`Sort`] may only name columns.
-pub struct Ordering(Vec<OrderByExpr>);
+pub struct SortExpr(Vec<OrderByExpr>);
 
 /// Anything [`QueryWriter::filter`] will take.
 ///
@@ -1010,21 +1010,21 @@ pub struct Ordering(Vec<OrderByExpr>);
 /// expression, and nothing checks what it names -- you wrote it, so you vouch
 /// for it. Anything that went through an allowlist implements this too, and
 /// the call site shows which you passed.
-pub trait IntoFilter {
+pub trait IntoFilterExpr {
     /// Turns this into a condition, parsing it in `DB`'s syntax if it is text.
     ///
     /// # Errors
     ///
     /// [`Error::Fragment`] or [`Error::Trailing`] if a fragment does not parse
     /// as exactly one expression.
-    fn into_filter<DB: Syntax>(self) -> Result<Predicate, Error>;
+    fn into_filter_expr<DB: Syntax>(self) -> Result<FilterExpr, Error>;
 }
 
-impl<S: AsRef<str>> IntoFilter for S {
-    fn into_filter<DB: Syntax>(self) -> Result<Predicate, Error> {
+impl<S: AsRef<str>> IntoFilterExpr for S {
+    fn into_filter_expr<DB: Syntax>(self) -> Result<FilterExpr, Error> {
         // A fragment binds nothing of its own: its placeholders are the
         // caller's, and so are the values that fill them.
-        QueryWriter::<DB>::fragment(self.as_ref(), Parser::parse_expr).map(|expr| Predicate {
+        QueryWriter::<DB>::fragment(self.as_ref(), Parser::parse_expr).map(|expr| FilterExpr {
             expr: Some(expr),
             values: Vec::new(),
         })
@@ -1038,29 +1038,29 @@ impl<S: AsRef<str>> IntoFilter for S {
 /// asked for, and has to have been resolved against a column map first --
 /// otherwise it still holds the client's field names, and writing those into a
 /// query is what the allowlist exists to prevent.
-pub trait IntoSort {
+pub trait IntoSortExpr {
     /// Turns this into an ordering, parsing it in `DB`'s syntax if it is text.
     ///
     /// # Errors
     ///
     /// [`Error::Fragment`] or [`Error::Trailing`] if a fragment does not parse,
     /// and [`Error::Unresolved`] if a [`Sort`] was never resolved.
-    fn into_sort<DB: Syntax>(self) -> Result<Ordering, Error>;
+    fn into_sort_expr<DB: Syntax>(self) -> Result<SortExpr, Error>;
 }
 
-impl<S: AsRef<str>> IntoSort for S {
-    fn into_sort<DB: Syntax>(self) -> Result<Ordering, Error> {
+impl<S: AsRef<str>> IntoSortExpr for S {
+    fn into_sort_expr<DB: Syntax>(self) -> Result<SortExpr, Error> {
         QueryWriter::<DB>::fragment(self.as_ref(), |parser| {
             parser.parse_comma_separated(Parser::parse_order_by_expr)
         })
-        .map(Ordering)
+        .map(SortExpr)
     }
 }
 
-impl IntoSort for &Sort {
-    fn into_sort<DB: Syntax>(self) -> Result<Ordering, Error> {
+impl IntoSortExpr for &Sort {
+    fn into_sort_expr<DB: Syntax>(self) -> Result<SortExpr, Error> {
         if self.resolved {
-            Ok(Ordering(self.order_by()))
+            Ok(SortExpr(self.order_by()))
         } else {
             Err(Error::Unresolved)
         }

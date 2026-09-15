@@ -5,7 +5,7 @@ use cel::parser::Parser;
 use sqlparser::ast::{BinaryOperator, Expr, Value as SqlValue};
 
 use crate::Error;
-use crate::writer::{IntoFilter, Literal, Predicate, Syntax, parenthesize, quoted};
+use crate::writer::{FilterExpr, IntoFilterExpr, Literal, Syntax, parenthesize, quoted};
 
 /// A condition, as a request asked for it.
 ///
@@ -156,28 +156,28 @@ impl Filter {
 
     /// The condition as syntax, and the values it binds, in the order its
     /// placeholders will render.
-    pub(crate) fn predicate(&self) -> Option<Predicate> {
+    pub(crate) fn filter_expr(&self) -> Option<FilterExpr> {
         let condition = self.condition.as_ref()?;
 
         let mut values = Vec::new();
         let expr = condition.write(&mut values);
 
-        Some(Predicate {
+        Some(FilterExpr {
             expr: Some(expr),
             values,
         })
     }
 }
 
-impl IntoFilter for &Filter {
-    fn into_filter<DB: Syntax>(self) -> Result<Predicate, Error> {
+impl IntoFilterExpr for &Filter {
+    fn into_filter_expr<DB: Syntax>(self) -> Result<FilterExpr, Error> {
         if !self.is_resolved() {
             return Err(Error::Unresolved);
         }
 
         // Nothing asked for adds no condition at all, rather than a `TRUE`
         // for the planner to discard and a reader to wonder about.
-        Ok(self.predicate().unwrap_or_else(|| Predicate {
+        Ok(self.filter_expr().unwrap_or_else(|| FilterExpr {
             expr: None,
             values: Vec::new(),
         }))
