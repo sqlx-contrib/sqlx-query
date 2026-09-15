@@ -77,6 +77,8 @@ mod postgres {
                 Literal::Int(value) => arguments.add(value),
                 Literal::Float(value) => arguments.add(value),
                 Literal::Text(value) => arguments.add(value),
+                #[cfg(feature = "chrono")]
+                Literal::Timestamp(value) => arguments.add(value),
             }
         }
 
@@ -108,6 +110,8 @@ mod sqlite {
                 Literal::Int(value) => arguments.add(value),
                 Literal::Float(value) => arguments.add(value),
                 Literal::Text(value) => arguments.add(value),
+                #[cfg(feature = "chrono")]
+                Literal::Timestamp(value) => arguments.add(value),
             }
         }
 
@@ -982,6 +986,10 @@ pub enum Literal {
     Int(i64),
     Float(f64),
     Text(String),
+    /// What `timestamp('...')` in a filter folds into.
+    #[cfg(feature = "chrono")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "chrono")))]
+    Timestamp(chrono::DateTime<chrono::Utc>),
 }
 
 /// A condition, ready to join onto a query's `WHERE`, and the values it binds.

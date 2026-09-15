@@ -7,9 +7,10 @@
 # Nothing here needs a database server. The end-to-end tests run against SQLite
 # in memory, so `make test` is the same on a laptop as it is in CI.
 
-# Every driver, and the CEL filter language. A test that names one is gated on
-# its feature, so a narrower set silently runs fewer tests rather than failing.
-FEATURES := postgres,sqlite,cel
+# Every driver, the CEL filter language, and the date type `timestamp()` folds
+# into. A test that names one is gated on its feature, so a narrower set
+# silently runs fewer tests rather than failing.
+FEATURES := postgres,sqlite,cel,chrono
 
 .PHONY: test
 test:
@@ -20,7 +21,7 @@ test:
 # Consumers take this crate with one driver and no default features, and that
 # configuration is easy to break while the all-features build stays green -- so
 # it is linted by default rather than on request.
-DRIVERS := postgres sqlite postgres,cel sqlite,cel
+DRIVERS := postgres sqlite postgres,cel sqlite,cel postgres,chrono postgres,cel,chrono
 
 .PHONY: lint
 lint:

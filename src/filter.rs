@@ -289,7 +289,7 @@ impl Condition {
         let values = list
             .elements
             .iter()
-            .map(|element| match literal(element) {
+            .map(|element| match literal(element)? {
                 Some(Compared::Value(value)) => Ok(value),
                 _ => Err(Error::Filter(format!(
                     "every item in `{field} in [...]` has to be a plain value"
@@ -316,7 +316,9 @@ impl Condition {
             )));
         };
 
-        let Some(Compared::Value(Literal::Text(text))) = args.first().and_then(literal) else {
+        let first = args.first().map(literal).transpose()?.flatten();
+
+        let Some(Compared::Value(Literal::Text(text))) = first else {
             return Err(Error::Filter(format!("`{field}.{name}` takes one string")));
         };
 
@@ -466,23 +468,84 @@ enum Compared {
     Value(Literal),
 }
 
-/// Reads one side of a comparison, if it is a plain value.
-fn literal(node: &IdedExpr) -> Option<Compared> {
+/// Reads one side of a comparison, if it is a value.
+///
+/// `None` means the node is something else -- a field, an expression -- which
+/// is not an error here, since the caller may be looking at the other side.
+/// An error means it was meant to be a value and could not be one.
+fn literal(node: &IdedExpr) -> Result<Option<Compared>, Error> {
+    if let CelExpr::Call(call) = &node.expr {
+        return timestamp(call);
+    }
+
     let CelExpr::Literal(value) = &node.expr else {
-        return None;
+        return Ok(None);
     };
 
-    Some(match value {
+    Ok(Some(match value {
         LiteralValue::Null => Compared::Null,
         LiteralValue::Boolean(value) => Compared::Value(Literal::Bool((*value).into_inner())),
         LiteralValue::Int(value) => Compared::Value(Literal::Int((*value).into_inner())),
         LiteralValue::UInt(value) => {
-            Compared::Value(Literal::Int(i64::try_from((*value).into_inner()).ok()?))
+            let unsigned = (*value).into_inner();
+            // A silent `None` here would read as "not a value" and surface as
+            // a confusing complaint about the shape of the comparison.
+            let signed = i64::try_from(unsigned).map_err(|_| {
+                Error::Filter(format!("`{unsigned}` is too large to compare against"))
+            })?;
+            Compared::Value(Literal::Int(signed))
         }
         LiteralValue::Double(value) => Compared::Value(Literal::Float((*value).into_inner())),
         LiteralValue::String(value) => Compared::Value(Literal::Text(value.clone().into_inner())),
-        LiteralValue::Bytes(_) => return None,
-    })
+        LiteralValue::Bytes(_) => return Ok(None),
+    }))
+}
+
+/// Reads `timestamp('...')`, the one call that is a value rather than a
+/// condition.
+///
+/// The date is parsed here rather than passed through, so `timestamp('soon')`
+/// is refused where a request is handled instead of surfacing later as a
+/// database error about a column nobody mentioned.
+#[cfg(feature = "chrono")]
+fn timestamp(call: &cel::common::ast::CallExpr) -> Result<Option<Compared>, Error> {
+    if call.func_name != "timestamp" || call.target.is_some() {
+        return Ok(None);
+    }
+
+    let [argument] = call.args.as_slice() else {
+        return Err(Error::Filter(
+            "`timestamp()` takes one string, as in `timestamp(\"2024-01-01T00:00:00Z\")`"
+                .to_owned(),
+        ));
+    };
+
+    let Some(Compared::Value(Literal::Text(text))) = literal(argument)? else {
+        return Err(Error::Filter(
+            "`timestamp()` takes a string, not an expression".to_owned(),
+        ));
+    };
+
+    let parsed = chrono::DateTime::parse_from_rfc3339(&text).map_err(|error| {
+        Error::Filter(format!(
+            "`timestamp(\"{text}\")` is not an RFC 3339 date: {error}"
+        ))
+    })?;
+
+    Ok(Some(Compared::Value(Literal::Timestamp(
+        parsed.with_timezone(&chrono::Utc),
+    ))))
+}
+
+/// Without the `chrono` feature there is no date to fold into, so
+/// `timestamp()` is simply a call the filter language does not have.
+///
+/// The `Result` is not wrapping anything here, and has to stay: it is the
+/// signature the other half of this pair has.
+#[cfg(not(feature = "chrono"))]
+#[allow(clippy::unnecessary_wraps)]
+fn timestamp(_call: &cel::common::ast::CallExpr) -> Result<Option<Compared>, Error> {
+    Ok(None)
 }
 
 /// Splits a comparison into the field and what it was compared to.
@@ -494,16 +557,21 @@ fn pair(args: &[IdedExpr], operator: &str) -> Result<(String, Compared), Error> 
         return Err(Error::Filter(format!("`{operator}` compares two things")));
     };
 
-    if let (CelExpr::Ident(field), Some(value)) = (&left.expr, literal(right)) {
+    if let CelExpr::Ident(field) = &left.expr
+        && let Some(value) = literal(right)?
+    {
         return Ok((field.clone(), value));
     }
 
-    match (&right.expr, literal(left)) {
-        (CelExpr::Ident(field), Some(value)) => Ok((field.clone(), value)),
-        _ => Err(Error::Filter(
-            "a comparison is a field and a value, as in `readCount > 100`".to_owned(),
-        )),
+    if let CelExpr::Ident(field) = &right.expr
+        && let Some(value) = literal(left)?
+    {
+        return Ok((field.clone(), value));
     }
+
+    Err(Error::Filter(
+        "a comparison is a field and a value, as in `readCount > 100`".to_owned(),
+    ))
 }
 
 /// Names a CEL node in the way a request author would recognise.

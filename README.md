@@ -109,9 +109,19 @@ something to reuse.
 | `field in [a, b]` | `IN ($1, $2)` |
 | `startsWith` `endsWith` `contains` | `LIKE` with the pattern escaped and bound |
 | a bare field | the column, for one that is already boolean |
+| `timestamp("…")` | an RFC 3339 date, bound -- needs the `chrono` feature |
 
 Refused rather than guessed at: arithmetic, macros, comparing two literals,
 `matches()` (regex is dialect-specific), and `in []` (which matches nothing).
+
+A date is parsed where the request is handled, so `timestamp("soon")` is
+refused there rather than surfacing later as a database complaint about a
+column nobody mentioned. Without the `chrono` feature, `timestamp()` is simply
+a call the language does not have.
+
+SQLite has no timestamp type -- sqlx stores a date as ISO-8601 text -- so the
+comparison is over text there. That is right for a column sqlx itself wrote,
+and wrong for one holding epoch integers, which nothing here can tell apart.
 
 [CEL]: https://github.com/google/cel-spec
 [AIP-160]: https://google.aip.dev/160

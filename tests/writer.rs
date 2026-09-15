@@ -716,6 +716,7 @@ mod postgres {
                 ("title", "title"),
                 ("visible", "visible"),
                 ("tier", "t.tier"),
+                ("created", "created_at"),
             ])
         }
 
@@ -877,6 +878,52 @@ mod postgres {
                 writer.sql().unwrap(),
                 r#"SELECT id FROM v WHERE tenant = $1 AND "read_count" > $2 AND "title" = $3"#
             );
+        }
+
+        // -- timestamps ------------------------------------------------------
+
+        /// The one call that is a value rather than a condition.
+        #[cfg(feature = "chrono")]
+        #[test]
+        fn timestamp_folds_into_a_bound_value() {
+            assert_eq!(
+                filtered(r#"created > timestamp("2024-01-01T00:00:00Z")"#).unwrap(),
+                r#""created_at" > $1"#
+            );
+        }
+
+        /// Parsed where the request is handled, rather than passed through to
+        /// surface later as a database complaint about a column nobody
+        /// mentioned.
+        #[cfg(feature = "chrono")]
+        #[test]
+        fn a_date_that_is_not_a_date_is_refused() {
+            let error = filtered(r#"created > timestamp("soon")"#).unwrap_err();
+            assert!(matches!(error, Error::Filter(_)), "{error:?}");
+        }
+
+        #[cfg(feature = "chrono")]
+        #[test]
+        fn timestamp_takes_exactly_one_string() {
+            for cel in [
+                "created > timestamp()",
+                r#"created > timestamp("a", "b")"#,
+                "created > timestamp(created)",
+            ] {
+                assert!(
+                    matches!(filtered(cel), Err(Error::Filter(_))),
+                    "{cel} was accepted"
+                );
+            }
+        }
+
+        /// Without the feature there is no date to fold into, so it is simply
+        /// a call the language does not have -- not a silent pass-through.
+        #[cfg(not(feature = "chrono"))]
+        #[test]
+        fn timestamp_is_not_a_call_this_language_has() {
+            let error = filtered(r#"created > timestamp("2024-01-01T00:00:00Z")"#).unwrap_err();
+            assert!(matches!(error, Error::Filter(_)), "{error:?}");
         }
 
         // -- refusals --------------------------------------------------------
@@ -1541,6 +1588,56 @@ mod sqlite {
                 let names: Vec<&str> = users.iter().map(|u| u.name.as_str()).collect();
                 assert_eq!(names, expected, "{cel}");
             }
+        }
+
+        /// A date reaches the database as a date. SQLite has no timestamp
+        /// type -- sqlx stores a `DateTime<Utc>` as ISO-8601 text -- so this
+        /// is also the check that the comparison still orders correctly.
+        #[cfg(all(feature = "cel", feature = "chrono"))]
+        #[tokio::test]
+        async fn a_date_filter_selects_by_date() {
+            use sqlx_query::Filter;
+            let pool = seed().await;
+
+            sqlx::query("CREATE TABLE events (id INTEGER PRIMARY KEY, at TEXT NOT NULL)")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            for (id, at) in [
+                (1, "2023-06-01T00:00:00+00:00"),
+                (2, "2024-06-01T00:00:00+00:00"),
+                (3, "2025-06-01T00:00:00+00:00"),
+            ] {
+                sqlx::query("INSERT INTO events (id, at) VALUES (?, ?)")
+                    .bind(id)
+                    .bind(at)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+
+            let columns = std::collections::HashMap::from([("at", "at")]);
+            let filter = Filter::parse(r#"at > timestamp("2024-01-01T00:00:00Z")"#)
+                .unwrap()
+                .resolve(&columns)
+                .unwrap();
+
+            let mut writer =
+                QueryWriter::<sqlx::Sqlite>::new("SELECT id FROM events ORDER BY id").unwrap();
+            writer.filter(&filter);
+
+            let ids: Vec<i64> = writer
+                .build()
+                .unwrap()
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.get::<i64, _>("id"))
+                .collect();
+
+            assert_eq!(ids, [2, 3]);
         }
 
         /// `build` rather than `build_as`, to cover the other constructor.
