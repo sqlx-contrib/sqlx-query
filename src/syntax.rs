@@ -11,13 +11,13 @@ use std::fmt;
 use cel::common::ast::{Expr as CelExpr, IdedExpr, LiteralValue, operators};
 use cel::parser::Parser as CelParser;
 use sqlparser::ast::{
-    BinaryOperator, Expr, Ident, OrderByExpr, OrderByOptions, OrderBySort, Value as SqlValue,
+    BinaryOperator, Expr, Ident, OrderByExpr, OrderByOptions, OrderBySort, Statement,
+    Value as SqlValue, VisitMut,
 };
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
+use sqlparser::tokenizer::Token;
 use sqlx::error::BoxDynError;
-
-use crate::writer::{QueryWriter, parenthesize};
 
 /// The two things a rewrite needs from a driver: how to read its SQL, and how
 /// to write a placeholder back out.
@@ -351,6 +351,96 @@ impl SortKey {
     }
 }
 
+/// Renders a node so its placeholders can be read in the order they print.
+///
+/// `pub(crate)` only because it bounds [`QueryWriter::fragment`], which the
+/// syntax module calls; nothing outside this crate can name it.
+///
+/// Display order is the order the database sees, and the only authority on it:
+/// sqlparser's `Select` prints `top` before `distinct` or after it depending on
+/// a runtime flag, so no traversal of the tree can stand in for this.
+pub(crate) trait Render {
+    fn render(&self) -> String;
+}
+
+impl Render for Statement {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for Expr {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for Vec<OrderByExpr> {
+    fn render(&self) -> String {
+        self.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Parses a fragment, and insists it was the whole of what it parsed.
+///
+/// Anything left after the expression is [`Error::Trailing`]. This is what
+/// makes a fragment safe to accept as text: `role = 'admin'` consumes
+/// everything, and `role = 'admin'; DROP TABLE users` does not.
+pub(crate) fn fragment<DB, T, F>(sql: &str, parse: F) -> Result<T, Error>
+where
+    DB: Syntax,
+    T: Render + VisitMut,
+    // `'static` rather than elided: the parser's grammar is a `&'static dyn`, so
+    // the parser built from it is too, and leaving the lifetime open
+    // would ask `parse_expr` to work for every parser rather than this one.
+    F: FnOnce(&mut Parser<'static>) -> Result<T, ParserError>,
+{
+    let mut parser = Parser::new(DB::parser())
+        .try_with_sql(sql)
+        .map_err(|source| Error::Fragment {
+            fragment: sql.to_owned(),
+            source,
+        })?;
+
+    let parsed = parse(&mut parser).map_err(|source| Error::Fragment {
+        fragment: sql.to_owned(),
+        source,
+    })?;
+
+    let rest = parser.peek_token();
+    if rest.token != Token::EOF {
+        return Err(Error::Trailing {
+            fragment: sql.to_owned(),
+            rest: rest.to_string(),
+        });
+    }
+
+    Ok(parsed)
+}
+
+/// Wraps an expression in parentheses if joining it with `AND` would otherwise
+/// change what it means.
+///
+/// Only `OR` needs it. `AND` binds tighter, so `a OR b` spliced beside a
+/// filter becomes `a OR (b AND filter)` -- a different query, silently. Every
+/// other operator that can head an expression here binds tighter than `AND`
+/// already, and parenthesising those would only add noise.
+pub(crate) fn parenthesize(expr: Expr) -> Expr {
+    if matches!(
+        expr,
+        Expr::BinaryOp {
+            op: BinaryOperator::Or,
+            ..
+        }
+    ) {
+        return Expr::Nested(Box::new(expr));
+    }
+    expr
+}
+
 /// Writes a column name as syntax, quoted so a column called `order` is still
 /// a column.
 ///
@@ -435,7 +525,7 @@ impl<S: AsRef<str>> IntoFilterExpr for S {
     fn into_filter_expr<DB: Syntax>(self) -> Result<FilterExpr, Error> {
         // A fragment binds nothing of its own: its placeholders are the
         // caller's, and so are the values that fill them.
-        QueryWriter::<DB>::fragment(self.as_ref(), Parser::parse_expr).map(|expr| FilterExpr {
+        fragment::<DB, _, _>(self.as_ref(), Parser::parse_expr).map(|expr| FilterExpr {
             expr: Some(expr),
             values: Vec::new(),
         })
@@ -461,7 +551,7 @@ pub trait IntoSortExpr {
 
 impl<S: AsRef<str>> IntoSortExpr for S {
     fn into_sort_expr<DB: Syntax>(self) -> Result<SortExpr, Error> {
-        QueryWriter::<DB>::fragment(self.as_ref(), |parser| {
+        fragment::<DB, _, _>(self.as_ref(), |parser| {
             parser.parse_comma_separated(Parser::parse_order_by_expr)
         })
         .map(SortExpr)

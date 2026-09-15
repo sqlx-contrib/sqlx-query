@@ -8,13 +8,12 @@ use sqlparser::ast::{
     BinaryOperator, Expr, GroupByExpr, LimitClause, OrderBy, OrderByExpr, OrderByKind, Query,
     SetExpr, Statement, Value, VisitMut, visit_expressions_mut,
 };
-use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::Token;
+use sqlparser::parser::Parser;
 use sqlx::query::{Query as SqlxQuery, QueryAs};
 use sqlx::{Arguments, AssertSqlSafe, Encode, FromRow, Type};
 
 use crate::Error;
-use crate::syntax::{FilterExpr, IntoFilterExpr, IntoSortExpr, Syntax};
+use crate::syntax::{FilterExpr, IntoFilterExpr, IntoSortExpr, Render, Syntax, parenthesize};
 
 /// A placeholder that has been numbered but not yet written in the driver's
 /// own form.
@@ -29,39 +28,6 @@ const NUMBERED: &str = "$__sqlxq_";
 const PENDING: &str = "$__sqlxqt_";
 
 const SUFFIX: &str = "__";
-
-/// Renders a node so its placeholders can be read in the order they print.
-///
-/// `pub(crate)` only because it bounds [`QueryWriter::fragment`], which the
-/// syntax module calls; nothing outside this crate can name it.
-///
-/// Display order is the order the database sees, and the only authority on it:
-/// sqlparser's `Select` prints `top` before `distinct` or after it depending on
-/// a runtime flag, so no traversal of the tree can stand in for this.
-pub(crate) trait Render {
-    fn render(&self) -> String;
-}
-
-impl Render for Statement {
-    fn render(&self) -> String {
-        self.to_string()
-    }
-}
-
-impl Render for Expr {
-    fn render(&self) -> String {
-        self.to_string()
-    }
-}
-
-impl Render for Vec<OrderByExpr> {
-    fn render(&self) -> String {
-        self.iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
 
 /// Adds filters and ordering to a query you already wrote.
 ///
@@ -329,42 +295,6 @@ impl<DB: Syntax> QueryWriter<DB> {
         self.arity += Self::number(node, self.arity);
     }
 
-    /// Parses a fragment, and insists it was the whole of what it parsed.
-    ///
-    /// Anything left after the expression is [`Error::Trailing`]. This is what
-    /// makes a fragment safe to accept as text: `role = 'admin'` consumes
-    /// everything, and `role = 'admin'; DROP TABLE users` does not.
-    pub(crate) fn fragment<T, F>(sql: &str, parse: F) -> Result<T, Error>
-    where
-        T: Render + VisitMut,
-        // `'static` rather than elided: the parser's grammar is a `&'static dyn`, so
-        // the parser built from it is too, and leaving the lifetime open
-        // would ask `parse_expr` to work for every parser rather than this one.
-        F: FnOnce(&mut Parser<'static>) -> Result<T, ParserError>,
-    {
-        let mut parser = Parser::new(DB::parser())
-            .try_with_sql(sql)
-            .map_err(|source| Error::Fragment {
-                fragment: sql.to_owned(),
-                source,
-            })?;
-
-        let parsed = parse(&mut parser).map_err(|source| Error::Fragment {
-            fragment: sql.to_owned(),
-            source,
-        })?;
-
-        let rest = parser.peek_token();
-        if rest.token != Token::EOF {
-            return Err(Error::Trailing {
-                fragment: sql.to_owned(),
-                rest: rest.to_string(),
-            });
-        }
-
-        Ok(parsed)
-    }
-
     fn fail(&mut self, error: Error) {
         // First failure wins: it is the one that explains the rest.
         if self.failure.is_none() {
@@ -590,26 +520,6 @@ impl<DB: Syntax> fmt::Debug for QueryWriter<DB> {
             .field("failure", &self.failure)
             .finish_non_exhaustive()
     }
-}
-
-/// Wraps an expression in parentheses if joining it with `AND` would otherwise
-/// change what it means.
-///
-/// Only `OR` needs it. `AND` binds tighter, so `a OR b` spliced beside a
-/// filter becomes `a OR (b AND filter)` -- a different query, silently. Every
-/// other operator that can head an expression here binds tighter than `AND`
-/// already, and parenthesising those would only add noise.
-pub(crate) fn parenthesize(expr: Expr) -> Expr {
-    if matches!(
-        expr,
-        Expr::BinaryOp {
-            op: BinaryOperator::Or,
-            ..
-        }
-    ) {
-        return Expr::Nested(Box::new(expr));
-    }
-    expr
 }
 
 /// A column's identity, for the purpose of ordering by it only once.
