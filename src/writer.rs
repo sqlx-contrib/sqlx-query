@@ -9,6 +9,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
+use sqlx::error::BoxDynError;
 use sqlx::query::{Query as SqlxQuery, QueryAs};
 use sqlx::{Arguments, AssertSqlSafe, Encode, FromRow, Type};
 
@@ -31,6 +32,17 @@ pub trait Syntax: sqlx::Database<Arguments: sqlx::IntoArguments<Self>> {
     /// The grammar the base query and its fragments are parsed with.
     fn parser() -> &'static dyn Dialect;
 
+    /// Binds a filter's literal, in this driver's own types.
+    ///
+    /// Here rather than on [`QueryWriter`] because a writer is generic over
+    /// the driver, and generic code cannot know that `i64` is bindable for it.
+    /// An implementation knows, because it names one driver.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the driver says when a value cannot be encoded.
+    fn bind_literal(arguments: &mut Self::Arguments, literal: Literal) -> Result<(), BoxDynError>;
+
     /// Renders the placeholder that binds the `index`th value, counting from
     /// zero.
     ///
@@ -45,14 +57,27 @@ pub trait Syntax: sqlx::Database<Arguments: sqlx::IntoArguments<Self>> {
 
 #[cfg(feature = "postgres")]
 mod postgres {
-    use super::{Dialect, Syntax};
+    use super::{BoxDynError, Dialect, Literal, Syntax};
     use sqlparser::dialect::PostgreSqlDialect;
+    use sqlx::Arguments as _;
 
     static DIALECT: PostgreSqlDialect = PostgreSqlDialect {};
 
     impl Syntax for sqlx::Postgres {
         fn parser() -> &'static dyn Dialect {
             &DIALECT
+        }
+
+        fn bind_literal(
+            arguments: &mut Self::Arguments,
+            literal: Literal,
+        ) -> Result<(), BoxDynError> {
+            match literal {
+                Literal::Bool(value) => arguments.add(value),
+                Literal::Int(value) => arguments.add(value),
+                Literal::Float(value) => arguments.add(value),
+                Literal::Text(value) => arguments.add(value),
+            }
         }
 
         fn placeholder(index: usize) -> String {
@@ -63,14 +88,27 @@ mod postgres {
 
 #[cfg(feature = "sqlite")]
 mod sqlite {
-    use super::{Dialect, Syntax};
+    use super::{BoxDynError, Dialect, Literal, Syntax};
     use sqlparser::dialect::SQLiteDialect;
+    use sqlx::Arguments as _;
 
     static DIALECT: SQLiteDialect = SQLiteDialect {};
 
     impl Syntax for sqlx::Sqlite {
         fn parser() -> &'static dyn Dialect {
             &DIALECT
+        }
+
+        fn bind_literal(
+            arguments: &mut Self::Arguments,
+            literal: Literal,
+        ) -> Result<(), BoxDynError> {
+            match literal {
+                Literal::Bool(value) => arguments.add(value),
+                Literal::Int(value) => arguments.add(value),
+                Literal::Float(value) => arguments.add(value),
+                Literal::Text(value) => arguments.add(value),
+            }
         }
 
         // `?NNN`, not bare `?`. SQLite is the only one of the three whose
@@ -257,10 +295,22 @@ impl<DB: Syntax> QueryWriter<DB> {
     #[doc(alias = "where")]
     pub fn filter(&mut self, filter: impl IntoFilter) -> &mut Self {
         match filter.into_filter::<DB>() {
-            Ok(Predicate(mut expr)) => {
+            Ok(Predicate {
+                expr: Some(mut expr),
+                values,
+            }) => {
                 self.claim(&mut expr);
                 self.filters.push(expr);
+
+                // Claimed and bound together, so the slots the condition just
+                // took are filled by the values it took them for.
+                for value in values {
+                    if let Err(error) = DB::bind_literal(&mut self.arguments, value) {
+                        self.fail(Error::Encode(error.to_string()));
+                    }
+                }
             }
+            Ok(Predicate { expr: None, .. }) => {}
             Err(error) => self.fail(error),
         }
         self
@@ -651,7 +701,7 @@ impl<DB: Syntax> fmt::Debug for QueryWriter<DB> {
 /// filter becomes `a OR (b AND filter)` -- a different query, silently. Every
 /// other operator that can head an expression here binds tighter than `AND`
 /// already, and parenthesising those would only add noise.
-fn parenthesize(expr: Expr) -> Expr {
+pub(crate) fn parenthesize(expr: Expr) -> Expr {
     if matches!(
         expr,
         Expr::BinaryOp {
@@ -906,7 +956,7 @@ impl SortKey {
 ///
 /// A dotted name is a qualified one: `v.created_at` is `"v"."created_at"`,
 /// rather than one column with a dot in its name.
-fn quoted(name: &str) -> Expr {
+pub(crate) fn quoted(name: &str) -> Expr {
     let mut parts: Vec<Ident> = name
         .split('.')
         .map(|part| Ident::with_quote('"', part))
@@ -919,11 +969,33 @@ fn quoted(name: &str) -> Expr {
     }
 }
 
-/// A condition, ready to join onto a query's `WHERE`.
+/// A value a filter wants bound.
+///
+/// Closed, because it is only ever what a filter expression can hold. Values
+/// travel beside the SQL rather than inside it: writing `100` into the
+/// statement would be safe -- sqlparser escapes what it prints -- but it makes
+/// a distinct query text per value, and a prepared statement cache keyed on
+/// that text has nothing to reuse.
+#[derive(Debug, Clone)]
+pub enum Literal {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(String),
+}
+
+/// A condition, ready to join onto a query's `WHERE`, and the values it binds.
 ///
 /// Opaque, and produced by [`IntoFilter`] rather than constructed: it is
 /// either a fragment that parsed, or something that came through an allowlist.
-pub struct Predicate(Expr);
+pub struct Predicate {
+    /// `None` when nothing was asked for, so that an absent filter adds no
+    /// condition rather than a `TRUE` for the planner to discard.
+    pub(crate) expr: Option<Expr>,
+    /// In the order the condition's placeholders render, so they are claimed
+    /// and bound in step.
+    pub(crate) values: Vec<Literal>,
+}
 
 /// An ordering, ready to write into a query.
 ///
@@ -950,7 +1022,12 @@ pub trait IntoFilter {
 
 impl<S: AsRef<str>> IntoFilter for S {
     fn into_filter<DB: Syntax>(self) -> Result<Predicate, Error> {
-        QueryWriter::<DB>::fragment(self.as_ref(), Parser::parse_expr).map(Predicate)
+        // A fragment binds nothing of its own: its placeholders are the
+        // caller's, and so are the values that fill them.
+        QueryWriter::<DB>::fragment(self.as_ref(), Parser::parse_expr).map(|expr| Predicate {
+            expr: Some(expr),
+            values: Vec::new(),
+        })
     }
 }
 
@@ -1055,6 +1132,10 @@ pub enum Error {
     /// An `order_by` value did not parse.
     Sort(String),
 
+    /// A `filter` value did not parse, or asked for something with no meaning
+    /// as a SQL condition.
+    Filter(String),
+
     /// A request named a field the column map does not have.
     ///
     /// The map is an allowlist, so this is what stops a request ordering by a
@@ -1115,6 +1196,7 @@ impl fmt::Display for Error {
             ),
             Self::Encode(message) => write!(f, "a bound value could not be encoded: {message}"),
             Self::Sort(message) => write!(f, "the ordering did not parse: {message}"),
+            Self::Filter(message) => write!(f, "the filter did not parse: {message}"),
             Self::Field(field) => write!(
                 f,
                 "`{field}` is not a field this query offers; only the ones named in its \

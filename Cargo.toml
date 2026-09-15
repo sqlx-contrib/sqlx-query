@@ -29,6 +29,15 @@ pedantic = { level = "deny", priority = -1 }
 sqlparser = { version = "0.63", features = ["visitor"] }
 sqlx = { version = "0.9", default-features = false }
 
+# Optional: only `Filter` needs a CEL parser, and a query that only sorts
+# should not compile one.
+#
+# `chrono` is the one cel feature wanted here, and not for the parser -- it is
+# what lets `timestamp('...')` fold into a bound value.
+cel = { version = "0.14", default-features = false, features = [
+  "chrono",
+], optional = true }
+
 [features]
 default = ["postgres"]
 
@@ -41,6 +50,9 @@ default = ["postgres"]
 # out rather than made to work by reordering the values behind your back.
 postgres = ["sqlx/postgres"]
 sqlite = ["sqlx/sqlite"]
+
+# CEL filters.
+cel = ["dep:cel"]
 
 [dev-dependencies]
 sqlx = { version = "0.9", default-features = false, features = [
