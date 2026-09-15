@@ -29,12 +29,14 @@ pedantic = { level = "deny", priority = -1 }
 sqlparser = { version = "0.63", features = ["visitor"] }
 sqlx = { version = "0.9", default-features = false }
 
-# Optional: only `Filter` needs a CEL parser, and a query that only sorts
-# should not compile one.
-#
 # Only the parser is wanted, not the evaluator: this crate reads the CEL
 # syntax tree itself, so none of cel's own value handling is used.
-cel = { version = "0.14", default-features = false, optional = true }
+#
+# Not optional. A filter is half of what this crate is for, and a feature
+# would buy a caller who only sorts about fifteen transitive crates back at
+# the cost of a second build configuration for everyone. If that trade ever
+# looks wrong, making it optional is not a breaking change.
+cel = { version = "0.14", default-features = false }
 
 # Optional: what `timestamp('...')` in a filter folds into. Left out, that call
 # is simply one the filter language does not have.
@@ -54,9 +56,6 @@ default = ["postgres"]
 # out rather than made to work by reordering the values behind your back.
 postgres = ["sqlx/postgres"]
 sqlite = ["sqlx/sqlite"]
-
-# CEL filters.
-cel = ["dep:cel"]
 
 # `timestamp('...')` in a filter, and the date type it binds as.
 chrono = ["dep:chrono", "sqlx/chrono"]
