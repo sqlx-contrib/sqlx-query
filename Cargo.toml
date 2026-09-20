@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sqlx-contrib/sqlx-query-v2"
+
+[workspace.dependencies]
+sqlx = { version = "0.8", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+regex = "1"
+thiserror = "1"

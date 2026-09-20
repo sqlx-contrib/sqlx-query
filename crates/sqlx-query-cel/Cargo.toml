@@ -1,0 +1,10 @@
+[package]
+name = "sqlx-query-cel"
+description = "CEL filter -> WHERE fragment for sqlx-query-v2 (blocked on sqlx-cel, see src/lib.rs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sqlx-query-v2 = { path = "../sqlx-query-v2" }
