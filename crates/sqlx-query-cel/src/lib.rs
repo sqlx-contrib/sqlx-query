@@ -1,6 +1,6 @@
 //! `Filter` (CEL -> `WHERE` fragment) belongs here, implementing
 //! [`sqlx_query::QueryResolver`] the same way
-//! [`sqlx_query::OrderClause`] does, and `impl
+//! [`sqlx_query::OrderByClause`] does, and `impl
 //! From<Filter> for sqlx_query::WhereClause` so it plugs into
 //! `QueryComposer::where_by` — on top of `sqlx-cel` (see DESIGN.md's
 //! "Prior art this is a port of").

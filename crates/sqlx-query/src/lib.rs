@@ -1,4 +1,4 @@
-//! Splices a [`WhereClause`] and an [`OrderClause`] into
+//! Splices a [`WhereClause`] and an [`OrderByClause`] into
 //! `/* query.<name> */` sentinel comments in a base SQL query the caller
 //! already wrote, instead of building a `SELECT` from scratch. See
 //! `DESIGN.md` in the repo root for the full rationale.
@@ -12,7 +12,7 @@ mod shift;
 mod value;
 
 pub use clauses::{
-    Cursor, CursorError, OrderClause, OrderClauseError, OrderDirection, WhereClause,
+    Cursor, CursorError, OrderByClause, OrderByClauseError, OrderDirection, WhereClause,
 };
 pub use composer::{Error, QueryComposer};
 pub use dialect::QueryDialect;

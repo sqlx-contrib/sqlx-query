@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 
-use crate::{Cursor, OrderClause, QueryDialect, Value, WhereClause};
+use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
 
 /// Matches a sentinel comment of the form `/* query.<name> <suffix> */`,
 /// capturing the name and the trailing connective/separator text
@@ -21,14 +21,14 @@ static SENTINEL_RE: LazyLock<Regex> =
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// `order_by` was set to something that doesn't match the
-    /// `OrderClause` a `cursor()` was built against — almost always
+    /// `OrderByClause` a `cursor()` was built against — almost always
     /// means the client changed their sort between the request that
     /// issued the page token and the one using it.
     #[error("order_by doesn't match the order_by the cursor was built against")]
     CursorOrderByMismatch,
 }
 
-/// Splices a [`WhereClause`] and an [`OrderClause`] into
+/// Splices a [`WhereClause`] and an [`OrderByClause`] into
 /// `/* query.<name> */` sentinel comments in a static SQL template — the
 /// `pgx-contrib/pgxquery` port. `sql` is never parsed structurally, only
 /// scanned once for its own sentinel comments; it may contain any syntax
@@ -37,7 +37,7 @@ pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
     values: Vec<Value>,
     where_by: Vec<WhereClause>,
-    order_by: Vec<OrderClause>,
+    order_by: Vec<OrderByClause>,
     cursor: Option<Cursor>,
     _dialect: PhantomData<fn() -> DB>,
 }
@@ -62,18 +62,19 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         self
     }
 
-    /// Applies a keyset pagination [`Cursor`]. Its `where_by()` is AND-ed
-    /// in alongside anything passed to [`push_where`](Self::push_where) (a
-    /// filter and pagination both apply — neither silently replaces the
-    /// other). Its `order_by()` doesn't have to be repeated: if
-    /// [`push_order`](Self::push_order) is left unset, the cursor's is
+    /// Applies a keyset pagination [`Cursor`]. Its `to_where_clause()` is
+    /// AND-ed in alongside anything passed to
+    /// [`push_where`](Self::push_where) (a filter and pagination both
+    /// apply — neither silently replaces the other). Its
+    /// `to_order_by_clause()` doesn't have to be repeated: if
+    /// [`push_order_by`](Self::push_order_by) is left unset, the cursor's is
     /// used directly; if it *is* set, [`render`](Self::render) checks the
     /// two match, since a mismatch almost always means the client's sort
     /// changed between the request that issued this cursor and this one.
     /// Only one cursor makes sense per query, so unlike `push_where`/
-    /// `push_order` this doesn't accumulate — a second call replaces the
+    /// `push_order_by` this doesn't accumulate — a second call replaces the
     /// first.
-    pub fn cursor(&mut self, cursor: Cursor) -> &mut Self {
+    pub fn with_cursor(&mut self, cursor: Cursor) -> &mut Self {
         self.cursor = Some(cursor);
         self
     }
@@ -83,20 +84,21 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// built by hand, or anything else WHERE-shaped. Accumulates: each
     /// call ANDs its value onto whatever's already there (e.g. an
     /// always-present tenant-scoping condition, then a client-supplied
-    /// filter) rather than replacing it, and if [`cursor`](Self::cursor)
-    /// is also set, that's AND-ed in too — see [`render`](Self::render).
+    /// filter) rather than replacing it, and if
+    /// [`with_cursor`](Self::with_cursor) is also set, that's AND-ed in
+    /// too — see [`render`](Self::render).
     pub fn push_where(&mut self, filter: impl Into<WhereClause>) -> &mut Self {
         self.where_by.push(filter.into());
         self
     }
 
     /// Splices onto `/* query.order_by */`. Accepts anything that converts
-    /// into [`OrderClause`]. Accumulates like
+    /// into [`OrderByClause`]. Accumulates like
     /// [`push_where`](Self::push_where), but as tie-breakers in call
     /// order rather than an AND — "sort by the first call, **then** by
-    /// the second" (see [`OrderClause::then`]) — since ORDER BY is a
+    /// the second" (see [`OrderByClause::then`]) — since ORDER BY is a
     /// sequence, not a boolean combination.
-    pub fn push_order(&mut self, order_by: impl Into<OrderClause>) -> &mut Self {
+    pub fn push_order_by(&mut self, order_by: impl Into<OrderByClause>) -> &mut Self {
         self.order_by.push(order_by.into());
         self
     }
@@ -106,7 +108,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// final placeholders reference them: base binds, then the effective
     /// `where_by` value's own values — regardless of where either
     /// sentinel physically sits in `sql`. `order_by` never contributes
-    /// values (see [`OrderClause::sql`]), so it isn't part of that
+    /// values (see [`OrderByClause::sql`]), so it isn't part of that
     /// offset accounting.
     ///
     /// A sentinel whose value is absent, or whose value rendered to an
@@ -116,12 +118,15 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// an unrecognized `query.<name>`.
     pub fn render(&self) -> Result<(String, Vec<Value>), Error> {
         // All accumulated order_by values, in call order, as tie-breakers —
-        // "sort by the first push_order() call, then by the second", etc.
-        let order_by: Option<OrderClause> =
-            self.order_by.clone().into_iter().reduce(OrderClause::then);
+        // "sort by the first push_order_by() call, then by the second", etc.
+        let order_by: Option<OrderByClause> = self
+            .order_by
+            .clone()
+            .into_iter()
+            .reduce(OrderByClause::then);
 
         if let (Some(cursor), Some(order_by)) = (&self.cursor, &order_by) {
-            if cursor.order_by() != *order_by {
+            if cursor.to_order_by_clause() != *order_by {
                 return Err(Error::CursorOrderByMismatch);
             }
         }
@@ -137,7 +142,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .where_by
             .iter()
             .cloned()
-            .chain(self.cursor.as_ref().map(Cursor::where_by))
+            .chain(self.cursor.as_ref().map(Cursor::to_where_clause))
             .reduce(WhereClause::and)
             .filter(|w| !w.sql().as_str().is_empty())
             .map(|w| {
@@ -154,12 +159,12 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 
         let where_by_values = where_by.map_or_else(Vec::new, |w| w.values().to_vec());
 
-        // The accumulated order_by if any push_order() calls were made;
+        // The accumulated order_by if any push_order_by() calls were made;
         // otherwise the cursor's own (already checked above to match when
         // both are present) — the cursor's order_by only ever substitutes
         // for a completely absent explicit one, it doesn't get appended as
         // an extra tie-breaker onto an explicit order_by that IS present.
-        let order_by = order_by.or_else(|| self.cursor.as_ref().map(Cursor::order_by));
+        let order_by = order_by.or_else(|| self.cursor.as_ref().map(Cursor::to_order_by_clause));
 
         let order_by_sql =
             order_by.map_or_else(String::new, |order_by| order_by.sql().as_str().to_owned());

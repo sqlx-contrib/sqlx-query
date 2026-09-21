@@ -1,5 +1,5 @@
 //! Keyset ("seek method") pagination cursor: an OR-of-ANDs tuple
-//! comparison built from a resolved [`OrderClause`] and one boundary
+//! comparison built from a resolved [`OrderByClause`] and one boundary
 //! value per key.
 //!
 //! `Cursor::parse` (decoding an opaque `page_token` from the client) and
@@ -13,14 +13,14 @@
 //! which `Value` variant it should become).
 
 use super::order::OrderKey;
-use crate::{OrderClause, OrderDirection, Value, WhereClause};
+use crate::{OrderByClause, OrderDirection, Value, WhereClause};
 
 /// One ordered comparison key: a resolved column/direction pair, paired
 /// with the cursor's boundary value for it. `value` is `None` between
 /// [`Cursor::new`] and [`Cursor::after`] — never observable from outside
 /// this module, since `Cursor`'s only public accessors
-/// ([`Cursor::order_by`], [`Cursor::where_by`]) assume every key already
-/// has one.
+/// ([`Cursor::to_order_by_clause`], [`Cursor::to_where_clause`]) assume
+/// every key already has one.
 #[derive(Debug)]
 struct CursorKey {
     key: OrderKey,
@@ -43,7 +43,7 @@ pub enum CursorError {
 impl Cursor {
     /// Clause only, no boundary values yet — supply them with
     /// [`after`](Self::after).
-    pub fn new(order_by: impl Into<OrderClause>) -> Self {
+    pub fn new(order_by: impl Into<OrderByClause>) -> Self {
         let keys = order_by
             .into()
             .keys()
@@ -70,10 +70,10 @@ impl Cursor {
         Ok(self)
     }
 
-    /// Reconstructs the `OrderClause` this cursor was built against, to
+    /// Reconstructs the `OrderByClause` this cursor was built against, to
     /// re-apply to the next page's query — see
-    /// [`QueryComposer::cursor`](crate::QueryComposer::cursor).
-    pub fn order_by(&self) -> OrderClause {
+    /// [`QueryComposer::with_cursor`](crate::QueryComposer::with_cursor).
+    pub fn to_order_by_clause(&self) -> OrderByClause {
         self.keys.iter().map(|ck| ck.key.clone()).collect()
     }
 
@@ -85,7 +85,7 @@ impl Cursor {
     /// Panics if any key's value is unset — unreachable through this
     /// type's public API, since only [`after`](Self::after) sets values,
     /// and it always sets all of them together.
-    pub fn where_by(&self) -> WhereClause {
+    pub fn to_where_clause(&self) -> WhereClause {
         let mut branches = Vec::with_capacity(self.keys.len());
         for i in 0..self.keys.len() {
             let mut conditions = Vec::with_capacity(i + 1);
@@ -116,7 +116,7 @@ impl Cursor {
                 where_by.bind(
                     key.value
                         .clone()
-                        .expect("Cursor::where_by called before after() set all values"),
+                        .expect("Cursor::to_where_clause called before after() set all values"),
                 )
             })
     }
@@ -135,12 +135,12 @@ mod tests {
 
     #[test]
     fn builds_tuple_comparison_for_two_keys() {
-        let order_by = OrderClause::parse("rank desc, id asc").unwrap();
+        let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
         let cursor = Cursor::new(order_by)
             .after(vec![Value::Int(42), Value::Int(7)])
             .unwrap();
 
-        let where_by = cursor.where_by();
+        let where_by = cursor.to_where_clause();
 
         assert_eq!(
             where_by.sql().as_str(),
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn after_rejects_wrong_value_count() {
-        let order_by = OrderClause::parse("rank desc, id asc").unwrap();
+        let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
         let err = Cursor::new(order_by)
             .after(vec![Value::Int(1)])
             .unwrap_err();
@@ -166,11 +166,11 @@ mod tests {
 
     #[test]
     fn order_by_round_trips() {
-        let order_by = OrderClause::parse("rank desc, id asc").unwrap();
+        let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
         let cursor = Cursor::new(order_by.clone())
             .after(vec![Value::Int(42), Value::Int(7)])
             .unwrap();
 
-        assert_eq!(cursor.order_by(), order_by);
+        assert_eq!(cursor.to_order_by_clause(), order_by);
     }
 }

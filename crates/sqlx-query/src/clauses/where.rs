@@ -56,9 +56,9 @@ impl WhereClause {
     }
 
     /// This clause's SQL text. Matches
-    /// [`OrderClause::sql`](crate::OrderClause::sql)'s return type —
+    /// [`OrderByClause::sql`](crate::OrderByClause::sql)'s return type —
     /// both clause types answer "what's your SQL text?" as [`SqlStr`], the
-    /// same type `sqlx::query()` itself wants. Unlike `OrderClause`'s
+    /// same type `sqlx::query()` itself wants. Unlike `OrderByClause`'s
     /// (computed fresh from `terms` on every call), this one is a cheap
     /// clone: `new()` stores the text `Arc`-backed, and `SqlStr::clone`
     /// is just a refcount bump for the `Arc` variant.

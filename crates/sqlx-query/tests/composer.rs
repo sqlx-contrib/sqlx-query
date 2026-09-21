@@ -9,14 +9,14 @@
 //! values, without needing a live database connection.
 
 use sqlx::Execute;
-use sqlx_query::{Cursor, Error, OrderClause, QueryComposer, Value, WhereClause};
+use sqlx_query::{Cursor, Error, OrderByClause, QueryComposer, Value, WhereClause};
 
 fn admin_filter() -> WhereClause {
     WhereClause::new("role = 'admin'")
 }
 
-fn name_order_by() -> OrderClause {
-    OrderClause::parse("name asc").unwrap()
+fn name_order_by() -> OrderByClause {
+    OrderByClause::parse("name asc").unwrap()
 }
 
 /// Ports pgxquery's "substitutes where and order_by sentinels" test.
@@ -29,7 +29,7 @@ fn substitutes_where_and_order_by_sentinels() {
         .bind(0i64)
         .bind(10i64)
         .push_where(admin_filter())
-        .push_order(name_order_by());
+        .push_order_by(name_order_by());
 
     let (sql, values) = query.render().unwrap();
 
@@ -49,7 +49,7 @@ fn substitutes_where_and_order_by_sentinels() {
 fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.bind("007").push_order(name_order_by());
+    query.bind("007").push_order_by(name_order_by());
 
     let (sql, _) = query.render().unwrap();
 
@@ -58,7 +58,7 @@ fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
     assert!(sql.contains("name ASC , id"));
 }
 
-/// Ports pgxquery's "When OrderClause is empty: drops the order_by sentinel
+/// Ports pgxquery's "When OrderByClause is empty: drops the order_by sentinel
 /// and keeps where".
 #[test]
 fn missing_order_by_drops_sentinel_and_keeps_where() {
@@ -73,7 +73,7 @@ fn missing_order_by_drops_sentinel_and_keeps_where() {
     assert!(!sql.contains("ASC"));
 }
 
-/// Ports pgxquery's "When both Where and OrderClause are empty: drops both
+/// Ports pgxquery's "When both Where and OrderByClause are empty: drops both
 /// sentinels but still appends Args" — here, the base query's own binds.
 #[test]
 fn both_missing_drops_both_sentinels_but_keeps_base_binds() {
@@ -115,13 +115,13 @@ fn bare_sentinel_substitutes_value_alone() {
 
 /// Ports pgxquery's "the order_by sentinel is placed before the static
 /// list: preserves the trailing comma as the suffix", and its nested
-/// "OrderClause is empty: drops the sentinel leaving the static list intact".
+/// "OrderByClause is empty: drops the sentinel leaving the static list intact".
 #[test]
 fn order_by_sentinel_before_static_list() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
 
     let mut with_order_by = QueryComposer::<sqlx::Postgres>::new(sql);
-    with_order_by.push_order(OrderClause::parse("priority desc").unwrap());
+    with_order_by.push_order_by(OrderByClause::parse("priority desc").unwrap());
     let (sql_with, _) = with_order_by.render().unwrap();
     assert!(sql_with.contains("priority DESC , id"));
 
@@ -171,11 +171,11 @@ fn shifts_filter_placeholders_past_base_binds() {
     );
 }
 
-/// `OrderClause` never carries bind values (it only ever renders column
+/// `OrderByClause` never carries bind values (it only ever renders column
 /// names and directions), so unlike `WhereClause`, its sentinel never needs
 /// placeholder shifting — this documents that invariant, replacing
 /// pgxquery's "OrderBy contains a placeholder" scenario, which doesn't
-/// apply to the concrete `OrderClause` type this crate uses.
+/// apply to the concrete `OrderByClause` type this crate uses.
 #[test]
 fn order_by_never_contributes_bind_values() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id LIMIT $2 OFFSET $3";
@@ -184,7 +184,7 @@ fn order_by_never_contributes_bind_values() {
         .bind("007")
         .bind(0i64)
         .bind(10i64)
-        .push_order(OrderClause::parse("rank desc").unwrap());
+        .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
     let (sql, values) = query.render().unwrap();
 
@@ -274,7 +274,7 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
         .bind(50i64) // take -> $1
         .bind(0i64) // skip -> $2
         .push_where(WhereClause::new("status = $1").bind("ACTIVE"))
-        .push_order(OrderClause::parse("rank desc").unwrap());
+        .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
     let (sql, values) = query.render().unwrap();
 
@@ -291,15 +291,15 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
     );
 }
 
-/// `OrderClause` end to end through the composer, using real column
+/// `OrderByClause` end to end through the composer, using real column
 /// resolution rather than a hand-built `WhereClause`.
 #[test]
 fn order_by_splices_through_composer() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
-    let order_by = OrderClause::parse("rank desc").unwrap();
+    let order_by = OrderByClause::parse("rank desc").unwrap();
 
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.push_order(order_by);
+    query.push_order_by(order_by);
 
     let (sql, values) = query.render().unwrap();
 
@@ -322,20 +322,20 @@ fn build_produces_a_query_with_the_rendered_sql() {
 }
 
 fn rank_cursor() -> Cursor {
-    let order_by = OrderClause::parse("rank desc, id asc").unwrap();
+    let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
     Cursor::new(order_by)
         .after(vec![Value::Int(42), Value::Int(7)])
         .unwrap()
 }
 
-/// A cursor alone (no separate `.push_order()` call) supplies its own
+/// A cursor alone (no separate `.push_order_by()` call) supplies its own
 /// order_by directly — this is the expected, ergonomic case, not a
 /// degraded fallback.
 #[test]
 fn cursor_alone_supplies_its_own_order_by() {
     let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.cursor(rank_cursor());
+    query.with_cursor(rank_cursor());
 
     let (sql, values) = query.render().unwrap();
 
@@ -344,7 +344,7 @@ fn cursor_alone_supplies_its_own_order_by() {
     assert_eq!(values, vec![Value::Int(42), Value::Int(7)]);
 }
 
-/// A cursor whose order_by matches an explicitly-set `.push_order()` is
+/// A cursor whose order_by matches an explicitly-set `.push_order_by()` is
 /// accepted — the common case of a client re-sending the same sort on
 /// every page.
 #[test]
@@ -352,8 +352,8 @@ fn cursor_with_matching_order_by_is_accepted() {
     let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query
-        .cursor(rank_cursor())
-        .push_order(OrderClause::parse("rank desc, id asc").unwrap());
+        .with_cursor(rank_cursor())
+        .push_order_by(OrderByClause::parse("rank desc, id asc").unwrap());
 
     assert!(query.render().is_ok());
 }
@@ -365,8 +365,8 @@ fn cursor_with_mismatched_order_by_is_rejected() {
     let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query
-        .cursor(rank_cursor())
-        .push_order(OrderClause::parse("id asc").unwrap());
+        .with_cursor(rank_cursor())
+        .push_order_by(OrderByClause::parse("id asc").unwrap());
 
     assert!(matches!(
         query.render().unwrap_err(),
@@ -382,7 +382,7 @@ fn cursor_and_filter_are_combined_with_and() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query
         .push_where(WhereClause::new("status = $1").bind("ACTIVE"))
-        .cursor(rank_cursor());
+        .with_cursor(rank_cursor());
 
     let (sql, values) = query.render().unwrap();
 
@@ -439,15 +439,15 @@ fn where_by_accumulates_across_multiple_calls() {
     );
 }
 
-/// Multiple `.push_order()` calls accumulate as tie-breakers in call
+/// Multiple `.push_order_by()` calls accumulate as tie-breakers in call
 /// order, not the last one replacing the others.
 #[test]
 fn push_order_accumulates_as_tie_breakers_in_call_order() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query
-        .push_order(OrderClause::parse("tenant_id asc").unwrap())
-        .push_order(OrderClause::parse("rank desc").unwrap());
+        .push_order_by(OrderByClause::parse("tenant_id asc").unwrap())
+        .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
     let (sql, _) = query.render().unwrap();
 
@@ -462,8 +462,8 @@ fn explicit_order_by_is_not_duplicated_by_a_matching_cursor() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query
-        .push_order(OrderClause::parse("rank desc, id asc").unwrap())
-        .cursor(rank_cursor());
+        .push_order_by(OrderByClause::parse("rank desc, id asc").unwrap())
+        .with_cursor(rank_cursor());
 
     let (sql, _) = query.render().unwrap();
 
