@@ -36,7 +36,7 @@ pub enum Error {
 pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
     values: Vec<Value>,
-    where_by: Option<WhereClause>,
+    where_by: Vec<WhereClause>,
     order_by: Option<OrderClause>,
     cursor: Option<Cursor>,
     _dialect: PhantomData<fn() -> DB>,
@@ -47,7 +47,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         QueryComposer {
             sql,
             values: Vec::new(),
-            where_by: None,
+            where_by: Vec::new(),
             order_by: None,
             cursor: None,
             _dialect: PhantomData,
@@ -63,13 +63,15 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     }
 
     /// Applies a keyset pagination [`Cursor`]. Its `where_by()` is AND-ed
-    /// with any value passed to [`where_by`](Self::where_by) (a filter and
-    /// pagination both apply — one must not silently replace the other).
-    /// Its `order_by()` doesn't have to be repeated: if
+    /// in alongside anything passed to [`where_by`](Self::where_by) (a
+    /// filter and pagination both apply — neither silently replaces the
+    /// other). Its `order_by()` doesn't have to be repeated: if
     /// [`order_by`](Self::order_by) is left unset, the cursor's is used
     /// directly; if it *is* set, [`render`](Self::render) checks the two
     /// match, since a mismatch almost always means the client's sort
     /// changed between the request that issued this cursor and this one.
+    /// Only one cursor makes sense per query, so unlike `where_by` this
+    /// doesn't accumulate — a second call replaces the first.
     pub fn cursor(&mut self, cursor: Cursor) -> &mut Self {
         self.cursor = Some(cursor);
         self
@@ -77,10 +79,13 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 
     /// Splices onto `/* query.where */`. Accepts anything that converts
     /// into [`WhereClause`] — `sqlx-query-cel`'s `Filter`, a `WhereClause`
-    /// built by hand, or anything else WHERE-shaped. If [`cursor`](Self::cursor)
-    /// is also set, both are AND-ed together — see [`render`](Self::render).
+    /// built by hand, or anything else WHERE-shaped. Accumulates: each
+    /// call ANDs its value onto whatever's already there (e.g. an
+    /// always-present tenant-scoping condition, then a client-supplied
+    /// filter) rather than replacing it, and if [`cursor`](Self::cursor)
+    /// is also set, that's AND-ed in too — see [`render`](Self::render).
     pub fn where_by(&mut self, filter: impl Into<WhereClause>) -> &mut Self {
-        self.where_by = Some(filter.into());
+        self.where_by.push(filter.into());
         self
     }
 
@@ -113,27 +118,27 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             }
         }
 
-        // Whichever of where_by/cursor are set, AND-ed together if both are
-        // (dropping either that's absent) — a filter and a pagination
-        // cursor both apply; neither should silently replace the other.
-        // Empty ones are dropped; positional dialects ($N) additionally get
-        // their placeholders shifted past the base binds — non-positional
-        // ones (?) have no placeholder numbering to shift.
-        let where_by = [
-            self.where_by.clone(),
-            self.cursor.as_ref().map(Cursor::where_by),
-        ]
-        .into_iter()
-        .flatten()
-        .reduce(WhereClause::and)
-        .filter(|w| !w.sql().as_str().is_empty())
-        .map(|w| {
-            if DB::positional() {
-                w.shift(self.values.len())
-            } else {
-                w
-            }
-        });
+        // Every accumulated where_by value plus the cursor's, all AND-ed
+        // together (dropping any that's absent) — a tenant scope, a
+        // client-supplied filter, and pagination can all apply at once;
+        // none silently replaces another. Empty ones are dropped;
+        // positional dialects ($N) additionally get their placeholders
+        // shifted past the base binds — non-positional ones (?) have no
+        // placeholder numbering to shift.
+        let where_by = self
+            .where_by
+            .iter()
+            .cloned()
+            .chain(self.cursor.as_ref().map(Cursor::where_by))
+            .reduce(WhereClause::and)
+            .filter(|w| !w.sql().as_str().is_empty())
+            .map(|w| {
+                if DB::positional() {
+                    w.shift(self.values.len())
+                } else {
+                    w
+                }
+            });
 
         let where_by_sql = where_by
             .as_ref()

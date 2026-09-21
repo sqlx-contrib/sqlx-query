@@ -418,3 +418,23 @@ fn non_positional_dialects_do_not_shift_where_by_placeholders() {
         vec![Value::String("acme".into()), Value::String("alice".into())]
     );
 }
+
+/// Multiple `.where_by()` calls accumulate (AND together) instead of the
+/// last one replacing the others — e.g. an always-present tenant scope
+/// plus a client-supplied filter.
+#[test]
+fn where_by_accumulates_across_multiple_calls() {
+    let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
+    let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+    query
+        .where_by(WhereClause::new("tenant_id = $1").bind("acme"))
+        .where_by(WhereClause::new("status = $1").bind("ACTIVE"));
+
+    let (sql, values) = query.render().unwrap();
+
+    assert!(sql.contains("WHERE (tenant_id = $1) AND (status = $2) AND TRUE"));
+    assert_eq!(
+        values,
+        vec![Value::String("acme".into()), Value::String("ACTIVE".into())]
+    );
+}
