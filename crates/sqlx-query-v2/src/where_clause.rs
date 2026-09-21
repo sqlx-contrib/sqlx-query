@@ -29,8 +29,14 @@ impl WhereClause {
     /// `sql` is stored as an `Arc<str>`-backed [`SqlStr`] up front, so
     /// every later [`sql()`](Self::sql) call is just a refcount bump, not
     /// a copy — see [`sql()`](Self::sql)'s doc for why that matters.
-    pub fn new(sql: impl Into<String>) -> Self {
-        let sql: Arc<str> = Arc::from(sql.into());
+    ///
+    /// Takes `impl AsRef<str>` rather than `impl Into<String>`: `Arc<str>`
+    /// always copies its source bytes into a fresh allocation regardless
+    /// (its layout differs from `String`'s, so the buffer can't be
+    /// reused), so routing a `&str` literal through an intermediate
+    /// owned `String` first would copy twice for no reason.
+    pub fn new(sql: impl AsRef<str>) -> Self {
+        let sql: Arc<str> = Arc::from(sql.as_ref());
         WhereClause {
             sql: AssertSqlSafe(sql).into_sql_str(),
             values: Vec::new(),

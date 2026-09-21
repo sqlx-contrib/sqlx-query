@@ -6,31 +6,53 @@ use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
 use crate::QueryResolver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
+pub enum OrderDirection {
     Asc,
     Desc,
 }
 
-impl fmt::Display for Direction {
+impl fmt::Display for OrderDirection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Direction::Asc => f.write_str("ASC"),
-            Direction::Desc => f.write_str("DESC"),
+            OrderDirection::Asc => f.write_str("ASC"),
+            OrderDirection::Desc => f.write_str("DESC"),
         }
     }
 }
 
+/// A single resolved sort key: column + direction. `pub(crate)` (not
+/// `pub`) so `Cursor` can reuse it (it needs the same column/direction
+/// pairs to build its tuple comparison) without exposing a mutable way
+/// to bypass `resolve()`'s allow-list from outside this crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Term {
-    field: String,
-    direction: Direction,
+pub(crate) struct OrderKey {
+    column: String,
+    direction: OrderDirection,
+}
+
+impl OrderKey {
+    pub(crate) fn column(&self) -> &str {
+        &self.column
+    }
+
+    pub(crate) fn direction(&self) -> OrderDirection {
+        self.direction
+    }
 }
 
 /// A parsed AIP-132 `order_by` value: `"field [asc|desc], ..."`. No CEL
 /// involved — this is a plain comma-separated field list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OrderByClause {
-    terms: Vec<Term>,
+    keys: Vec<OrderKey>,
+}
+
+impl FromIterator<OrderKey> for OrderByClause {
+    fn from_iter<T: IntoIterator<Item = OrderKey>>(iter: T) -> Self {
+        OrderByClause {
+            keys: iter.into_iter().collect(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -54,7 +76,7 @@ impl OrderByClause {
             return Ok(OrderByClause::default());
         }
 
-        let mut terms = Vec::new();
+        let mut keys = Vec::new();
         for part in order_by.split(',') {
             let part = part.trim();
             if part.is_empty() {
@@ -68,9 +90,9 @@ impl OrderByClause {
             }
 
             let direction = match words.next() {
-                None => Direction::Asc,
-                Some(word) if word.eq_ignore_ascii_case("asc") => Direction::Asc,
-                Some(word) if word.eq_ignore_ascii_case("desc") => Direction::Desc,
+                None => OrderDirection::Asc,
+                Some(word) if word.eq_ignore_ascii_case("asc") => OrderDirection::Asc,
+                Some(word) if word.eq_ignore_ascii_case("desc") => OrderDirection::Desc,
                 Some(word) => {
                     return Err(OrderByClauseError::InvalidDirection {
                         field,
@@ -83,27 +105,36 @@ impl OrderByClause {
                 return Err(OrderByClauseError::EmptyTerm(order_by.to_owned()));
             }
 
-            terms.push(Term { field, direction });
+            keys.push(OrderKey {
+                column: field,
+                direction,
+            });
         }
 
-        Ok(OrderByClause { terms })
+        Ok(OrderByClause { keys })
     }
 
     /// Renders to `"col1 ASC, col2 DESC"`, returning the same [`SqlStr`]
     /// type as [`WhereClause::sql`](crate::WhereClause::sql) so both clause
     /// types answer "what's your SQL text?" identically. Unlike
     /// `WhereClause`'s (a cheap clone of an `Arc`-backed field), this is
-    /// computed fresh from `terms` on every call — `OrderByClause` never
+    /// computed fresh from `keys` on every call — `OrderByClause` never
     /// carries bind values, so there's no matching `values()`; see
     /// [`QueryComposer::order_by`](crate::QueryComposer::order_by).
     pub fn sql(&self) -> SqlStr {
         let sql = self
-            .terms
+            .keys
             .iter()
-            .map(|term| format!("{} {}", term.field, term.direction))
+            .map(|key| format!("{} {}", key.column, key.direction))
             .collect::<Vec<_>>()
             .join(", ");
         AssertSqlSafe(sql).into_sql_str()
+    }
+
+    /// The resolved column/direction pairs, in order — `pub(crate)` for
+    /// `Cursor` to build its tuple comparison from.
+    pub(crate) fn keys(&self) -> &[OrderKey] {
+        &self.keys
     }
 }
 
@@ -111,10 +142,10 @@ impl QueryResolver for OrderByClause {
     type Error = OrderByClauseError;
 
     fn resolve(mut self, columns: &HashMap<&str, &str>) -> Result<Self, Self::Error> {
-        for term in &mut self.terms {
-            match columns.get(term.field.as_str()) {
-                Some(column) => term.field = (*column).to_owned(),
-                None => return Err(OrderByClauseError::UnknownField(term.field.clone())),
+        for key in &mut self.keys {
+            match columns.get(key.column.as_str()) {
+                Some(column) => key.column = (*column).to_owned(),
+                None => return Err(OrderByClauseError::UnknownField(key.column.clone())),
             }
         }
         Ok(self)
@@ -129,10 +160,10 @@ mod tests {
     fn parses_default_direction() {
         let order_by = OrderByClause::parse("rank").unwrap();
         assert_eq!(
-            order_by.terms,
-            vec![Term {
-                field: "rank".into(),
-                direction: Direction::Asc
+            order_by.keys,
+            vec![OrderKey {
+                column: "rank".into(),
+                direction: OrderDirection::Asc
             }]
         );
     }
@@ -141,15 +172,15 @@ mod tests {
     fn parses_explicit_direction_case_insensitively() {
         let order_by = OrderByClause::parse("rank DESC, created asc").unwrap();
         assert_eq!(
-            order_by.terms,
+            order_by.keys,
             vec![
-                Term {
-                    field: "rank".into(),
-                    direction: Direction::Desc
+                OrderKey {
+                    column: "rank".into(),
+                    direction: OrderDirection::Desc
                 },
-                Term {
-                    field: "created".into(),
-                    direction: Direction::Asc
+                OrderKey {
+                    column: "created".into(),
+                    direction: OrderDirection::Asc
                 },
             ]
         );
