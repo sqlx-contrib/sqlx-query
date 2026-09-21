@@ -136,6 +136,17 @@ impl OrderClause {
     pub(crate) fn keys(&self) -> &[OrderKey] {
         &self.keys
     }
+
+    /// Appends `other`'s keys after this clause's own, as tie-breakers —
+    /// "sort by `self`, **then** by `other`". Unlike
+    /// [`WhereClause::and`](crate::WhereClause::and), this isn't
+    /// commutative: `a.then(b)` sorts by `a` first, `b.then(a)` sorts by
+    /// `b` first — order matters, because ORDER BY is a sequence, not a
+    /// boolean combination like WHERE's `AND`.
+    pub fn then(mut self, other: OrderClause) -> OrderClause {
+        self.keys.extend(other.keys);
+        self
+    }
 }
 
 impl QueryResolver for OrderClause {
@@ -229,5 +240,18 @@ mod tests {
             .resolve(&columns)
             .unwrap_err();
         assert_eq!(err, OrderClauseError::UnknownField("internal_notes".into()));
+    }
+
+    #[test]
+    fn then_appends_as_a_tie_breaker_not_commutatively() {
+        let tenant_first = OrderClause::parse("tenant_id asc")
+            .unwrap()
+            .then(OrderClause::parse("rank desc").unwrap());
+        assert_eq!(tenant_first.sql(), "tenant_id ASC, rank DESC");
+
+        let rank_first = OrderClause::parse("rank desc")
+            .unwrap()
+            .then(OrderClause::parse("tenant_id asc").unwrap());
+        assert_eq!(rank_first.sql(), "rank DESC, tenant_id ASC");
     }
 }
