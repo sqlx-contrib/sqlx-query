@@ -24,8 +24,8 @@ pedantic = { level = "deny", priority = -1 }
 sqlx = { version = "0.9", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 regex = "1"
-thiserror = "1"
-base64 = "0.22"
+thiserror = "2"
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 # The filter syntax only. `default-features = false` drops the interpreter's
