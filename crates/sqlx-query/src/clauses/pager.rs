@@ -39,6 +39,16 @@ use sqlx::{ColumnIndex, Decode, Row, Type};
 use super::order::OrderKey;
 use crate::{OrderByClause, OrderDirection, Value, WhereClause};
 
+/// [`Cursor::encode`]'s envelope — a `checksum` field alongside the
+/// payload, mirroring `einride/aip-go`'s `PageToken { Offset, checksum
+/// RequestChecksum }`. Private: callers only ever see the base64 string
+/// [`Cursor::encode`] returns, never this type.
+#[derive(Serialize, Deserialize)]
+struct CursorToken {
+    checksum: u32,
+    cursor: Cursor,
+}
+
 /// One ordered comparison key: a resolved column/direction pair, paired
 /// with the cursor's boundary value for it. `value` is `None` between
 /// [`Cursor::new`] and [`Cursor::after`] — never observable from outside
@@ -56,16 +66,6 @@ struct CursorKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cursor {
     keys: Vec<CursorKey>,
-}
-
-/// [`Cursor::encode`]'s envelope — a `checksum` field alongside the
-/// payload, mirroring `einride/aip-go`'s `PageToken { Offset, checksum
-/// RequestChecksum }`. Private: callers only ever see the base64 string
-/// [`Cursor::encode`] returns, never this type.
-#[derive(Serialize, Deserialize)]
-struct CursorToken {
-    checksum: u32,
-    cursor: Cursor,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
