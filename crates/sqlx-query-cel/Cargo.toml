@@ -1,7 +1,7 @@
 [package]
 name = "sqlx-query-cel"
 description = "CEL filter -> WhereClause for sqlx-query"
-version.workspace = true
+version = "0.1.0" # literal, not inherited -- see [workspace.package]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,6 +10,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-sqlx-query = { path = "../sqlx-query" }
+# `version` alongside `path` because `cargo publish` refuses a path
+# dependency without one -- the published crate has no sibling directory to
+# resolve, only a registry. release-please's cargo-workspace plugin keeps this
+# in step with sqlx-query's own version.
+sqlx-query = { path = "../sqlx-query", version = "0.1.0" }
 cel = { workspace = true }
 thiserror = { workspace = true }

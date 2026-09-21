@@ -24,3 +24,11 @@ lint:
 .PHONY: doc
 doc:
 	cargo doc --workspace --no-deps --open
+
+# What CI runs, and what `doc` deliberately isn't: no browser, and warnings are
+# errors -- a broken intra-doc link fails the build instead of waiting to be
+# noticed. This API is documented by cross-reference, so a rename that outruns
+# its links is the likeliest way for the docs to go wrong.
+.PHONY: doc-check
+doc-check:
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps

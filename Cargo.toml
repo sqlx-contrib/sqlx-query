@@ -3,7 +3,12 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+# No `version` here on purpose: each crate carries a literal one instead of
+# inheriting, because release-please's cargo-workspace plugin cannot read
+# `version.workspace = true` -- it reports "package manifest has an invalid
+# [package.version]" and releases nothing
+# (googleapis/release-please#2111). The `linked-versions` plugin is what keeps
+# the two literals in step, so they still move together.
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/sqlx-contrib/sqlx-query"

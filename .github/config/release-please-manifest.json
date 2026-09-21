@@ -1,0 +1,4 @@
+{
+  "crates/sqlx-query": "0.1.0",
+  "crates/sqlx-query-cel": "0.1.0"
+}

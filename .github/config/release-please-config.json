@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "include-v-in-tag": true,
+  "include-v-in-release-name": true,
+  "include-component-in-tag": true,
+  "packages": {
+    "crates/sqlx-query": {
+      "component": "sqlx-query"
+    },
+    "crates/sqlx-query-cel": {
+      "component": "sqlx-query-cel"
+    }
+  },
+  "plugins": [
+    {
+      "type": "cargo-workspace",
+      "merge": false
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "sqlx-query",
+      "components": ["sqlx-query", "sqlx-query-cel"]
+    }
+  ]
+}
