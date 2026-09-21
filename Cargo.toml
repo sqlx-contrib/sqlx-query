@@ -10,7 +10,9 @@ repository = "https://github.com/sqlx-contrib/sqlx-query-v2"
 
 [workspace.dependencies]
 sqlx = { version = "0.9", default-features = false }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 regex = "1"
 thiserror = "1"
 base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }

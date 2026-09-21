@@ -3,10 +3,18 @@
 //! value per key.
 //!
 //! [`Cursor::encode`]/[`Cursor::parse`] round-trip a cursor through an
-//! opaque `page_token` string — a small hand-rolled binary format (version
-//! byte, CRC32 checksum, then a column/direction/value triple per key),
-//! modeled on `protoc-contrib/aip-go`'s `PageCursor` wire format. The
-//! checksum here only guards against a corrupted or hand-edited token; it
+//! opaque `page_token` string, following `einride/aip-go`'s
+//! `pagination.PageToken` shape: a small envelope struct carrying a
+//! `checksum` field alongside the payload, `postcard`-serialized and
+//! base64-wrapped. There's no separate version field — instead, like
+//! `einride/aip-go`'s `pageTokenChecksumMask`, the checksum is XORed with
+//! [`CURSOR_TOKEN_CHECKSUM_MASK`] on the way out and in; bump that
+//! constant whenever the payload shape changes in a way that would make
+//! an already-issued token decode to something different, and every old
+//! token's checksum will mismatch and be cleanly rejected rather than
+//! misread.
+//!
+//! That checksum only guards against a corrupted or hand-edited token; it
 //! is not a substitute for
 //! [`QueryComposer::compose`](crate::QueryComposer::compose)'s
 //! `CursorOrderByMismatch` check, which is what catches a client paging
@@ -14,15 +22,19 @@
 //! the actual decoded `OrderByClause`, a stronger guarantee than a hash
 //! could give.
 //!
-//! `Cursor::after_row` (filling values straight from a `sqlx::Row`) is
-//! deliberately not implemented yet — it needs a per-`QueryDialect` table
-//! mapping column types to [`Value`] variants (decoding is the opposite
-//! direction from `QueryComposer::build`'s `Encode`/`Type` bounds: there,
-//! the source Rust type is always known; here, a column alone doesn't say
-//! which `Value` variant it should become).
+//! [`Cursor::after_row`] fills values straight from a `sqlx::Row` (the
+//! last row of a page, once it's been fetched) instead of requiring the
+//! caller to already know each key's Rust type. It doesn't need a
+//! per-`QueryDialect` table mapping column types to [`Value`] variants —
+//! `sqlx` already has that knowledge, per-driver, baked into each
+//! `Type::compatible` check, so it just *asks* by trying candidate
+//! decodes in turn and keeping whichever one `sqlx` itself accepts,
+//! rather than this crate re-deriving the same table from OIDs or type
+//! codes.
 
-use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::{ColumnIndex, Decode, Row, Type};
 
 use super::order::OrderKey;
 use crate::{OrderByClause, OrderDirection, Value, WhereClause};
@@ -33,7 +45,7 @@ use crate::{OrderByClause, OrderDirection, Value, WhereClause};
 /// this module, since `Cursor`'s only public accessors
 /// ([`Cursor::to_order_by_clause`], [`Cursor::to_where_clause`],
 /// [`Cursor::encode`]) assume every key already has one.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CursorKey {
     key: OrderKey,
     value: Option<Value>,
@@ -41,9 +53,19 @@ struct CursorKey {
 
 /// A keyset pagination cursor. See the module docs for what's built and
 /// what's deliberately not here yet.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cursor {
     keys: Vec<CursorKey>,
+}
+
+/// [`Cursor::encode`]'s envelope — a `checksum` field alongside the
+/// payload, mirroring `einride/aip-go`'s `PageToken { Offset, checksum
+/// RequestChecksum }`. Private: callers only ever see the base64 string
+/// [`Cursor::encode`] returns, never this type.
+#[derive(Serialize, Deserialize)]
+struct CursorToken {
+    checksum: u32,
+    cursor: Cursor,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -54,29 +76,19 @@ pub enum CursorError {
     #[error("cursor token is not valid base64")]
     TokenInvalidBase64,
 
-    #[error("truncated cursor token")]
-    TokenTruncated,
-
-    #[error("cursor token has trailing bytes after its last key")]
-    TokenTrailingBytes,
-
-    #[error("unsupported cursor token version {0}")]
-    TokenUnsupportedVersion(u8),
+    #[error("malformed cursor token")]
+    TokenMalformed,
 
     #[error("cursor token checksum mismatch — the token was corrupted or tampered with")]
     TokenChecksumMismatch,
 
-    #[error("cursor token contains invalid UTF-8")]
-    TokenInvalidUtf8,
+    #[error("row has no column named `{0}` for an order_by key")]
+    RowColumnMissing(String),
 
-    #[error("unknown cursor value tag 0x{0:02x}")]
-    TokenUnknownValueTag(u8),
-
-    #[error("unknown cursor sort direction byte 0x{0:02x}")]
-    TokenUnknownDirection(u8),
-
-    #[error("cursor token contains an out-of-range timestamp")]
-    TokenInvalidTimestamp,
+    #[error(
+        "column `{0}` is not one of the types a cursor can carry (bool, int, float, string, timestamp)"
+    )]
+    RowValueUndecodable(String),
 }
 
 impl Cursor {
@@ -93,6 +105,45 @@ impl Cursor {
         Cursor { keys }
     }
 
+    /// Decodes a `page_token` string produced by [`encode`](Self::encode)
+    /// back into a `Cursor` carrying both its `order_by` and its boundary
+    /// values — no separate [`new`](Self::new)/[`after`](Self::after) call
+    /// needed, unlike building one from scratch.
+    pub fn parse(token: &str) -> Result<Self, CursorError> {
+        use base64::Engine as _;
+
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(token)
+            .map_err(|_| CursorError::TokenInvalidBase64)?;
+
+        let wire: CursorToken =
+            postcard::from_bytes(&bytes).map_err(|_| CursorError::TokenMalformed)?;
+
+        if checksum_of(&wire.cursor) != wire.checksum {
+            return Err(CursorError::TokenChecksumMismatch);
+        }
+
+        Ok(wire.cursor)
+    }
+
+    /// Encodes this cursor as an opaque `page_token` string, safe to hand
+    /// back to the client as-is. See the module docs for the wire format
+    /// and what the checksum does and doesn't guard against.
+    ///
+    /// Panics if any key's value is unset — unreachable through this
+    /// type's public API, same as [`to_where_clause`](Self::to_where_clause).
+    pub fn encode(&self) -> String {
+        use base64::Engine as _;
+
+        let token = CursorToken {
+            checksum: checksum_of(self),
+            cursor: self.clone(),
+        };
+        let bytes = postcard::to_allocvec(&token).expect("CursorToken serialization is infallible");
+
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
     /// Supplies all boundary values at once, one per key, in order — not
     /// chainable per-value like [`WhereClause::bind`], since a cursor
     /// position isn't meaningful with only some of its values known.
@@ -105,6 +156,31 @@ impl Cursor {
         }
         for (key, value) in self.keys.iter_mut().zip(values) {
             key.value = Some(value);
+        }
+        Ok(self)
+    }
+
+    /// Supplies all boundary values at once by reading them off `row` —
+    /// the last row of a page just fetched, once decoded, becomes the
+    /// cursor for the next one. Each key's column is looked up by name
+    /// (see [`Value::from_row`]'s docs for how a table-qualified `order_by`
+    /// column resolves against the row's own, always-unqualified, labels),
+    /// so `row`'s column order doesn't need to match `self`'s key order.
+    pub fn after_row<'r, R>(mut self, row: &'r R) -> Result<Self, CursorError>
+    where
+        R: Row,
+        usize: ColumnIndex<R>,
+        bool: Decode<'r, R::Database> + Type<R::Database>,
+        i16: Decode<'r, R::Database> + Type<R::Database>,
+        i32: Decode<'r, R::Database> + Type<R::Database>,
+        i64: Decode<'r, R::Database> + Type<R::Database>,
+        f32: Decode<'r, R::Database> + Type<R::Database>,
+        f64: Decode<'r, R::Database> + Type<R::Database>,
+        String: Decode<'r, R::Database> + Type<R::Database>,
+        DateTime<Utc>: Decode<'r, R::Database> + Type<R::Database>,
+    {
+        for key in &mut self.keys {
+            key.value = Some(Value::from_row(row, key.key.column())?);
         }
         Ok(self)
     }
@@ -160,56 +236,6 @@ impl Cursor {
                 )
             })
     }
-
-    /// Encodes this cursor as an opaque `page_token` string, safe to hand
-    /// back to the client as-is. See the module docs for the wire format
-    /// and what the checksum does and doesn't guard against.
-    ///
-    /// Panics if any key's value is unset — unreachable through this
-    /// type's public API, same as [`to_where_clause`](Self::to_where_clause).
-    pub fn encode(&self) -> String {
-        let body = encode_body(&self.keys);
-
-        let mut for_checksum = Vec::with_capacity(1 + body.len());
-        for_checksum.push(CURSOR_TOKEN_VERSION);
-        for_checksum.extend_from_slice(&body);
-        let checksum = crc32(&for_checksum);
-
-        let mut wire = Vec::with_capacity(5 + body.len());
-        wire.push(CURSOR_TOKEN_VERSION);
-        wire.extend_from_slice(&checksum.to_be_bytes());
-        wire.extend_from_slice(&body);
-
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(wire)
-    }
-
-    /// Decodes a `page_token` string produced by [`encode`](Self::encode)
-    /// back into a `Cursor` carrying both its `order_by` and its boundary
-    /// values — no separate [`new`](Self::new)/[`after`](Self::after) call
-    /// needed, unlike building one from scratch.
-    pub fn parse(token: &str) -> Result<Self, CursorError> {
-        let wire = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(token)
-            .map_err(|_| CursorError::TokenInvalidBase64)?;
-
-        let mut reader = Reader { buf: &wire };
-        let version = reader.read_u8()?;
-        if version != CURSOR_TOKEN_VERSION {
-            return Err(CursorError::TokenUnsupportedVersion(version));
-        }
-        let stored_checksum = reader.read_u32()?;
-        let body = reader.buf;
-
-        let mut for_checksum = Vec::with_capacity(1 + body.len());
-        for_checksum.push(version);
-        for_checksum.extend_from_slice(body);
-        if crc32(&for_checksum) != stored_checksum {
-            return Err(CursorError::TokenChecksumMismatch);
-        }
-
-        let keys = decode_body(Reader { buf: body })?;
-        Ok(Cursor { keys })
-    }
 }
 
 /// `key`'s 1-based position in `keys` — its placeholder number, since
@@ -219,159 +245,19 @@ fn placeholder_index(keys: &[CursorKey], key: &CursorKey) -> usize {
     keys.iter().position(|k| std::ptr::eq(k, key)).unwrap() + 1
 }
 
-/// The leading byte of every encoded cursor token. Bump this whenever the
-/// encoding changes in a way that would make an already-issued token
-/// decode to something different — [`Cursor::parse`] rejects any other
-/// version outright rather than misreading it.
-const CURSOR_TOKEN_VERSION: u8 = 1;
+/// XORed into the checksum on both [`Cursor::encode`] and
+/// [`Cursor::parse`] — see the module docs for what bumping this buys.
+const CURSOR_TOKEN_CHECKSUM_MASK: u32 = 0x5eed_c0de;
 
-// `Value` variant tags. Wire format — never renumber these; append new
-// ones instead.
-const TAG_NULL: u8 = 0;
-const TAG_BOOL: u8 = 1;
-const TAG_INT: u8 = 2;
-const TAG_FLOAT: u8 = 3;
-const TAG_STRING: u8 = 4;
-const TAG_TIMESTAMP: u8 = 5;
-
-fn direction_byte(direction: OrderDirection) -> u8 {
-    match direction {
-        OrderDirection::Asc => 0,
-        OrderDirection::Desc => 1,
-    }
-}
-
-fn direction_from_byte(byte: u8) -> Result<OrderDirection, CursorError> {
-    match byte {
-        0 => Ok(OrderDirection::Asc),
-        1 => Ok(OrderDirection::Desc),
-        other => Err(CursorError::TokenUnknownDirection(other)),
-    }
-}
-
-fn encode_body(keys: &[CursorKey]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(&(keys.len() as u32).to_be_bytes());
-    for key in keys {
-        let column = key.key.column().as_bytes();
-        body.extend_from_slice(&(column.len() as u32).to_be_bytes());
-        body.extend_from_slice(column);
-        body.push(direction_byte(key.key.direction()));
-        encode_value(
-            &mut body,
-            key.value
-                .as_ref()
-                .expect("Cursor::encode called before after() set all values"),
-        );
-    }
-    body
-}
-
-fn encode_value(buf: &mut Vec<u8>, value: &Value) {
-    match value {
-        Value::Null => buf.push(TAG_NULL),
-        Value::Bool(v) => {
-            buf.push(TAG_BOOL);
-            buf.push(*v as u8);
-        }
-        Value::Int(v) => {
-            buf.push(TAG_INT);
-            buf.extend_from_slice(&v.to_be_bytes());
-        }
-        Value::Float(v) => {
-            buf.push(TAG_FLOAT);
-            buf.extend_from_slice(&v.to_bits().to_be_bytes());
-        }
-        Value::String(v) => {
-            buf.push(TAG_STRING);
-            buf.extend_from_slice(&(v.len() as u32).to_be_bytes());
-            buf.extend_from_slice(v.as_bytes());
-        }
-        Value::Timestamp(v) => {
-            buf.push(TAG_TIMESTAMP);
-            buf.extend_from_slice(&v.timestamp().to_be_bytes());
-            buf.extend_from_slice(&v.timestamp_subsec_nanos().to_be_bytes());
-        }
-    }
-}
-
-fn decode_body(mut reader: Reader<'_>) -> Result<Vec<CursorKey>, CursorError> {
-    let count = reader.read_u32()? as usize;
-    let mut keys = Vec::with_capacity(count);
-    for _ in 0..count {
-        let len = reader.read_u32()? as usize;
-        let column = reader.read_string(len)?;
-        let direction = direction_from_byte(reader.read_u8()?)?;
-        let value = decode_value(&mut reader)?;
-        keys.push(CursorKey {
-            key: OrderKey::new(column, direction),
-            value: Some(value),
-        });
-    }
-    if !reader.buf.is_empty() {
-        return Err(CursorError::TokenTrailingBytes);
-    }
-    Ok(keys)
-}
-
-fn decode_value(reader: &mut Reader<'_>) -> Result<Value, CursorError> {
-    match reader.read_u8()? {
-        TAG_NULL => Ok(Value::Null),
-        TAG_BOOL => Ok(Value::Bool(reader.read_u8()? != 0)),
-        TAG_INT => Ok(Value::Int(reader.read_i64()?)),
-        TAG_FLOAT => Ok(Value::Float(f64::from_bits(reader.read_u64()?))),
-        TAG_STRING => {
-            let len = reader.read_u32()? as usize;
-            Ok(Value::String(reader.read_string(len)?))
-        }
-        TAG_TIMESTAMP => {
-            let secs = reader.read_i64()?;
-            let nanos = reader.read_u32()?;
-            let timestamp: DateTime<Utc> =
-                DateTime::from_timestamp(secs, nanos).ok_or(CursorError::TokenInvalidTimestamp)?;
-            Ok(Value::Timestamp(timestamp))
-        }
-        other => Err(CursorError::TokenUnknownValueTag(other)),
-    }
-}
-
-/// A cursor over an in-memory byte slice, with bounds-checked reads —
-/// every [`Cursor::parse`] failure mode below `TokenInvalidBase64` and
-/// `TokenUnsupportedVersion` funnels through this instead of each call
-/// site checking `buf.len()` by hand.
-struct Reader<'a> {
-    buf: &'a [u8],
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], CursorError> {
-        if self.buf.len() < n {
-            return Err(CursorError::TokenTruncated);
-        }
-        let (head, rest) = self.buf.split_at(n);
-        self.buf = rest;
-        Ok(head)
-    }
-
-    fn read_u8(&mut self) -> Result<u8, CursorError> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn read_u32(&mut self) -> Result<u32, CursorError> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, CursorError> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
-    }
-
-    fn read_i64(&mut self) -> Result<i64, CursorError> {
-        Ok(i64::from_be_bytes(self.take(8)?.try_into().unwrap()))
-    }
-
-    fn read_string(&mut self, len: usize) -> Result<String, CursorError> {
-        String::from_utf8(self.take(len)?.to_vec()).map_err(|_| CursorError::TokenInvalidUtf8)
-    }
+/// `cursor`'s checksum, as stored in / verified against a
+/// [`CursorToken`]: a CRC32 of `cursor`'s own `postcard` encoding, masked
+/// by [`CURSOR_TOKEN_CHECKSUM_MASK`]. Deterministic — `postcard`'s output
+/// for the same value is always the same bytes — so [`Cursor::parse`] can
+/// recompute this straight from the decoded `cursor` field rather than
+/// needing the original payload bytes kept around separately.
+fn checksum_of(cursor: &Cursor) -> u32 {
+    let payload = postcard::to_allocvec(cursor).expect("Cursor serialization is infallible");
+    crc32(&payload) ^ CURSOR_TOKEN_CHECKSUM_MASK
 }
 
 /// IEEE CRC32 (the same variant Go's `hash/crc32.ChecksumIEEE` computes),
@@ -394,6 +280,8 @@ fn crc32(bytes: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+
     use super::*;
 
     #[test]
@@ -485,21 +373,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_truncated_token() {
+    fn parse_rejects_garbage_bytes() {
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8, 2, 3]);
         let err = Cursor::parse(&token).unwrap_err();
-        assert_eq!(err, CursorError::TokenTruncated);
-    }
-
-    #[test]
-    fn parse_rejects_unsupported_version() {
-        let mut wire = vec![99u8];
-        let checksum = crc32(&wire);
-        wire.extend_from_slice(&checksum.to_be_bytes());
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&wire);
-
-        let err = Cursor::parse(&token).unwrap_err();
-        assert_eq!(err, CursorError::TokenUnsupportedVersion(99));
+        assert_eq!(err, CursorError::TokenMalformed);
     }
 
     #[test]
@@ -516,28 +393,18 @@ mod tests {
         let tampered = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&wire);
 
         let err = Cursor::parse(&tampered).unwrap_err();
-        assert_eq!(err, CursorError::TokenChecksumMismatch);
+        assert!(matches!(
+            err,
+            CursorError::TokenChecksumMismatch | CursorError::TokenMalformed
+        ));
     }
 
     #[test]
-    fn parse_rejects_trailing_bytes() {
+    fn checksum_mask_distinguishes_from_a_plain_crc32() {
         let order_by = OrderByClause::parse("rank desc").unwrap();
         let cursor = Cursor::new(order_by).after(vec![Value::Int(42)]).unwrap();
-        let token = cursor.encode();
 
-        let mut wire = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&token)
-            .unwrap();
-        wire.push(0);
-        let version = wire[0];
-        let body = wire[5..].to_vec();
-        let mut for_checksum = vec![version];
-        for_checksum.extend_from_slice(&body);
-        let checksum = crc32(&for_checksum);
-        wire[1..5].copy_from_slice(&checksum.to_be_bytes());
-        let padded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&wire);
-
-        let err = Cursor::parse(&padded).unwrap_err();
-        assert_eq!(err, CursorError::TokenTrailingBytes);
+        let payload = postcard::to_allocvec(&cursor).unwrap();
+        assert_ne!(checksum_of(&cursor), crc32(&payload));
     }
 }

@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
 
 use crate::QueryResolver;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderDirection {
     Asc,
     Desc,
@@ -24,23 +25,13 @@ impl fmt::Display for OrderDirection {
 /// `pub`) so `Cursor` can reuse it (it needs the same column/direction
 /// pairs to build its tuple comparison) without exposing a mutable way
 /// to bypass `resolve()`'s allow-list from outside this crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OrderKey {
     column: String,
     direction: OrderDirection,
 }
 
 impl OrderKey {
-    /// Builds a key directly from an already-resolved column/direction
-    /// pair — used by [`Cursor::parse`](crate::Cursor::parse) to
-    /// reconstruct keys from a decoded token, bypassing
-    /// [`OrderByClause::parse`]'s field-name grammar and
-    /// [`QueryResolver::resolve`]'s allow-list (a cursor token round-trips
-    /// the already-resolved column, not the client's original field name).
-    pub(crate) fn new(column: String, direction: OrderDirection) -> Self {
-        OrderKey { column, direction }
-    }
-
     pub(crate) fn column(&self) -> &str {
         &self.column
     }
