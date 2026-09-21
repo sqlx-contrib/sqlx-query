@@ -33,5 +33,9 @@ pub use value::Value;
 pub trait QueryResolver: Sized {
     type Error;
 
+    /// # Errors
+    ///
+    /// Returns `Self::Error` for any field name `columns` doesn't have a
+    /// column for — the fail-closed half of the allow-list.
     fn resolve(self, columns: &HashMap<&str, &str>) -> Result<Self, Self::Error>;
 }

@@ -8,64 +8,64 @@
 //! numbering independent of how many bind values already exist in the
 //! base query it gets spliced into.
 
-/// Rewrites every active `$N` placeholder in `s` to `$(N+offset)`.
-pub(crate) fn shift_placeholders(s: &str, offset: usize) -> String {
+/// Rewrites every active `$N` placeholder in `sql` to `$(N+offset)`.
+pub(crate) fn shift_placeholders(sql: &str, offset: usize) -> String {
     if offset == 0 {
-        return s.to_owned();
+        return sql.to_owned();
     }
 
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
     let mut i = 0;
 
     while i < bytes.len() {
-        let c = bytes[i];
-        match c {
+        match bytes[i] {
             b'\'' => {
-                let j = skip_single_quoted(bytes, i);
-                out.push_str(&s[i..j]);
-                i = j;
+                let end = skip_single_quoted(bytes, i);
+                out.push_str(&sql[i..end]);
+                i = end;
             }
             b'"' => {
-                let j = skip_double_quoted(bytes, i);
-                out.push_str(&s[i..j]);
-                i = j;
+                let end = skip_double_quoted(bytes, i);
+                out.push_str(&sql[i..end]);
+                i = end;
             }
             b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                let j = skip_line_comment(bytes, i);
-                out.push_str(&s[i..j]);
-                i = j;
+                let end = skip_line_comment(bytes, i);
+                out.push_str(&sql[i..end]);
+                i = end;
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                let j = skip_block_comment(bytes, i);
-                out.push_str(&s[i..j]);
-                i = j;
+                let end = skip_block_comment(bytes, i);
+                out.push_str(&sql[i..end]);
+                i = end;
             }
             b'$' => {
                 if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
-                    let mut j = i + 1;
-                    while bytes.get(j).is_some_and(u8::is_ascii_digit) {
-                        j += 1;
+                    let mut end = i + 1;
+                    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                        end += 1;
                     }
-                    let n: usize = s[i + 1..j].parse().expect("scanned only ascii digits");
+                    let number: usize = sql[i + 1..end].parse().expect("scanned only ascii digits");
                     out.push('$');
-                    out.push_str(&(n + offset).to_string());
-                    i = j;
+                    out.push_str(&(number + offset).to_string());
+                    i = end;
                     continue;
                 }
-                if let Some(j) = skip_dollar_quoted(bytes, i) {
-                    out.push_str(&s[i..j]);
-                    i = j;
+                if let Some(end) = skip_dollar_quoted(bytes, i) {
+                    out.push_str(&sql[i..end]);
+                    i = end;
                     continue;
                 }
                 out.push('$');
                 i += 1;
             }
             _ => {
-                // SAFETY-free UTF-8 handling: step by full char width so we
-                // never split a multibyte character.
-                let width = utf8_char_width(bytes[i]);
-                out.push_str(&s[i..i + width]);
+                // Step by whole characters so a multibyte one is never split.
+                // `i` is always on a char boundary: every other arm keys off an
+                // ASCII byte, and no byte of a multibyte character is ASCII.
+                let width = sql[i..].chars().next().map_or(1, char::len_utf8);
+                out.push_str(&sql[i..i + width]);
                 i += width;
             }
         }
@@ -74,101 +74,92 @@ pub(crate) fn shift_placeholders(s: &str, offset: usize) -> String {
     out
 }
 
-fn utf8_char_width(byte: u8) -> usize {
-    match byte {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF7 => 4,
-        _ => 1,
-    }
-}
-
-fn skip_single_quoted(s: &[u8], i: usize) -> usize {
-    let mut j = i + 1;
-    while j < s.len() {
-        if s[j] == b'\'' {
-            if s.get(j + 1) == Some(&b'\'') {
-                j += 2;
+fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if bytes.get(i + 1) == Some(&b'\'') {
+                i += 2;
                 continue;
             }
-            return j + 1;
+            return i + 1;
         }
-        j += 1;
+        i += 1;
     }
-    j
+    i
 }
 
-fn skip_double_quoted(s: &[u8], i: usize) -> usize {
-    let mut j = i + 1;
-    while j < s.len() {
-        if s[j] == b'"' {
-            if s.get(j + 1) == Some(&b'"') {
-                j += 2;
+fn skip_double_quoted(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            if bytes.get(i + 1) == Some(&b'"') {
+                i += 2;
                 continue;
             }
-            return j + 1;
+            return i + 1;
         }
-        j += 1;
+        i += 1;
     }
-    j
+    i
 }
 
-fn skip_line_comment(s: &[u8], i: usize) -> usize {
-    let mut j = i + 2;
-    while j < s.len() && s[j] != b'\n' {
-        j += 1;
+fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
     }
-    if j < s.len() {
-        j += 1;
+    if i < bytes.len() {
+        i += 1;
     }
-    j
+    i
 }
 
 /// Handles `/* ... */` with Postgres's nesting semantics.
-fn skip_block_comment(s: &[u8], i: usize) -> usize {
-    let mut j = i + 2;
+fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
     let mut depth = 1;
-    while j < s.len() && depth > 0 {
-        if j + 1 < s.len() && s[j] == b'/' && s[j + 1] == b'*' {
+    while i < bytes.len() && depth > 0 {
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
             depth += 1;
-            j += 2;
-        } else if j + 1 < s.len() && s[j] == b'*' && s[j + 1] == b'/' {
+            i += 2;
+        } else if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
             depth -= 1;
-            j += 2;
+            i += 2;
         } else {
-            j += 1;
+            i += 1;
         }
     }
-    j
+    i
 }
 
-/// Parses a dollar-quoted string starting at `i` (where `s[i]` is known to
-/// be `$`). On success returns the index just past the closing tag;
-/// otherwise `None`, so the caller treats the `$` as a literal character.
-fn skip_dollar_quoted(s: &[u8], i: usize) -> Option<usize> {
-    let mut j = i + 1;
-    while j < s.len() {
-        let c = s[j];
-        if c == b'$' {
+/// Parses a dollar-quoted string starting at `start` (where `bytes[start]`
+/// is known to be `$`). On success returns the index just past the closing
+/// tag; otherwise `None`, so the caller treats the `$` as a literal
+/// character.
+fn skip_dollar_quoted(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'$' {
             break;
         }
-        if c.is_ascii_alphabetic() || c == b'_' || (j > i + 1 && c.is_ascii_digit()) {
-            j += 1;
+        if byte.is_ascii_alphabetic() || byte == b'_' || (i > start + 1 && byte.is_ascii_digit()) {
+            i += 1;
             continue;
         }
         return None;
     }
-    if j >= s.len() || s[j] != b'$' {
+    if i >= bytes.len() || bytes[i] != b'$' {
         return None;
     }
-    let tag = &s[i..=j];
-    let k = j + 1;
-    match find_subslice(&s[k..], tag) {
-        Some(idx) => Some(k + idx + tag.len()),
+    let tag = &bytes[start..=i];
+    let body = i + 1;
+    match find_subslice(&bytes[body..], tag) {
+        Some(index) => Some(body + index + tag.len()),
         // No closing tag: the rest of the string is opaque, same as
         // pgxquery's `return len(s), true`.
-        None => Some(s.len()),
+        None => Some(bytes.len()),
     }
 }
 
@@ -237,8 +228,8 @@ mod tests {
 
     #[test]
     fn treats_doubled_quote_as_escape_and_leaves_lone_dollar_alone() {
-        let input = r#"note = 'it''s $1 inside' AND price > $1 AND tag <> 'A' || '$' || 'B'"#;
-        let expected = r#"note = 'it''s $1 inside' AND price > $2 AND tag <> 'A' || '$' || 'B'"#;
+        let input = r"note = 'it''s $1 inside' AND price > $1 AND tag <> 'A' || '$' || 'B'";
+        let expected = r"note = 'it''s $1 inside' AND price > $2 AND tag <> 'A' || '$' || 'B'";
         assert_eq!(shift_placeholders(input, 1), expected);
     }
 

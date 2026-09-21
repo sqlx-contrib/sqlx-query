@@ -36,7 +36,7 @@ macro_rules! impl_from_int {
         $(
             impl From<$ty> for Value {
                 fn from(value: $ty) -> Self {
-                    Value::Int(value as i64)
+                    Value::Int(i64::from(value))
                 }
             }
         )*
@@ -50,7 +50,7 @@ macro_rules! impl_from_float {
         $(
             impl From<$ty> for Value {
                 fn from(value: $ty) -> Self {
-                    Value::Float(value as f64)
+                    Value::Float(f64::from(value))
                 }
             }
         )*

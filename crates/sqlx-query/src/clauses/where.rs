@@ -46,6 +46,7 @@ impl WhereClause {
 
     /// A value for one of this clause's own placeholders, filled in
     /// declaration order — mirrors [`QueryComposer::bind`](crate::QueryComposer::bind).
+    #[must_use]
     pub fn bind(mut self, value: impl Into<Value>) -> Self {
         self.values.push(value.into());
         self
@@ -53,6 +54,7 @@ impl WhereClause {
 
     /// The bind values `sql()`'s placeholders reference, in declaration
     /// order.
+    #[must_use]
     pub fn values(&self) -> &[Value] {
         &self.values
     }
@@ -64,6 +66,7 @@ impl WhereClause {
     /// (computed fresh from `terms` on every call), this one is a cheap
     /// clone: `new()` stores the text `Arc`-backed, and `SqlStr::clone`
     /// is just a refcount bump for the `Arc` variant.
+    #[must_use]
     pub fn sql(&self) -> SqlStr {
         self.sql.clone()
     }
@@ -74,15 +77,15 @@ impl WhereClause {
     /// cursor's tuple comparison, neither of which should silently
     /// replace the other (see
     /// [`QueryComposer::with_cursor`](crate::QueryComposer::with_cursor)).
+    #[must_use]
     pub fn and(self, other: WhereClause) -> WhereClause {
         let offset = self.values.len();
         let other_sql = shift_placeholders(other.sql().as_str(), offset);
         let sql = format!("({}) AND ({})", self.sql().as_str(), other_sql);
 
         self.values
-            .iter()
-            .chain(&other.values)
-            .cloned()
+            .into_iter()
+            .chain(other.values)
             .fold(WhereClause::new(sql), WhereClause::bind)
     }
 

@@ -73,6 +73,13 @@ impl OrderByClause {
     /// all-whitespace string parses to an empty `OrderByClause`, which renders
     /// to an empty fragment (and is dropped by the composer's sentinel,
     /// same as an unset `order_by`).
+    ///
+    /// # Errors
+    ///
+    /// [`OrderByClauseError::EmptyTerm`] for a term that names no field (or
+    /// names more than a field and a direction), and
+    /// [`OrderByClauseError::InvalidDirection`] for a direction that isn't
+    /// `asc` or `desc`.
     pub fn parse(order_by: &str) -> Result<Self, OrderByClauseError> {
         let order_by = order_by.trim();
         if order_by.is_empty() {
@@ -124,6 +131,7 @@ impl OrderByClause {
     /// computed fresh from `keys` on every call — `OrderByClause` never
     /// carries bind values, so there's no matching `values()`; see
     /// [`QueryComposer::push_order_by`](crate::QueryComposer::push_order_by).
+    #[must_use]
     pub fn sql(&self) -> SqlStr {
         let sql = self
             .keys
@@ -146,6 +154,7 @@ impl OrderByClause {
     /// commutative: `a.then(b)` sorts by `a` first, `b.then(a)` sorts by
     /// `b` first — order matters, because ORDER BY is a sequence, not a
     /// boolean combination like WHERE's `AND`.
+    #[must_use]
     pub fn then(mut self, other: OrderByClause) -> OrderByClause {
         self.keys.extend(other.keys);
         self

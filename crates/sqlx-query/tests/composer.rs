@@ -19,7 +19,7 @@ fn name_order_by() -> OrderByClause {
     OrderByClause::parse("name asc").unwrap()
 }
 
-/// Ports pgxquery's "substitutes where and order_by sentinels" test.
+/// Ports pgxquery's "substitutes where and `order_by` sentinels" test.
 #[test]
 fn substitutes_where_and_order_by_sentinels() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id LIMIT $2 OFFSET $3";
@@ -44,7 +44,7 @@ fn substitutes_where_and_order_by_sentinels() {
 }
 
 /// Ports pgxquery's "When Where is empty: drops the where sentinel and
-/// keeps order_by".
+/// keeps `order_by`".
 #[test]
 fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id";
@@ -58,7 +58,7 @@ fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
     assert!(sql.contains("name ASC , id"));
 }
 
-/// Ports pgxquery's "When OrderByClause is empty: drops the order_by sentinel
+/// Ports pgxquery's "When `OrderByClause` is empty: drops the `order_by` sentinel
 /// and keeps where".
 #[test]
 fn missing_order_by_drops_sentinel_and_keeps_where() {
@@ -73,7 +73,7 @@ fn missing_order_by_drops_sentinel_and_keeps_where() {
     assert!(!sql.contains("ASC"));
 }
 
-/// Ports pgxquery's "When both Where and OrderByClause are empty: drops both
+/// Ports pgxquery's "When both `Where` and `OrderByClause` are empty: drops both
 /// sentinels but still appends Args" — here, the base query's own binds.
 #[test]
 fn both_missing_drops_both_sentinels_but_keeps_base_binds() {
@@ -113,9 +113,9 @@ fn bare_sentinel_substitutes_value_alone() {
     assert!(!sql.contains("query.where"));
 }
 
-/// Ports pgxquery's "the order_by sentinel is placed before the static
+/// Ports pgxquery's "the `order_by` sentinel is placed before the static
 /// list: preserves the trailing comma as the suffix", and its nested
-/// "OrderByClause is empty: drops the sentinel leaving the static list intact".
+/// "`OrderByClause` is empty: drops the sentinel leaving the static list intact".
 #[test]
 fn order_by_sentinel_before_static_list() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
@@ -174,7 +174,7 @@ fn shifts_filter_placeholders_past_base_binds() {
 /// `OrderByClause` never carries bind values (it only ever renders column
 /// names and directions), so unlike `WhereClause`, its sentinel never needs
 /// placeholder shifting — this documents that invariant, replacing
-/// pgxquery's "OrderBy contains a placeholder" scenario, which doesn't
+/// pgxquery's "`OrderBy` contains a placeholder" scenario, which doesn't
 /// apply to the concrete `OrderByClause` type this crate uses.
 #[test]
 fn order_by_never_contributes_bind_values() {
@@ -328,7 +328,7 @@ fn rank_cursor() -> Cursor {
 }
 
 /// A cursor alone (no separate `.push_order_by()` call) supplies its own
-/// order_by directly — this is the expected, ergonomic case, not a
+/// `order_by` directly — this is the expected, ergonomic case, not a
 /// degraded fallback.
 #[test]
 fn cursor_alone_supplies_its_own_order_by() {
@@ -343,7 +343,7 @@ fn cursor_alone_supplies_its_own_order_by() {
     assert_eq!(values, vec![Value::Int(42), Value::Int(7)]);
 }
 
-/// A cursor whose order_by matches an explicitly-set `.push_order_by()` is
+/// A cursor whose `order_by` matches an explicitly-set `.push_order_by()` is
 /// accepted — the common case of a client re-sending the same sort on
 /// every page.
 #[test]
@@ -357,8 +357,8 @@ fn cursor_with_matching_order_by_is_accepted() {
     assert!(query.compose().is_ok());
 }
 
-/// A cursor whose order_by no longer matches the request's current
-/// order_by (client changed their sort mid-pagination) is rejected.
+/// A cursor whose `order_by` no longer matches the request's current
+/// `order_by` (client changed their sort mid-pagination) is rejected.
 #[test]
 fn cursor_with_mismatched_order_by_is_rejected() {
     let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE ORDER BY /* query.order_by , */ id";
@@ -453,8 +453,8 @@ fn push_order_accumulates_as_tie_breakers_in_call_order() {
     assert!(sql.contains("ORDER BY tenant_id ASC, rank DESC , id"));
 }
 
-/// When an explicit accumulated order_by matches the cursor's, the
-/// cursor's order_by isn't appended as an extra tie-breaker on top of it
+/// When an explicit accumulated `order_by` matches the cursor's, the
+/// cursor's `order_by` isn't appended as an extra tie-breaker on top of it
 /// — the two are checked for equality, not concatenated.
 #[test]
 fn explicit_order_by_is_not_duplicated_by_a_matching_cursor() {

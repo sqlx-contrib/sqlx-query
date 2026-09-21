@@ -8,6 +8,13 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/sqlx-contrib/sqlx-query"
 
+# Denied rather than warned, to match the rest of this ecosystem: a lint these
+# crates tolerate is a lint their consumers cannot. `priority = -1` lets an
+# individual `allow` in a crate override the group.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
 [workspace.dependencies]
 sqlx = { version = "0.9", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

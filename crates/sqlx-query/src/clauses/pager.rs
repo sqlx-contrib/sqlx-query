@@ -113,6 +113,13 @@ impl Cursor {
     /// back into a `Cursor` carrying both its `order_by` and its boundary
     /// values — no separate [`new`](Self::new)/[`after`](Self::after) call
     /// needed, unlike building one from scratch.
+    ///
+    /// # Errors
+    ///
+    /// [`CursorError::TokenInvalidBase64`] or
+    /// [`CursorError::TokenMalformed`] for a token that isn't one this type
+    /// produced, and [`CursorError::TokenChecksumMismatch`] for one that was
+    /// corrupted or hand-edited after it was issued.
     pub fn parse(token: &str) -> Result<Self, CursorError> {
         use base64::Engine as _;
 
@@ -134,8 +141,11 @@ impl Cursor {
     /// back to the client as-is. See the module docs for the wire format
     /// and what the checksum does and doesn't guard against.
     ///
-    /// Panics if any key's value is unset — unreachable through this
-    /// type's public API, same as [`to_where_clause`](Self::to_where_clause).
+    /// # Panics
+    ///
+    /// If any key's value is unset — unreachable through this type's public
+    /// API, same as [`to_where_clause`](Self::to_where_clause).
+    #[must_use]
     pub fn encode(&self) -> String {
         use base64::Engine as _;
 
@@ -151,6 +161,11 @@ impl Cursor {
     /// Supplies all boundary values at once, one per key, in order — not
     /// chainable per-value like [`WhereClause::bind`], since a cursor
     /// position isn't meaningful with only some of its values known.
+    ///
+    /// # Errors
+    ///
+    /// [`CursorError::ValueCountMismatch`] unless `values` has exactly one
+    /// entry per `order_by` key.
     pub fn after(mut self, values: Vec<Value>) -> Result<Self, CursorError> {
         if values.len() != self.keys.len() {
             return Err(CursorError::ValueCountMismatch {
@@ -171,6 +186,12 @@ impl Cursor {
     /// own, always-unqualified, label — e.g. `v.created_at` matches a
     /// row column named `created_at`), so `row`'s column order doesn't
     /// need to match `self`'s key order.
+    ///
+    /// # Errors
+    ///
+    /// [`CursorError::RowColumnMissing`] for a key whose column `row`
+    /// doesn't carry, and [`CursorError::RowValueUndecodable`] for one whose
+    /// column isn't any of the types a [`Value`] can hold.
     pub fn after_row<'r, R>(mut self, row: &'r R) -> Result<Self, CursorError>
     where
         R: Row,
@@ -193,6 +214,7 @@ impl Cursor {
     /// Reconstructs the `OrderByClause` this cursor was built against, to
     /// re-apply to the next page's query — see
     /// [`QueryComposer::with_cursor`](crate::QueryComposer::with_cursor).
+    #[must_use]
     pub fn to_order_by_clause(&self) -> OrderByClause {
         self.keys.iter().map(|ck| ck.order.clone()).collect()
     }
@@ -202,10 +224,12 @@ impl Cursor {
     /// `(k1 OP1 v1) OR (k1 = v1 AND k2 OP2 v2) OR ...`, where `OPi` is `>`
     /// for an ascending key and `<` for a descending one.
     ///
-    /// Panics if any key's value is unset — unreachable through this
-    /// type's public API, since only [`after`](Self::after) and
-    /// [`parse`](Self::parse) set values, and both always set all of them
-    /// together.
+    /// # Panics
+    ///
+    /// If any key's value is unset — unreachable through this type's public
+    /// API, since only [`after`](Self::after) and [`parse`](Self::parse) set
+    /// values, and both always set all of them together.
+    #[must_use]
     pub fn to_where_clause(&self) -> WhereClause {
         let mut branches = Vec::with_capacity(self.keys.len());
         for i in 0..self.keys.len() {
@@ -271,7 +295,7 @@ fn checksum_of(cursor: &Cursor) -> u32 {
 /// speedup isn't worth the extra static data. Verified against the
 /// standard `"123456789"` -> `0xCBF43926` test vector below.
 fn crc32(bytes: &[u8]) -> u32 {
-    const POLY: u32 = 0xEDB88320;
+    const POLY: u32 = 0xEDB8_8320;
     let mut crc = 0xFFFF_FFFFu32;
     for &byte in bytes {
         crc ^= u32::from(byte);

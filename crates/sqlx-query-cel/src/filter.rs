@@ -93,6 +93,13 @@ impl FilterClause {
     /// [`Cursor::to_where_clause`](sqlx_query::Cursor::to_where_clause)'s
     /// naming, since both types answer "what's your WHERE-clause form?"
     /// the same way.
+    ///
+    /// # Panics
+    ///
+    /// If this tree doesn't render — unreachable, since
+    /// [`parse`](Self::parse) rejects one that doesn't before a
+    /// `FilterClause` exists to call this on.
+    #[must_use]
     pub fn to_where_clause(&self) -> WhereClause {
         let mut values = Vec::new();
         let sql = Self::render(&self.expr, &mut values)
@@ -227,7 +234,18 @@ impl FilterClause {
             LiteralValue::String(string) => Value::String(string.to_string()),
             LiteralValue::Boolean(boolean) => Value::Bool(**boolean),
             LiteralValue::Int(int) => Value::Int(**int),
-            LiteralValue::UInt(uint) => Value::Int(**uint as i64),
+            // Refused rather than wrapped: a `u64` above `i64::MAX` has no
+            // `Value::Int` to be, and silently binding it as a negative
+            // number would compare against the wrong rows.
+            LiteralValue::UInt(uint) => match i64::try_from(**uint) {
+                Ok(int) => Value::Int(int),
+                Err(_) => {
+                    return Err(FilterClauseError::Unsupported(format!(
+                        "unsigned literal {} is too large for the signed integer a bind value carries",
+                        **uint
+                    )));
+                }
+            },
             LiteralValue::Double(double) => Value::Float(**double),
             LiteralValue::Null => Value::Null,
             LiteralValue::Bytes(_) => {

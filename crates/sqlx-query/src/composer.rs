@@ -44,12 +44,14 @@ pub struct QueryStatement {
 
 impl QueryStatement {
     /// This statement's SQL text, sentinels already spliced in.
+    #[must_use]
     pub fn sql(&self) -> &str {
         &self.sql
     }
 
     /// The bind values `sql()`'s placeholders reference, in declaration
     /// order.
+    #[must_use]
     pub fn values(&self) -> &[Value] {
         &self.values
     }
@@ -57,6 +59,7 @@ impl QueryStatement {
     /// Consumes this statement into its two pieces — used internally by
     /// [`QueryComposer::build`], and a convenient way to destructure in
     /// tests: `let (sql, values) = composer.compose()?.into_parts();`.
+    #[must_use]
     pub fn into_parts(self) -> (String, Vec<Value>) {
         (self.sql, self.values)
     }
@@ -83,6 +86,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// contain any syntax the target driver accepts; only its own
     /// sentinel comments are ever touched, and only once, by
     /// [`compose`](Self::compose)/[`build`](Self::build).
+    #[must_use]
     pub fn new(sql: &'static str) -> Self {
         QueryComposer {
             sql,
@@ -154,6 +158,11 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// connective/separator). A sentinel name that isn't `where` or
     /// `order_by` is also dropped — this matches pgxquery's handling of
     /// an unrecognized `query.<name>`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::CursorOrderByMismatch`] if a cursor and an explicit
+    /// `order_by` are both set and disagree.
     pub fn compose(&self) -> Result<QueryStatement, Error> {
         let order_by_sql = self.compose_order_by()?;
         let (where_by_sql, where_by_values) = self.compose_where();
@@ -257,6 +266,11 @@ where
     /// `String` directly via [`sqlx::AssertSqlSafe`] (as of sqlx 0.9's
     /// `SqlSafeStr`), so unlike an earlier version of this method, nothing
     /// needs to be leaked to satisfy a `'static` bound.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`compose`](Self::compose) returns — this only binds what
+    /// that produced.
     pub fn build(&self) -> Result<sqlx::query::Query<'static, DB, DB::Arguments>, Error> {
         let (sql, values) = self.compose()?.into_parts();
 
