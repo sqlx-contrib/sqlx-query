@@ -1,0 +1,266 @@
+# sqlx-query
+
+> Add filtering, ordering and keyset pagination to a SQL query you already wrote. No query builder, no DSL — your SQL keeps its shape, and the pieces get spliced into comments you left for them.
+
+[![CI](https://github.com/sqlx-contrib/sqlx-query/actions/workflows/ci.yml/badge.svg)](https://github.com/sqlx-contrib/sqlx-query/actions/workflows/ci.yml)
+[![Rust (edition 2021)](https://img.shields.io/badge/Rust-2021-black?logo=rust)](https://www.rust-lang.org/)
+[![Nix Flake](https://img.shields.io/badge/Nix-Flake-5277C3?logo=nixos&logoColor=white)](https://nixos.wiki/wiki/Flakes)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+A Rust/[sqlx](https://github.com/launchbadge/sqlx) port of
+[`pgx-contrib/pgxquery`](https://github.com/pgx-contrib/pgxquery)'s
+sentinel-comment splicing, with the [AIP-132](https://google.aip.dev/132)
+`filter` / `order_by` / `page_token` request shape on top.
+
+> [!WARNING]
+> **Work in progress — a spike, not a release.** Neither crate is published to
+> crates.io, the API is unstable and unannounced, and the end-to-end tests run
+> against rendered SQL text rather than a live server. It is here so the shape
+> of the thing can be looked at and argued with.
+
+## Why splice comments instead of building the query?
+
+The usual answer to "the client can filter and sort" is a query builder: you
+stop writing SQL and start writing Rust that emits SQL. That trade costs you
+the thing SQL is good at. A builder's output is hard to read, impossible to
+paste into `psql`, and drifts from what you meant one `.and_where()` at a time.
+
+So the query stays yours, as a string, with comments marking the two places a
+request is allowed to reach:
+
+```sql
+SELECT id, name, rank, created_at
+  FROM users
+ WHERE /* query.where AND */ tenant_id = $1
+ ORDER BY /* query.order_by , */ id
+ LIMIT $2
+```
+
+That query runs as-is — the sentinels are comments, so an empty filter is not a
+special case, it is just a comment nobody replaced. What you get over a
+builder:
+
+- The base query is still a static string. It can be checked, explained, and
+  pasted into a client, because nothing assembled it.
+- A filter is parsed, not concatenated. Every literal becomes a bind value; no
+  request text ever reaches the SQL.
+- Fields are resolved against a fail-closed allow-list, so a request can only
+  filter and sort on columns you offered by name.
+- The placement of the clause is your decision, not the library's. A sentinel
+  inside a CTE, a sub-select, or one of two `UNION` arms goes exactly where you
+  put it.
+
+What it is *not*: a way to build a query you haven't written. There is no
+`SELECT` generation, no table introspection, and no joins inferred from
+anything. If you don't already have the query, this crate has nothing to add to
+it.
+
+## Table of contents
+
+- [Why splice comments instead of building the query?](#why-splice-comments-instead-of-building-the-query)
+- [The crates](#the-crates)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Filtering](#filtering)
+- [Ordering](#ordering)
+- [Keyset pagination](#keyset-pagination)
+- [Dialects](#dialects)
+- [Development](#development)
+- [Dependencies](#dependencies)
+- [License](#license)
+
+## The crates
+
+| Crate                                     | What it is                                                                          |
+| ----------------------------------------- | ----------------------------------------------------------------------------------- |
+| [`sqlx-query`](crates/sqlx-query)         | The composer, the clause types, and the cursor. No filter language, no CEL.         |
+| [`sqlx-query-cel`](crates/sqlx-query-cel) | Reads an AIP-160 `filter` written in [CEL] into a `WhereClause` the composer takes. |
+
+The split is the point: `sqlx-query` never depends on the filter language.
+Anything `WHERE`-shaped converts *into* a `WhereClause`, so a different filter
+syntax is a new crate rather than a fork.
+
+[CEL]: https://github.com/google/cel-spec
+
+## How it works
+
+```
+  request: filter = "rank > 10", order_by = "rank desc", page_token = "…"
+                   │
+                   ▼
+┌───────────────────────────────────────────────────────────┐
+│ SELECT id, name FROM users                                │  your base query,
+│  WHERE /* query.where AND */ tenant_id = $1               │  a static string
+│  ORDER BY /* query.order_by , */ id                       │
+└───────────────────────────────────────────────────────────┘
+                   │  resolve → render → splice
+                   ▼
+┌───────────────────────────────────────────────────────────┐
+│ SELECT id, name FROM users                                │  what executes
+│  WHERE (rank) > ($3) AND tenant_id = $1                   │
+│  ORDER BY rank DESC , id                                  │
+└───────────────────────────────────────────────────────────┘
+  binds: [tenant_id, 50, 10]
+```
+
+Three things happen on the way through:
+
+1. **Resolve.** Each field a request names is looked up in a `&HashMap<&str,
+   &str>` of allowed field → column. A miss is an error, not a pass-through.
+2. **Render.** The condition becomes SQL text plus a flat list of bind values,
+   numbered locally (`$1`, `$2`, …) as if the fragment were the whole query.
+3. **Splice.** Each sentinel is replaced by its fragment, and the fragment's
+   placeholders are shifted past the base query's own binds — so a fragment
+   written with local numbering lands correctly no matter how many values the
+   base query already had. A sentinel with nothing to put in it is dropped
+   whole, trailing connective and all.
+
+## Quick start
+
+```rust
+use std::collections::HashMap;
+
+use sqlx::Postgres;
+use sqlx_query::{OrderByClause, QueryComposer, QueryResolver};
+use sqlx_query_cel::FilterClause;
+
+// Left where it can be read: the sentinels are comments, so this runs as-is.
+const LIST_USERS: &str = "
+    SELECT id, name, rank, created_at
+      FROM users
+     WHERE /* query.where AND */ tenant_id = $1
+     ORDER BY /* query.order_by , */ id
+     LIMIT $2
+";
+
+// The allow-list. Field names as the client says them, columns as the table
+// spells them -- anything absent is refused rather than passed through.
+let columns = HashMap::from([
+    ("name", "name"),
+    ("rank", "rank"),
+    ("created", "created_at"),
+]);
+
+let filter = FilterClause::parse("rank > 10 && name != 'root'")?.resolve(&columns)?;
+let order_by = OrderByClause::parse("rank desc, created asc")?.resolve(&columns)?;
+
+let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
+query
+    .bind(tenant_id)      // the base query's own $1
+    .bind(50i64)          // ... and $2
+    .push_where(filter)   // -> /* query.where AND */
+    .push_order_by(order_by); // -> /* query.order_by , */
+
+let users = query.build()?.fetch_all(&pool).await?;
+```
+
+`compose()` instead of `build()` hands back the SQL text and bind values
+without touching a connection, which is what the tests in this repo use:
+
+```rust
+let (sql, values) = query.compose()?.into_parts();
+```
+
+## Filtering
+
+`FilterClause::parse` accepts the comparison-and-boolean part of [CEL]: `&&`,
+`||`, `!`, the six comparisons, `in` over a list, arithmetic, and literals.
+
+| Filter                                  | Becomes                                     |
+| --------------------------------------- | ------------------------------------------- |
+| `rank > 10`                             | `(rank) > ($1)`                             |
+| `name == 'alice' \|\| rank >= 50`       | `((name) = ($1)) OR ((rank) >= ($2))`       |
+| `status in ['ACTIVE', 'PENDING']`       | `status IN ($1, $2)`                        |
+| `deleted_at == null`                    | `deleted_at IS NULL`                        |
+
+Two deliberate choices: `== null` renders as `IS NULL`, because `= NULL` is
+never true and so never what was meant; and both sides of a binary operator are
+always parenthesized, so there is no precedence table to get wrong.
+
+Macros, comprehensions, function calls, maps and structs are refused. They have
+no reading as a `WHERE` clause, and guessing one would be inventing SQL the
+caller didn't ask for.
+
+## Ordering
+
+`OrderByClause::parse` reads AIP-132's `"field [asc|desc], ..."` — a plain
+field list, no CEL:
+
+```rust
+OrderByClause::parse("rank desc, created asc")?.resolve(&columns)?;
+// -> rank DESC, created_at ASC
+```
+
+An empty string parses to an empty clause, which drops its sentinel rather than
+erroring. Clauses accumulate as tie-breakers: `push_order_by` twice means "sort
+by the first, **then** by the second".
+
+## Keyset pagination
+
+A `Cursor` is a resolved `OrderByClause` plus one boundary value per key,
+rendered as the OR-of-ANDs tuple comparison the seek method wants — not
+`OFFSET`, which re-reads every row it skips.
+
+```rust
+// The page just fetched, turned into the cursor for the next one. Values come
+// off the last row, so no one has to know each key's Rust type.
+let cursor = Cursor::new(order_by.clone()).after_row(users.last().unwrap())?;
+let page_token = cursor.encode();
+
+// ... and on the next request:
+let cursor = Cursor::parse(&page_token)?;
+let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
+query.bind(tenant_id).bind(50i64).with_cursor(cursor);
+```
+
+The token is the cursor `postcard`-serialized, checksummed and base64'd,
+following `einride/aip-go`'s `pagination.PageToken` shape — opaque, and cleanly
+rejected if hand-edited. A cursor carries the `order_by` it was built against,
+so it doesn't have to be repeated; if it *is* set and disagrees, `compose()`
+fails rather than paging through a different sort than the token was cut for.
+
+## Dialects
+
+`QueryComposer<DB>` is generic over a `QueryDialect`, implemented for
+`Postgres`, `MySql` and `Sqlite`. The distinction that matters is how a
+placeholder names its value: Postgres's `$N` carries a number that can be
+shifted when a fragment moves, while MySQL's and SQLite's bare `?` is positional
+by where it sits in the text. Only the numbered kind gets shifted.
+
+## Development
+
+The flake's dev shell has the pinned toolchain (see `rust-toolchain.toml`), so
+`nix develop` and the Dev Container are the same compiler:
+
+```bash
+nix develop                  # or open the folder in a Dev Container
+make test                    # cargo test --workspace, then the doctests
+make lint                    # cargo fmt --check + clippy (all + pedantic, denied)
+make doc-check               # cargo doc with warnings as errors, no browser
+make doc                     # the same, opened in a browser
+```
+
+No database server is needed for any of it: the tests compare the SQL these
+crates render. The Dev Container does stand up PostgreSQL and MySQL for the
+end-to-end tests that will need a real server to confirm a `$N`/`?` run
+actually binds — which is the one thing comparing strings cannot tell you.
+
+## Dependencies
+
+- [`sqlx`](https://crates.io/crates/sqlx) for `SqlStr`, `Arguments` and the
+  driver marker types
+- [`cel`](https://crates.io/crates/cel) for the filter syntax —
+  `default-features = false`, because this parses CEL and never evaluates it
+- [`regex`](https://crates.io/crates/regex) to find the sentinels
+- [`postcard`](https://crates.io/crates/postcard) +
+  [`base64`](https://crates.io/crates/base64) for the page token
+- [`chrono`](https://crates.io/crates/chrono) for timestamp bind values
+- [`thiserror`](https://crates.io/crates/thiserror) for the error types
+
+Tooling: Nix for the dev shell, and a Dev Container that reuses the same flake.
+
+## License
+
+[MIT](LICENSE)
+
+<!-- markdownlint-disable-file MD013 -->
