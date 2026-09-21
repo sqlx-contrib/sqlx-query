@@ -81,10 +81,8 @@ impl FilterClause {
             .parse(filter)
             .map_err(|errors| FilterClauseError::Parse(errors.to_string()))?;
 
-        // Fails fast on anything with no reading as a condition. The
-        // render is discarded here — `to_where_clause()` recomputes it
-        // once fields are resolved to real columns.
-        Self::render(&parsed, &mut Vec::new())?;
+        // Fails fast on anything with no reading as a condition.
+        Self::validate(&parsed)?;
 
         Ok(FilterClause { expr: parsed })
     }
@@ -101,6 +99,13 @@ impl FilterClause {
         values
             .into_iter()
             .fold(WhereClause::new(sql), WhereClause::bind)
+    }
+
+    /// Confirms `node` has a reading as a condition, without building
+    /// the SQL text/values `render` would — there's nothing to do with
+    /// them yet at parse time, before fields are resolved to columns.
+    fn validate(node: &cel::IdedExpr) -> Result<(), FilterClauseError> {
+        Self::render(node, &mut Vec::new()).map(|_| ())
     }
 
     /// Renders `node` to SQL text, pushing each literal it contains onto
