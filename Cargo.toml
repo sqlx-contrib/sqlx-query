@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/sqlx-contrib/sqlx-query-v2"
+repository = "https://github.com/sqlx-contrib/sqlx-query"
 
 [workspace.dependencies]
 sqlx = { version = "0.9", default-features = false }
