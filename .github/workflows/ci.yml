@@ -51,6 +51,9 @@ jobs:
       pull-requests: write
     timeout-minutes: 15
     outputs:
+      # `releases_created`, plural: the singular one is for a single-package
+      # config, and this repo's is a manifest over two crates -- reading the
+      # singular name here gets an empty string on every run.
       release_created: ${{ steps.release.outputs.releases_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
@@ -76,7 +79,12 @@ jobs:
   # themselves are the artifact, and they go to crates.io below.
   publish:
     needs: release
-    if: ${{ needs.release.outputs.release_created }}
+    # Compared against the string, not used as a truth value: release-please
+    # reports "false" when it created nothing, and a non-empty string is
+    # truthy in an Actions expression -- so the bare `${{ ... }}` form runs
+    # this job on every push to main and only fails to publish because the
+    # crates.io auth step happens to reject it first.
+    if: needs.release.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
