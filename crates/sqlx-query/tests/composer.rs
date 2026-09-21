@@ -9,7 +9,7 @@
 //! values, without needing a live database connection.
 
 use sqlx::Execute;
-use sqlx_query_v2::{Cursor, Error, OrderClause, QueryComposer, Value, WhereClause};
+use sqlx_query::{Cursor, Error, OrderClause, QueryComposer, Value, WhereClause};
 
 fn admin_filter() -> WhereClause {
     WhereClause::new("role = 'admin'")

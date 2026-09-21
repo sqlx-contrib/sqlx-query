@@ -1105,20 +1105,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlx-query-cel"
-version = "0.1.0"
-dependencies = [
- "sqlx-query-v2",
-]
-
-[[package]]
-name = "sqlx-query-v2"
+name = "sqlx-query"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "regex",
  "sqlx",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "sqlx-query-cel"
+version = "0.1.0"
+dependencies = [
+ "sqlx-query",
 ]
 
 [[package]]

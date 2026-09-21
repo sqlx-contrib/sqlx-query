@@ -11,7 +11,7 @@ use crate::Value;
 /// (`$1`, `$2`, ... for positional dialects).
 ///
 /// This is the concrete type [`QueryComposer::where_by`](crate::QueryComposer::where_by)
-/// accepts. `sqlx-query-v2` doesn't know about (and per DESIGN.md's
+/// accepts. `sqlx-query` doesn't know about (and per DESIGN.md's
 /// dependency direction, must never depend on) `sqlx-query-cel`'s
 /// `Filter` — so `Filter`, or any other future `WHERE`-shaped value (e.g.
 /// a keyset `Cursor`), converts *into* `WhereClause` via [`Into`], rather than

@@ -62,6 +62,19 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         self
     }
 
+    /// Applies a keyset pagination [`Cursor`]. Its `where_by()` is AND-ed
+    /// with any value passed to [`where_by`](Self::where_by) (a filter and
+    /// pagination both apply — one must not silently replace the other).
+    /// Its `order_by()` doesn't have to be repeated: if
+    /// [`order_by`](Self::order_by) is left unset, the cursor's is used
+    /// directly; if it *is* set, [`render`](Self::render) checks the two
+    /// match, since a mismatch almost always means the client's sort
+    /// changed between the request that issued this cursor and this one.
+    pub fn cursor(&mut self, cursor: Cursor) -> &mut Self {
+        self.cursor = Some(cursor);
+        self
+    }
+
     /// Splices onto `/* query.where */`. Accepts anything that converts
     /// into [`WhereClause`] — `sqlx-query-cel`'s `Filter`, a `WhereClause`
     /// built by hand, or anything else WHERE-shaped. If [`cursor`](Self::cursor)
@@ -77,19 +90,6 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// builder methods symmetric without committing to that forever.
     pub fn order_by(&mut self, order_by: impl Into<OrderClause>) -> &mut Self {
         self.order_by = Some(order_by.into());
-        self
-    }
-
-    /// Applies a keyset pagination [`Cursor`]. Its `where_by()` is AND-ed
-    /// with any value passed to [`where_by`](Self::where_by) (a filter and
-    /// pagination both apply — one must not silently replace the other).
-    /// Its `order_by()` doesn't have to be repeated: if
-    /// [`order_by`](Self::order_by) is left unset, the cursor's is used
-    /// directly; if it *is* set, [`render`](Self::render) checks the two
-    /// match, since a mismatch almost always means the client's sort
-    /// changed between the request that issued this cursor and this one.
-    pub fn cursor(&mut self, cursor: Cursor) -> &mut Self {
-        self.cursor = Some(cursor);
         self
     }
 
