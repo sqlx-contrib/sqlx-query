@@ -10,9 +10,9 @@ use crate::Value;
 /// reference, numbered locally as if it were the only thing in the query
 /// (`$1`, `$2`, ... for positional dialects).
 ///
-/// This is the concrete type [`QueryComposer::where_by`](crate::QueryComposer::where_by)
-/// accepts. `sqlx-query` doesn't know about (and per DESIGN.md's
-/// dependency direction, must never depend on) `sqlx-query-cel`'s
+/// This is the concrete type [`QueryComposer::push_where`](crate::QueryComposer::push_where)
+/// accepts. `sqlx-query` doesn't know about (and must never depend on,
+/// to keep the dependency direction one-way) `sqlx-query-cel`'s
 /// `Filter` — so `Filter`, or any other future `WHERE`-shaped value (e.g.
 /// a keyset `Cursor`), converts *into* `WhereClause` via [`Into`], rather than
 /// `WhereClause` reaching out to know about them.

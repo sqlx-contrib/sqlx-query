@@ -1,7 +1,8 @@
 //! Splices a [`WhereClause`] and an [`OrderByClause`] into
 //! `/* query.<name> */` sentinel comments in a base SQL query the caller
-//! already wrote, instead of building a `SELECT` from scratch. See
-//! `DESIGN.md` in the repo root for the full rationale.
+//! already wrote, instead of building a `SELECT` from scratch — a port of
+//! `pgx-contrib/pgxquery`'s sentinel-comment splicing technique to
+//! Rust/sqlx.
 
 use std::collections::HashMap;
 

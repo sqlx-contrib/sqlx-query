@@ -12,9 +12,9 @@ use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
 ///
 /// This is the **name-first** convention used by `sqlc-gen-sqlx`'s
 /// generated SQL (`/* query.where AND */`), not `pgx-contrib/pgxquery`'s
-/// own connective-first convention (`/* AND query.where */`) — see
-/// DESIGN.md. Name-first means there's no leading connective to capture,
-/// which is why this pattern only has two groups.
+/// own connective-first convention (`/* AND query.where */`). Name-first
+/// means there's no leading connective to capture, which is why this
+/// pattern only has two groups.
 static SENTINEL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/\*\s*\bquery\.(\w+)\b([^*]*?)\s*\*/").unwrap());
 

@@ -2,8 +2,8 @@
 //! `rewriter_test.go` + `fake/*.sql` fixtures, adapted from pgxquery's own
 //! connective-first sentinel convention (`/* AND query.where */`) to the
 //! name-first convention this crate's regex matches (`/* query.where AND
-//! */`) — see DESIGN.md. Each test's *intent* (what pgxquery scenario it
-//! ports) is named in its doc comment.
+//! */`). Each test's *intent* (what pgxquery scenario it ports) is named
+//! in its doc comment.
 //!
 //! These exercise [`QueryComposer::compose`] directly: SQL text + bind
 //! values, without needing a live database connection.
@@ -255,13 +255,12 @@ fn no_sentinels_present_leaves_sql_untouched() {
     assert_eq!(values, vec![Value::Int(1)]);
 }
 
-/// The scenario DESIGN.md calls out explicitly: a marker with
-/// caller-numbered placeholders *after* it in the text (`LIMIT $1 OFFSET
-/// $2`), shaped like the real grpc-rust-template target queries. Proves
-/// numbering is index-based (by bind-declaration order), not
-/// text-order-based — the `where_by` value's own placeholder still gets
-/// shifted past `take`/`skip` even though those appear later in the SQL
-/// text.
+/// A marker with caller-numbered placeholders *after* it in the text
+/// (`LIMIT $1 OFFSET $2`), shaped like the real grpc-rust-template target
+/// queries. Proves numbering is index-based (by bind-declaration order),
+/// not text-order-based — the `push_where` value's own placeholder still
+/// gets shifted past `take`/`skip` even though those appear later in the
+/// SQL text.
 #[test]
 fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text() {
     let sql = "SELECT * FROM collection \
