@@ -1,6 +1,6 @@
 [package]
 name = "sqlx-query-cel"
-description = "CEL filter -> WHERE fragment for sqlx-query (blocked on sqlx-cel, see src/lib.rs)"
+description = "CEL filter -> WhereClause for sqlx-query"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,5 @@ repository.workspace = true
 
 [dependencies]
 sqlx-query = { path = "../sqlx-query" }
+cel = { workspace = true }
+thiserror = { workspace = true }
