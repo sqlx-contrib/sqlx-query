@@ -70,9 +70,12 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         self
     }
 
-    /// Splices onto `/* query.order_by */`.
-    pub fn order_by(&mut self, order_by: OrderByClause) -> &mut Self {
-        self.order_by = Some(order_by);
+    /// Splices onto `/* query.order_by */`. Accepts anything that converts
+    /// into [`OrderByClause`], mirroring [`where_by`](Self::where_by) —
+    /// today that's only `OrderByClause` itself, but this keeps the two
+    /// builder methods symmetric without committing to that forever.
+    pub fn order_by(&mut self, order_by: impl Into<OrderByClause>) -> &mut Self {
+        self.order_by = Some(order_by.into());
         self
     }
 
