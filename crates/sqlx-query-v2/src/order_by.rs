@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::{QueryFragment, QueryResolver, Value};
+use crate::QueryResolver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -102,15 +102,17 @@ impl QueryResolver for OrderBy {
     }
 }
 
-impl QueryFragment for OrderBy {
-    fn into_sql(self) -> (String, Vec<Value>) {
-        let sql = self
-            .terms
+impl OrderBy {
+    /// Renders to `"col1 ASC, col2 DESC"`. `OrderBy` never carries bind
+    /// values (it only ever emits column names and directions), so unlike
+    /// [`Where`](crate::Where) its sentinel never needs placeholder
+    /// shifting — see [`QueryComposer::order_by`](crate::QueryComposer::order_by).
+    pub(crate) fn render(&self) -> String {
+        self.terms
             .iter()
             .map(|term| format!("{} {}", term.field, term.direction))
             .collect::<Vec<_>>()
-            .join(", ");
-        (sql, Vec::new())
+            .join(", ")
     }
 }
 
@@ -152,7 +154,7 @@ mod tests {
     fn empty_string_parses_to_empty_order_by() {
         let order_by = OrderBy::parse("").unwrap();
         assert_eq!(order_by, OrderBy::default());
-        assert_eq!(order_by.into_sql(), (String::new(), Vec::new()));
+        assert_eq!(order_by.render(), "");
     }
 
     #[test]
@@ -180,9 +182,7 @@ mod tests {
             .unwrap()
             .resolve(&columns)
             .unwrap();
-        let (sql, values) = order_by.into_sql();
-        assert_eq!(sql, "created_at DESC, rank ASC");
-        assert!(values.is_empty());
+        assert_eq!(order_by.render(), "created_at DESC, rank ASC");
     }
 
     #[test]

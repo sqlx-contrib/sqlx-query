@@ -9,24 +9,14 @@
 //! values, without needing a live database connection.
 
 use sqlx::Execute;
-use sqlx_query_v2::{OrderBy, QueryComposer, QueryFragment, Value};
+use sqlx_query_v2::{OrderBy, QueryComposer, Value, Where};
 
-/// A bare [`QueryFragment`] for tests that need to hand the composer raw
-/// SQL + values without going through `OrderBy`/CEL parsing.
-struct Raw(&'static str, Vec<Value>);
-
-impl QueryFragment for Raw {
-    fn into_sql(self) -> (String, Vec<Value>) {
-        (self.0.to_owned(), self.1)
-    }
+fn admin_filter() -> Where {
+    Where::new("role = 'admin'", Vec::new())
 }
 
-fn where_fragment() -> Raw {
-    Raw("role = 'admin'", Vec::new())
-}
-
-fn order_by_fragment() -> Raw {
-    Raw("name asc", Vec::new())
+fn name_order_by() -> OrderBy {
+    OrderBy::parse("name asc").unwrap()
 }
 
 /// Ports pgxquery's "substitutes where and order_by sentinels" test.
@@ -38,13 +28,13 @@ fn substitutes_where_and_order_by_sentinels() {
         .bind("007")
         .bind(0i64)
         .bind(10i64)
-        .filter(where_fragment())
-        .order_by(order_by_fragment());
+        .where_by(admin_filter())
+        .order_by(name_order_by());
 
     let (sql, values) = query.render();
 
     assert!(sql.contains("role = 'admin' AND"));
-    assert!(sql.contains("name asc , id"));
+    assert!(sql.contains("name ASC , id"));
     assert!(!sql.contains("query.where"));
     assert!(!sql.contains("query.order_by"));
     assert_eq!(
@@ -59,13 +49,13 @@ fn substitutes_where_and_order_by_sentinels() {
 fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.bind("007").order_by(order_by_fragment());
+    query.bind("007").order_by(name_order_by());
 
     let (sql, _) = query.render();
 
     assert!(!sql.contains("query.where"));
     assert!(!sql.contains("role = 'admin'"));
-    assert!(sql.contains("name asc , id"));
+    assert!(sql.contains("name ASC , id"));
 }
 
 /// Ports pgxquery's "When OrderBy is empty: drops the order_by sentinel
@@ -74,13 +64,13 @@ fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
 fn missing_order_by_drops_sentinel_and_keeps_where() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.bind("007").filter(where_fragment());
+    query.bind("007").where_by(admin_filter());
 
     let (sql, _) = query.render();
 
     assert!(sql.contains("role = 'admin' AND"));
     assert!(!sql.contains("query.order_by"));
-    assert!(!sql.contains("name asc"));
+    assert!(!sql.contains("ASC"));
 }
 
 /// Ports pgxquery's "When both Where and OrderBy are empty: drops both
@@ -102,7 +92,7 @@ fn both_missing_drops_both_sentinels_but_keeps_base_binds() {
 fn preserves_or_connective() {
     let sql = "SELECT * FROM t WHERE a = 1 /* query.where OR */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.filter(where_fragment());
+    query.where_by(admin_filter());
 
     let (sql, _) = query.render();
 
@@ -115,7 +105,7 @@ fn preserves_or_connective() {
 fn bare_sentinel_substitutes_value_alone() {
     let sql = "SELECT * FROM t WHERE /* query.where */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.filter(where_fragment());
+    query.where_by(admin_filter());
 
     let (sql, _) = query.render();
 
@@ -131,9 +121,9 @@ fn order_by_sentinel_before_static_list() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
 
     let mut with_order_by = QueryComposer::<sqlx::Postgres>::new(sql);
-    with_order_by.order_by(Raw("priority desc", Vec::new()));
+    with_order_by.order_by(OrderBy::parse("priority desc").unwrap());
     let (sql_with, _) = with_order_by.render();
-    assert!(sql_with.contains("priority desc , id"));
+    assert!(sql_with.contains("priority DESC , id"));
 
     let without_order_by = QueryComposer::<sqlx::Postgres>::new(sql);
     let (sql_without, _) = without_order_by.render();
@@ -148,7 +138,7 @@ fn order_by_sentinel_before_static_list() {
 fn multiple_sentinels_of_the_same_kind_all_substituted() {
     let sql = "SELECT * FROM t WHERE 1 = 1 /* query.where AND */ /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.filter(where_fragment());
+    query.where_by(admin_filter());
 
     let (sql, _) = query.render();
 
@@ -162,7 +152,7 @@ fn multiple_sentinels_of_the_same_kind_all_substituted() {
 fn shifts_filter_placeholders_past_base_binds() {
     let sql = "SELECT * FROM t WHERE tenant = $1 /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.bind("acme").filter(Raw(
+    query.bind("acme").where_by(Where::new(
         "name = $1 AND score > $2",
         vec![Value::String("alice".into()), Value::Int(90)],
     ));
@@ -180,29 +170,27 @@ fn shifts_filter_placeholders_past_base_binds() {
     );
 }
 
-/// Ports pgxquery's "OrderBy contains a placeholder: shifts the
-/// placeholder past the base args" — using 4 base binds, matching the
-/// original fixture's offset of 4.
+/// `OrderBy` never carries bind values (it only ever renders column names
+/// and directions), so unlike `Where`, its sentinel never needs
+/// placeholder shifting — this documents that invariant, replacing
+/// pgxquery's "OrderBy contains a placeholder" scenario, which doesn't
+/// apply to the concrete `OrderBy` type this crate uses.
 #[test]
-fn shifts_order_by_placeholder_past_base_binds() {
+fn order_by_never_contributes_bind_values() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id LIMIT $2 OFFSET $3";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.bind("007").bind(0i64).bind(10i64).order_by(Raw(
-        "CASE WHEN role = $1 THEN 0 ELSE 1 END",
-        vec![Value::String("admin".into())],
-    ));
+    query
+        .bind("007")
+        .bind(0i64)
+        .bind(10i64)
+        .order_by(OrderBy::parse("rank desc").unwrap());
 
     let (sql, values) = query.render();
 
-    assert!(sql.contains("CASE WHEN role = $4 THEN 0 ELSE 1 END ,"));
+    assert!(sql.contains("rank DESC , id"));
     assert_eq!(
         values,
-        vec![
-            Value::String("007".into()),
-            Value::Int(0),
-            Value::Int(10),
-            Value::String("admin".into()),
-        ]
+        vec![Value::String("007".into()), Value::Int(0), Value::Int(10)]
     );
 }
 
@@ -212,7 +200,7 @@ fn shifts_order_by_placeholder_past_base_binds() {
 fn zero_offset_leaves_filter_placeholders_unchanged() {
     let sql = "SELECT * FROM t WHERE 1 = 1 /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.filter(Raw(
+    query.where_by(Where::new(
         "name = $1 AND score > $2",
         vec![Value::String("alice".into()), Value::Int(90)],
     ));
@@ -229,7 +217,7 @@ fn zero_offset_leaves_filter_placeholders_unchanged() {
 fn leaves_non_matching_comments_untouched() {
     let sql = "SELECT 1 /* regular comment */ FROM t WHERE TRUE /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.filter(where_fragment());
+    query.where_by(admin_filter());
 
     let (sql, _) = query.render();
 
@@ -269,9 +257,9 @@ fn no_sentinels_present_leaves_sql_untouched() {
 /// caller-numbered placeholders *after* it in the text (`LIMIT $1 OFFSET
 /// $2`), shaped like the real grpc-rust-template target queries. Proves
 /// numbering is index-based (by bind-declaration order), not
-/// text-order-based — the filter/order_by fragments' own placeholders
-/// still get shifted past `take`/`skip` even though those appear later in
-/// the SQL text.
+/// text-order-based — the `where_by` value's own placeholder still gets
+/// shifted past `take`/`skip` even though those appear later in the SQL
+/// text.
 #[test]
 fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text() {
     let sql = "SELECT * FROM collection \
@@ -283,29 +271,31 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
     query
         .bind(50i64) // take -> $1
         .bind(0i64) // skip -> $2
-        .filter(Raw("status = $1", vec![Value::String("ACTIVE".into())]))
-        .order_by(Raw("rank = $1", vec![Value::Int(7)]));
+        .where_by(Where::new(
+            "status = $1",
+            vec![Value::String("ACTIVE".into())],
+        ))
+        .order_by(OrderBy::parse("rank desc").unwrap());
 
     let (sql, values) = query.render();
 
     assert!(sql.contains("WHERE status = $3 AND TRUE"));
-    assert!(sql.contains("ORDER BY rank = $4 , collection_id"));
+    assert!(sql.contains("ORDER BY rank DESC , collection_id"));
     assert!(sql.contains("LIMIT $1 OFFSET $2"));
     assert_eq!(
         values,
         vec![
             Value::Int(50),
             Value::Int(0),
-            Value::String("ACTIVE".into()),
-            Value::Int(7),
+            Value::String("ACTIVE".into())
         ]
     );
 }
 
-/// `OrderBy::into_sql` end to end through the composer (not just `Raw`),
-/// proving the real `QueryFragment` impl splices correctly too.
+/// `OrderBy` end to end through the composer, using real column resolution
+/// rather than a hand-built `Where`.
 #[test]
-fn order_by_fragment_type_splices_through_composer() {
+fn order_by_splices_through_composer() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
     let order_by = OrderBy::parse("rank desc").unwrap();
 
@@ -325,7 +315,7 @@ fn order_by_fragment_type_splices_through_composer() {
 fn build_produces_a_query_with_the_rendered_sql() {
     let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.filter(where_fragment());
+    query.where_by(admin_filter());
 
     let built = query.build().unwrap();
 

@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use regex::{Captures, Regex};
 
 use crate::shift::shift_placeholders;
-use crate::{QueryDialect, QueryFragment, Value};
+use crate::{OrderBy, QueryDialect, Value, Where};
 
 /// Matches a sentinel comment of the form `/* query.<name> <suffix> */`,
 /// capturing the name and the trailing connective/separator text
@@ -28,15 +28,15 @@ static SENTINEL_RE: LazyLock<Regex> =
 #[derive(Debug, thiserror::Error)]
 pub enum Error {}
 
-/// Splices [`QueryFragment`]s into `/* query.<name> */` sentinel comments
-/// in a static SQL template — the `pgx-contrib/pgxquery` port. `sql` is
-/// never parsed structurally, only scanned once for its own sentinel
-/// comments; it may contain any syntax the target driver accepts.
+/// Splices a [`Where`] and an [`OrderBy`] into `/* query.<name> */`
+/// sentinel comments in a static SQL template — the `pgx-contrib/pgxquery`
+/// port. `sql` is never parsed structurally, only scanned once for its own
+/// sentinel comments; it may contain any syntax the target driver accepts.
 pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
     binds: Vec<Value>,
-    filter: Option<(String, Vec<Value>)>,
-    order_by: Option<(String, Vec<Value>)>,
+    where_by: Option<Where>,
+    order_by: Option<OrderBy>,
     _dialect: PhantomData<fn() -> DB>,
 }
 
@@ -45,7 +45,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         QueryComposer {
             sql,
             binds: Vec::new(),
-            filter: None,
+            where_by: None,
             order_by: None,
             _dialect: PhantomData,
         }
@@ -59,46 +59,57 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         self
     }
 
-    /// Splices onto `/* query.where */`. `fragment` is rendered
-    /// immediately; its placeholders are shifted at [`build`](Self::build)
-    /// time once the final offset (how many bind values precede it) is
-    /// known.
-    pub fn filter(&mut self, fragment: impl QueryFragment) -> &mut Self {
-        self.filter = Some(fragment.into_sql());
+    /// Splices onto `/* query.where */`. Accepts anything that converts
+    /// into [`Where`] — `sqlx-query-cel`'s `Filter`, a future keyset
+    /// `Cursor`, or a `Where` built by hand. Its placeholders are shifted
+    /// at [`build`](Self::build) time once the final offset (how many bind
+    /// values precede it) is known.
+    pub fn where_by(&mut self, filter: impl Into<Where>) -> &mut Self {
+        self.where_by = Some(filter.into());
         self
     }
 
     /// Splices onto `/* query.order_by */`.
-    pub fn order_by(&mut self, fragment: impl QueryFragment) -> &mut Self {
-        self.order_by = Some(fragment.into_sql());
+    pub fn order_by(&mut self, order_by: OrderBy) -> &mut Self {
+        self.order_by = Some(order_by);
         self
     }
 
     /// Performs the sentinel splice and placeholder shift, returning the
     /// final SQL text and the flat bind-value list in the same order the
-    /// final placeholders reference them: base binds, then the filter
-    /// fragment's own values, then the order-by fragment's own values —
-    /// regardless of where each sentinel physically sits in `sql`.
+    /// final placeholders reference them: base binds, then the `where_by`
+    /// value's own values — regardless of where either sentinel physically
+    /// sits in `sql`. `order_by` never contributes values (see
+    /// [`OrderBy::render`]), so it isn't part of that offset accounting.
     ///
-    /// A sentinel whose fragment is absent, or whose fragment rendered to
-    /// an empty string, is dropped entirely (including its captured
+    /// A sentinel whose value is absent, or whose value rendered to an
+    /// empty string, is dropped entirely (including its captured
     /// connective/separator). A sentinel name that isn't `where` or
     /// `order_by` is also dropped — this matches pgxquery's handling of
     /// an unrecognized `query.<name>`.
     pub fn render(&self) -> (String, Vec<Value>) {
-        let positional = DB::positional();
+        let offset = self.binds.len();
+        let (where_sql, where_values) = match &self.where_by {
+            Some(where_by) if !where_by.sql().is_empty() => {
+                let sql = if DB::positional() {
+                    shift_placeholders(where_by.sql(), offset)
+                } else {
+                    where_by.sql().to_owned()
+                };
+                (sql, where_by.values().to_vec())
+            }
+            _ => (String::new(), Vec::new()),
+        };
 
-        let filter_offset = self.binds.len();
-        let (filter_sql, filter_values) = render_fragment(&self.filter, filter_offset, positional);
-
-        let order_by_offset = filter_offset + filter_values.len();
-        let (order_by_sql, order_by_values) =
-            render_fragment(&self.order_by, order_by_offset, positional);
+        let order_by_sql = self
+            .order_by
+            .as_ref()
+            .map_or_else(String::new, OrderBy::render);
 
         let sql = SENTINEL_RE
             .replace_all(self.sql, |caps: &Captures<'_>| {
                 let value = match &caps[1] {
-                    "where" => filter_sql.as_str(),
+                    "where" => where_sql.as_str(),
                     "order_by" => order_by_sql.as_str(),
                     _ => "",
                 };
@@ -111,28 +122,9 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .into_owned();
 
         let mut values = self.binds.clone();
-        values.extend(filter_values);
-        values.extend(order_by_values);
+        values.extend(where_values);
 
         (sql, values)
-    }
-}
-
-fn render_fragment(
-    fragment: &Option<(String, Vec<Value>)>,
-    offset: usize,
-    positional: bool,
-) -> (String, Vec<Value>) {
-    match fragment {
-        Some((sql, values)) if !sql.is_empty() => {
-            let sql = if positional {
-                shift_placeholders(sql, offset)
-            } else {
-                sql.clone()
-            };
-            (sql, values.clone())
-        }
-        _ => (String::new(), Vec::new()),
     }
 }
 
@@ -150,7 +142,7 @@ where
     /// an executable `sqlx` query.
     ///
     /// The rendered SQL text is only known at `build` time (it depends on
-    /// which fragments were spliced in), but `sqlx::query::Query` needs a
+    /// which values were spliced in), but `sqlx::query::Query` needs a
     /// `'static` SQL string. This leaks the rendered text (`Box::leak`) to
     /// get that `'static` lifetime honestly rather than faking it — each
     /// `build()` call leaks the size of its composed SQL. That's fine for
