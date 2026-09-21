@@ -85,23 +85,15 @@ impl WhereClause {
     }
 
     /// Shifts this clause's placeholders past `offset` existing bind
-    /// values — only meaningful for `positional` dialects (`$N`); returned
-    /// unchanged for non-positional ones (`?`). Returns `None` if this
-    /// clause's SQL is empty, meaning it should be dropped from the query
-    /// entirely rather than spliced in.
-    pub fn shift(self, offset: usize, positional: bool) -> Option<WhereClause> {
-        if self.sql().as_str().is_empty() {
-            return None;
-        }
-        if !positional {
-            return Some(self);
-        }
+    /// values. Always shifts — whether that's meaningful at all (only for
+    /// positional `$N` dialects, not `?`-style ones) is the composer's
+    /// call to make, not this type's; see
+    /// [`QueryDialect::positional`](crate::QueryDialect::positional).
+    pub fn shift(self, offset: usize) -> WhereClause {
         let sql = shift_placeholders(self.sql().as_str(), offset);
-        Some(
-            self.values
-                .into_iter()
-                .fold(WhereClause::new(sql), WhereClause::bind),
-        )
+        self.values
+            .into_iter()
+            .fold(WhereClause::new(sql), WhereClause::bind)
     }
 }
 
@@ -147,25 +139,11 @@ mod tests {
     }
 
     #[test]
-    fn shift_drops_an_empty_clause() {
-        assert!(WhereClause::new("").shift(3, true).is_none());
-    }
-
-    #[test]
-    fn shift_moves_placeholders_past_the_offset_for_positional_dialects() {
+    fn shift_moves_placeholders_past_the_offset() {
         let where_by = WhereClause::new("name = $1").bind("alice");
-        let shifted = where_by.shift(2, true).unwrap();
+        let shifted = where_by.shift(2);
 
         assert_eq!(shifted.sql().as_str(), "name = $3");
-        assert_eq!(shifted.values(), &[Value::String("alice".into())]);
-    }
-
-    #[test]
-    fn shift_leaves_non_positional_dialects_unchanged() {
-        let where_by = WhereClause::new("name = ?").bind("alice");
-        let shifted = where_by.shift(2, false).unwrap();
-
-        assert_eq!(shifted.sql().as_str(), "name = ?");
         assert_eq!(shifted.values(), &[Value::String("alice".into())]);
     }
 }

@@ -398,3 +398,23 @@ fn cursor_and_filter_are_combined_with_and() {
         ]
     );
 }
+
+/// Non-positional dialects (`?`) have no placeholder numbering to shift —
+/// deciding whether to shift at all is the composer's call
+/// (`WhereClause::shift` itself always shifts unconditionally).
+#[test]
+fn non_positional_dialects_do_not_shift_where_by_placeholders() {
+    let sql = "SELECT * FROM t WHERE tenant = ? /* query.where AND */";
+    let mut query = QueryComposer::<sqlx::Sqlite>::new(sql);
+    query
+        .bind("acme")
+        .where_by(WhereClause::new("name = ?").bind("alice"));
+
+    let (sql, values) = query.render().unwrap();
+
+    assert!(sql.contains("name = ? AND"));
+    assert_eq!(
+        values,
+        vec![Value::String("acme".into()), Value::String("alice".into())]
+    );
+}

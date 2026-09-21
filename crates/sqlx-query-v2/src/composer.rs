@@ -116,19 +116,29 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         // Whichever of where_by/cursor are set, AND-ed together if both are
         // (dropping either that's absent) — a filter and a pagination
         // cursor both apply; neither should silently replace the other.
+        // Empty ones are dropped; positional dialects ($N) additionally get
+        // their placeholders shifted past the base binds — non-positional
+        // ones (?) have no placeholder numbering to shift.
         let where_by = [
             self.where_by.clone(),
             self.cursor.as_ref().map(Cursor::where_by),
         ]
         .into_iter()
         .flatten()
-        .reduce(WhereClause::and);
+        .reduce(WhereClause::and)
+        .filter(|w| !w.sql().as_str().is_empty())
+        .map(|w| {
+            if DB::positional() {
+                w.shift(self.values.len())
+            } else {
+                w
+            }
+        });
 
-        // Shifted past the base binds, or dropped entirely if empty/absent.
-        let where_by = where_by.and_then(|w| w.shift(self.values.len(), DB::positional()));
         let where_by_sql = where_by
             .as_ref()
             .map_or_else(String::new, |w| w.sql().as_str().to_owned());
+
         let where_by_values = where_by.map_or_else(Vec::new, |w| w.values().to_vec());
 
         // The explicit order_by if one was set; otherwise the cursor's own
