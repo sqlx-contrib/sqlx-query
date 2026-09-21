@@ -1,0 +1,44 @@
+services:
+  workspace:
+    image: mcr.microsoft.com/devcontainers/base:bookworm
+    command: sleep infinity
+    volumes:
+      - ..:/home/vscode/workspace:cached
+
+  # Both servers, because the placeholder rules this workspace has to get right
+  # are exactly where the two differ: `$N` names the Nth bound value, `?` names
+  # the Nth placeholder in the text. Only one of them can be wrong at a time,
+  # and only a real server says which.
+  postgres:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vscode
+      POSTGRES_DB: sqlx_query
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+    # No host port: Docker assigns one, and devcontainer-env rewrites the URL
+    # in containerEnv to match. A fixed 5432 collides with the next project.
+    ports:
+      - 5432
+
+  mysql:
+    image: mysql:9.4
+    restart: unless-stopped
+    environment:
+      # The analogue of POSTGRES_HOST_AUTH_METHOD=trust: a throwaway server on
+      # a private compose network, so root with no password is the simplest
+      # thing that works and there is no secret to leak.
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: sqlx_query
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping --silent"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+    ports:
+      - 3306

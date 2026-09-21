@@ -1,0 +1,5 @@
+# `..` keeps clippy's defaults and adds the product names these crates' docs
+# name in prose, plus `XORed` -- prose about the cursor token's checksum, not
+# an identifier. Without these, `doc_markdown` wants backticks around every
+# mention of a database.
+doc-valid-idents = ["SQLite", "PostgreSQL", "MySQL", "MariaDB", "CEL", "XORed", ".."]

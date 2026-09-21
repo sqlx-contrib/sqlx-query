@@ -1,0 +1,7 @@
+[toolchain]
+# sqlx 0.9 forces 1.94 as the floor. This is the *dev* toolchain and is
+# deliberately pinned: naming it means `cargo` picks the same compiler here, in
+# the Dev Container and in CI, even when the machine's default stable is older.
+channel = "1.95.0"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
+profile = "minimal"
