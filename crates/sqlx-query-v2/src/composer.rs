@@ -125,6 +125,27 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         .flatten()
         .reduce(WhereClause::and);
 
+        let offset = self.values.len();
+        let where_sql = match &where_by {
+            Some(where_by) if !where_by.sql().as_str().is_empty() => {
+                if DB::positional() {
+                    shift_placeholders(where_by.sql().as_str(), offset)
+                } else {
+                    where_by.sql().as_str().to_owned()
+                }
+            }
+            _ => String::new(),
+        };
+        // Only the values of a where_by that actually got used above — an
+        // absent or empty-rendering where_by contributes nothing.
+        let where_values = if where_sql.is_empty() {
+            Vec::new()
+        } else {
+            where_by
+                .as_ref()
+                .map_or_else(Vec::new, |w| w.values().to_vec())
+        };
+
         // The explicit order_by if one was set; otherwise the cursor's own
         // (already checked above to match when both are present) — unlike
         // where_by, there's nothing to combine, just one or the other.
@@ -132,19 +153,6 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .order_by
             .clone()
             .or_else(|| self.cursor.as_ref().map(Cursor::order_by));
-
-        let offset = self.values.len();
-        let (where_sql, where_values) = match &where_by {
-            Some(where_by) if !where_by.sql().as_str().is_empty() => {
-                let sql = if DB::positional() {
-                    shift_placeholders(where_by.sql().as_str(), offset)
-                } else {
-                    where_by.sql().as_str().to_owned()
-                };
-                (sql, where_by.values().to_vec())
-            }
-            _ => (String::new(), Vec::new()),
-        };
 
         let order_by_sql =
             order_by.map_or_else(String::new, |order_by| order_by.sql().as_str().to_owned());
