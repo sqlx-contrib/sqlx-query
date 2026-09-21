@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
 
-use crate::string::shift_placeholders;
+use crate::lexer::shift_placeholders;
 use crate::Value;
 
 /// A `WHERE`-clause contribution: SQL text (no leading/trailing

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 mod clauses;
 mod composer;
 mod dialect;
-mod string;
+mod lexer;
 mod value;
 
 pub use clauses::{
