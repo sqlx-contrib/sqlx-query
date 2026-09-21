@@ -51,6 +51,8 @@ impl WhereClause {
         self
     }
 
+    /// The bind values `sql()`'s placeholders reference, in declaration
+    /// order.
     pub fn values(&self) -> &[Value] {
         &self.values
     }
@@ -71,7 +73,7 @@ impl WhereClause {
     /// coexist as one fragment — e.g. a client filter and a pagination
     /// cursor's tuple comparison, neither of which should silently
     /// replace the other (see
-    /// [`QueryComposer::cursor`](crate::QueryComposer::cursor)).
+    /// [`QueryComposer::with_cursor`](crate::QueryComposer::with_cursor)).
     pub fn and(self, other: WhereClause) -> WhereClause {
         let offset = self.values.len();
         let other_sql = shift_placeholders(other.sql().as_str(), offset);

@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use cel::common::ast::{CallExpr, Expr, LiteralValue};
 use sqlx_query::{QueryResolver, Value, WhereClause};
 
+/// Errors [`FilterClause::parse`]/[`FilterClause::resolve`] can return.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FilterClauseError {
     #[error("a filter cannot be blank")]

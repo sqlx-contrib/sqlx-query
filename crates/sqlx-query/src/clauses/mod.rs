@@ -1,6 +1,6 @@
 //! The clause types [`QueryComposer`](crate::QueryComposer)'s builder
-//! methods accept: [`WhereClause`] (`where_by`), [`OrderByClause`]
-//! (`order_by`), and [`Cursor`] (`cursor`, itself producing a
+//! methods accept: [`WhereClause`] (`push_where`), [`OrderByClause`]
+//! (`push_order_by`), and [`Cursor`] (`with_cursor`, itself producing a
 //! `WhereClause`/`OrderByClause` pair for keyset pagination).
 
 mod order;

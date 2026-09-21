@@ -6,6 +6,7 @@ use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
 
 use crate::QueryResolver;
 
+/// One `ORDER BY` key's sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderDirection {
     Asc,
@@ -56,6 +57,7 @@ impl FromIterator<OrderKey> for OrderByClause {
     }
 }
 
+/// Errors [`OrderByClause::parse`]/[`OrderByClause::resolve`] can return.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OrderByClauseError {
     #[error("empty order_by term in `{0}`")]
@@ -121,7 +123,7 @@ impl OrderByClause {
     /// `WhereClause`'s (a cheap clone of an `Arc`-backed field), this is
     /// computed fresh from `keys` on every call — `OrderByClause` never
     /// carries bind values, so there's no matching `values()`; see
-    /// [`QueryComposer::order_by`](crate::QueryComposer::order_by).
+    /// [`QueryComposer::push_order_by`](crate::QueryComposer::push_order_by).
     pub fn sql(&self) -> SqlStr {
         let sql = self
             .keys
@@ -153,6 +155,10 @@ impl OrderByClause {
 impl QueryResolver for OrderByClause {
     type Error = OrderByClauseError;
 
+    /// Renames every field this ordering names to the column it stands
+    /// for, against a fail-closed allow-list: a field the map doesn't
+    /// have is refused, so a request can't sort on a column it wasn't
+    /// offered.
     fn resolve(mut self, columns: &HashMap<&str, &str>) -> Result<Self, Self::Error> {
         for key in &mut self.keys {
             match columns.get(key.column.as_str()) {

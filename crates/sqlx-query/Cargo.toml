@@ -1,6 +1,6 @@
 [package]
 name = "sqlx-query"
-description = "Splice WhereClause/OrderClause/Cursor values into sentinel-comment markers in a static base SQL query, for sqlx"
+description = "Splice WhereClause/OrderByClause/Cursor values into sentinel-comment markers in a static base SQL query, for sqlx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

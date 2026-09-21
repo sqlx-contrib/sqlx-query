@@ -4,10 +4,12 @@ use sqlx::{Column, ColumnIndex, Decode, Row, Type, ValueRef};
 
 use crate::CursorError;
 
-/// A dialect-agnostic bind value. [`QueryFragment`](crate::QueryFragment)
-/// implementors produce these instead of binding directly against a
-/// concrete `sqlx::Database`, so a single fragment (e.g. a CEL `Filter`)
-/// can be spliced into a query for any dialect `QueryComposer` supports.
+/// A dialect-agnostic bind value. [`WhereClause`](crate::WhereClause) and
+/// [`OrderByClause`](crate::OrderByClause) carry these instead of binding
+/// directly against a concrete `sqlx::Database`, so a fragment built
+/// elsewhere (e.g. `sqlx-query-cel`'s `FilterClause`, which converts
+/// into a `WhereClause`) can be spliced into a query for any dialect
+/// [`QueryComposer`](crate::QueryComposer) supports.
 ///
 /// `Serialize`/`Deserialize` (via chrono's `serde` feature for
 /// `Timestamp`) are what let [`Cursor`](crate::Cursor) derive them too,

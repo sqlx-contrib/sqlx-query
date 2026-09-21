@@ -10,6 +10,8 @@
 /// is an associated function rather than a `&self` method: there is no
 /// value of type `DB` to call it on.
 pub trait QueryDialect: sqlx::Database {
+    /// `true` for a dialect whose placeholders are positional (`$1`,
+    /// `$2`, ...), `false` for one that repeats a bare marker (`?`).
     fn positional() -> bool;
 }
 

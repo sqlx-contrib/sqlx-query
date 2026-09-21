@@ -69,6 +69,9 @@ pub struct Cursor {
     keys: Vec<CursorKey>,
 }
 
+/// Errors [`Cursor`]'s methods can return: building one
+/// ([`Cursor::after`]/[`Cursor::after_row`]), decoding a token
+/// ([`Cursor::parse`]), or reading a bind value off a row.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CursorError {
     #[error("expected {expected} cursor values (one per order_by key), got {actual}")]
@@ -164,10 +167,10 @@ impl Cursor {
     /// Supplies all boundary values at once by reading them off `row` —
     /// the last row of a page just fetched, once decoded, becomes the
     /// cursor for the next one. Each key's column is looked up by name
-    /// (see [`RowExtension::get_value`]'s docs for how a table-qualified
-    /// `order_by` column resolves against the row's own,
-    /// always-unqualified, labels), so `row`'s column order doesn't need
-    /// to match `self`'s key order.
+    /// (a table-qualified `order_by` column resolves against the row's
+    /// own, always-unqualified, label — e.g. `v.created_at` matches a
+    /// row column named `created_at`), so `row`'s column order doesn't
+    /// need to match `self`'s key order.
     pub fn after_row<'r, R>(mut self, row: &'r R) -> Result<Self, CursorError>
     where
         R: Row,

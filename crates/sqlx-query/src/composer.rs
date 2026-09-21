@@ -18,10 +18,12 @@ use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
 static SENTINEL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/\*\s*\bquery\.(\w+)\b([^*]*?)\s*\*/").unwrap());
 
+/// Errors [`QueryComposer::compose`]/[`QueryComposer::build`] can return.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// `order_by` was set to something that doesn't match the
-    /// `OrderByClause` a `cursor()` was built against — almost always
+    /// `OrderByClause` the [`Cursor`] passed to
+    /// [`QueryComposer::with_cursor`] was built against — almost always
     /// means the client changed their sort between the request that
     /// issued the page token and the one using it.
     #[error("order_by doesn't match the order_by the cursor was built against")]
@@ -41,10 +43,13 @@ pub struct QueryStatement {
 }
 
 impl QueryStatement {
+    /// This statement's SQL text, sentinels already spliced in.
     pub fn sql(&self) -> &str {
         &self.sql
     }
 
+    /// The bind values `sql()`'s placeholders reference, in declaration
+    /// order.
     pub fn values(&self) -> &[Value] {
         &self.values
     }
@@ -72,6 +77,12 @@ pub struct QueryComposer<DB: QueryDialect> {
 }
 
 impl<DB: QueryDialect> QueryComposer<DB> {
+    /// Starts composing `sql` — a base query the caller already wrote,
+    /// containing zero or more `/* query.where */`/`/* query.order_by */`
+    /// sentinel comments. `sql` is never parsed structurally, so it may
+    /// contain any syntax the target driver accepts; only its own
+    /// sentinel comments are ever touched, and only once, by
+    /// [`compose`](Self::compose)/[`build`](Self::build).
     pub fn new(sql: &'static str) -> Self {
         QueryComposer {
             sql,
@@ -132,12 +143,11 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         self
     }
 
-    /// Splices [`compose_where`](Self::compose_where)'s and
-    /// [`compose_order_by`](Self::compose_order_by)'s output into their
-    /// sentinels, returning the final SQL text and the flat bind-value
-    /// list in the same order the final placeholders reference them: base
-    /// binds, then `where_by`'s — regardless of where either sentinel
-    /// physically sits in `sql`.
+    /// Splices `compose_where`'s and `compose_order_by`'s output (both
+    /// private helpers below) into their sentinels, returning the final
+    /// SQL text and the flat bind-value list in the same order the final
+    /// placeholders reference them: base binds, then `where_by`'s —
+    /// regardless of where either sentinel physically sits in `sql`.
     ///
     /// A sentinel whose value is absent, or whose value rendered to an
     /// empty string, is dropped entirely (including its captured
