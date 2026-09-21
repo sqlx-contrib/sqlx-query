@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{ColumnIndex, Decode, Row, Type};
 
 use super::order::OrderKey;
+use crate::value::RowExtension;
 use crate::{OrderByClause, OrderDirection, Value, WhereClause};
 
 /// [`Cursor::encode`]'s envelope — a `checksum` field alongside the
@@ -57,7 +58,7 @@ struct CursorToken {
 /// [`Cursor::encode`]) assume every key already has one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CursorKey {
-    key: OrderKey,
+    order: OrderKey,
     value: Option<Value>,
 }
 
@@ -100,7 +101,7 @@ impl Cursor {
             .keys()
             .iter()
             .cloned()
-            .map(|key| CursorKey { key, value: None })
+            .map(|order| CursorKey { order, value: None })
             .collect();
         Cursor { keys }
     }
@@ -163,9 +164,10 @@ impl Cursor {
     /// Supplies all boundary values at once by reading them off `row` —
     /// the last row of a page just fetched, once decoded, becomes the
     /// cursor for the next one. Each key's column is looked up by name
-    /// (see [`Value::from_row`]'s docs for how a table-qualified `order_by`
-    /// column resolves against the row's own, always-unqualified, labels),
-    /// so `row`'s column order doesn't need to match `self`'s key order.
+    /// (see [`RowExtension::get_value`]'s docs for how a table-qualified
+    /// `order_by` column resolves against the row's own,
+    /// always-unqualified, labels), so `row`'s column order doesn't need
+    /// to match `self`'s key order.
     pub fn after_row<'r, R>(mut self, row: &'r R) -> Result<Self, CursorError>
     where
         R: Row,
@@ -180,7 +182,7 @@ impl Cursor {
         DateTime<Utc>: Decode<'r, R::Database> + Type<R::Database>,
     {
         for key in &mut self.keys {
-            key.value = Some(Value::from_row(row, key.key.column())?);
+            key.value = Some(row.get_value(key.order.column())?);
         }
         Ok(self)
     }
@@ -189,7 +191,7 @@ impl Cursor {
     /// re-apply to the next page's query — see
     /// [`QueryComposer::with_cursor`](crate::QueryComposer::with_cursor).
     pub fn to_order_by_clause(&self) -> OrderByClause {
-        self.keys.iter().map(|ck| ck.key.clone()).collect()
+        self.keys.iter().map(|ck| ck.order.clone()).collect()
     }
 
     /// The tuple-comparison `WHERE` fragment: for keys `k1..kn` with
@@ -208,18 +210,18 @@ impl Cursor {
             for prior in &self.keys[..i] {
                 conditions.push(format!(
                     "{} = ${}",
-                    prior.key.column(),
+                    prior.order.column(),
                     placeholder_index(&self.keys, prior)
                 ));
             }
             let key = &self.keys[i];
-            let op = match key.key.direction() {
+            let op = match key.order.direction() {
                 OrderDirection::Asc => '>',
                 OrderDirection::Desc => '<',
             };
             conditions.push(format!(
                 "{} {op} ${}",
-                key.key.column(),
+                key.order.column(),
                 placeholder_index(&self.keys, key)
             ));
             branches.push(format!("({})", conditions.join(" AND ")));

@@ -87,10 +87,13 @@ where
     }
 }
 
-impl Value {
-    /// Reads one column's value off `row`, for
-    /// [`Cursor::after_row`](crate::Cursor::after_row).
-    ///
+/// Extends any `sqlx::Row` with the ability to read one column as a
+/// dialect-agnostic [`Value`], for
+/// [`Cursor::after_row`](crate::Cursor::after_row) — `row.get_value(col)`
+/// rather than `Value::from_row(row, col)`, matching `sqlx`'s own
+/// `row.try_get`/`row.get` naming instead of reading backwards as "ask
+/// `Value` to reach into a row."
+pub(crate) trait RowExtension: Row {
     /// `column` may be table-qualified (`"v.created_at"`, from a resolved
     /// `order_by`), but the row's own column only ever carries the
     /// unqualified label (`"created_at"`) — so this matches on the segment
@@ -102,28 +105,41 @@ impl Value {
     /// `sqlx`'s own `Type::compatible` check accepts — `sqlx` already
     /// carries that per-driver knowledge, so there's no reason to
     /// duplicate it here.
-    pub(crate) fn from_row<'r, R>(row: &'r R, column: &str) -> Result<Value, CursorError>
+    fn get_value<'r>(&'r self, column: &str) -> Result<Value, CursorError>
     where
-        R: Row,
-        usize: ColumnIndex<R>,
-        bool: Decode<'r, R::Database> + Type<R::Database>,
-        i16: Decode<'r, R::Database> + Type<R::Database>,
-        i32: Decode<'r, R::Database> + Type<R::Database>,
-        i64: Decode<'r, R::Database> + Type<R::Database>,
-        f32: Decode<'r, R::Database> + Type<R::Database>,
-        f64: Decode<'r, R::Database> + Type<R::Database>,
-        String: Decode<'r, R::Database> + Type<R::Database>,
-        DateTime<Utc>: Decode<'r, R::Database> + Type<R::Database>,
+        usize: ColumnIndex<Self>,
+        bool: Decode<'r, Self::Database> + Type<Self::Database>,
+        i16: Decode<'r, Self::Database> + Type<Self::Database>,
+        i32: Decode<'r, Self::Database> + Type<Self::Database>,
+        i64: Decode<'r, Self::Database> + Type<Self::Database>,
+        f32: Decode<'r, Self::Database> + Type<Self::Database>,
+        f64: Decode<'r, Self::Database> + Type<Self::Database>,
+        String: Decode<'r, Self::Database> + Type<Self::Database>,
+        DateTime<Utc>: Decode<'r, Self::Database> + Type<Self::Database>;
+}
+
+impl<R: Row> RowExtension for R {
+    fn get_value<'r>(&'r self, column: &str) -> Result<Value, CursorError>
+    where
+        usize: ColumnIndex<Self>,
+        bool: Decode<'r, Self::Database> + Type<Self::Database>,
+        i16: Decode<'r, Self::Database> + Type<Self::Database>,
+        i32: Decode<'r, Self::Database> + Type<Self::Database>,
+        i64: Decode<'r, Self::Database> + Type<Self::Database>,
+        f32: Decode<'r, Self::Database> + Type<Self::Database>,
+        f64: Decode<'r, Self::Database> + Type<Self::Database>,
+        String: Decode<'r, Self::Database> + Type<Self::Database>,
+        DateTime<Utc>: Decode<'r, Self::Database> + Type<Self::Database>,
     {
         let label = column.rsplit('.').next().unwrap_or(column);
-        let ordinal = row
+        let ordinal = self
             .columns()
             .iter()
             .find(|c| c.name() == label)
             .map(Column::ordinal)
             .ok_or_else(|| CursorError::RowColumnMissing(label.to_owned()))?;
 
-        let is_null = row
+        let is_null = self
             .try_get_raw(ordinal)
             .map_err(|_| CursorError::RowColumnMissing(label.to_owned()))?
             .is_null();
@@ -131,28 +147,28 @@ impl Value {
             return Ok(Value::Null);
         }
 
-        if let Ok(v) = row.try_get::<i64, _>(ordinal) {
+        if let Ok(v) = self.try_get::<i64, _>(ordinal) {
             return Ok(Value::Int(v));
         }
-        if let Ok(v) = row.try_get::<i32, _>(ordinal) {
+        if let Ok(v) = self.try_get::<i32, _>(ordinal) {
             return Ok(Value::Int(v.into()));
         }
-        if let Ok(v) = row.try_get::<i16, _>(ordinal) {
+        if let Ok(v) = self.try_get::<i16, _>(ordinal) {
             return Ok(Value::Int(v.into()));
         }
-        if let Ok(v) = row.try_get::<f64, _>(ordinal) {
+        if let Ok(v) = self.try_get::<f64, _>(ordinal) {
             return Ok(Value::Float(v));
         }
-        if let Ok(v) = row.try_get::<f32, _>(ordinal) {
+        if let Ok(v) = self.try_get::<f32, _>(ordinal) {
             return Ok(Value::Float(v.into()));
         }
-        if let Ok(v) = row.try_get::<bool, _>(ordinal) {
+        if let Ok(v) = self.try_get::<bool, _>(ordinal) {
             return Ok(Value::Bool(v));
         }
-        if let Ok(v) = row.try_get::<DateTime<Utc>, _>(ordinal) {
+        if let Ok(v) = self.try_get::<DateTime<Utc>, _>(ordinal) {
             return Ok(Value::Timestamp(v));
         }
-        if let Ok(v) = row.try_get::<String, _>(ordinal) {
+        if let Ok(v) = self.try_get::<String, _>(ordinal) {
             return Ok(Value::String(v));
         }
 
