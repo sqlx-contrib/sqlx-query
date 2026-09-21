@@ -117,11 +117,13 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         // Whichever of where_by/cursor are set, AND-ed together if both are
         // (dropping either that's absent) — a filter and a pagination
         // cursor both apply; neither should silently replace the other.
-        let cursor_where_by = self.cursor.as_ref().map(Cursor::where_by);
-        let where_by = [self.where_by.clone(), cursor_where_by]
-            .into_iter()
-            .flatten()
-            .reduce(WhereClause::and);
+        let where_by = [
+            self.where_by.clone(),
+            self.cursor.as_ref().map(Cursor::where_by),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(WhereClause::and);
         let order_by = self
             .order_by
             .clone()
