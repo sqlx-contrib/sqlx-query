@@ -18,18 +18,29 @@ pub struct WhereClause {
 }
 
 impl WhereClause {
-    pub fn new(sql: impl Into<String>, values: Vec<Value>) -> Self {
+    /// A `WhereClause` with no bind values — most hand-written filters
+    /// (e.g. `"deleted_at IS NULL"`) don't reference any. Attach values
+    /// with [`with_values`](Self::with_values) when the SQL has
+    /// placeholders.
+    pub fn new(sql: impl Into<String>) -> Self {
         WhereClause {
             sql: sql.into(),
-            values,
+            values: Vec::new(),
         }
     }
 
-    pub fn sql(&self) -> &str {
-        &self.sql
+    /// A value for one of this clause's own placeholders, filled in
+    /// declaration order — mirrors [`QueryComposer::bind`](crate::QueryComposer::bind).
+    pub fn bind(mut self, value: impl Into<Value>) -> Self {
+        self.values.push(value.into());
+        self
     }
 
     pub fn values(&self) -> &[Value] {
         &self.values
+    }
+
+    pub fn sql(&self) -> &str {
+        &self.sql
     }
 }

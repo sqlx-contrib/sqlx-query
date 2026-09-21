@@ -86,6 +86,23 @@ impl OrderByClause {
 
         Ok(OrderByClause { terms })
     }
+
+    /// Renders to `"col1 ASC, col2 DESC"`. `OrderByClause` never carries bind
+    /// values (it only ever emits column names and directions), so unlike
+    /// [`WhereClause::sql`](crate::WhereClause::sql) this computes the text
+    /// on demand from `terms` rather than returning a stored field — hence
+    /// `String`, not `&str` — but the name matches
+    /// [`WhereClause::sql`](crate::WhereClause::sql) so both clause types
+    /// answer "what's your SQL text?" the same way. There's no matching
+    /// `values()`: it would always be empty, see
+    /// [`QueryComposer::order_by`](crate::QueryComposer::order_by).
+    pub fn sql(&self) -> String {
+        self.terms
+            .iter()
+            .map(|term| format!("{} {}", term.field, term.direction))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl QueryResolver for OrderByClause {
@@ -99,20 +116,6 @@ impl QueryResolver for OrderByClause {
             }
         }
         Ok(self)
-    }
-}
-
-impl OrderByClause {
-    /// Renders to `"col1 ASC, col2 DESC"`. `OrderByClause` never carries bind
-    /// values (it only ever emits column names and directions), so unlike
-    /// [`WhereClause`](crate::WhereClause) its sentinel never needs placeholder
-    /// shifting — see [`QueryComposer::order_by`](crate::QueryComposer::order_by).
-    pub(crate) fn render(&self) -> String {
-        self.terms
-            .iter()
-            .map(|term| format!("{} {}", term.field, term.direction))
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 }
 
@@ -154,7 +157,7 @@ mod tests {
     fn empty_string_parses_to_empty_order_by() {
         let order_by = OrderByClause::parse("").unwrap();
         assert_eq!(order_by, OrderByClause::default());
-        assert_eq!(order_by.render(), "");
+        assert_eq!(order_by.sql(), "");
     }
 
     #[test]
@@ -182,7 +185,7 @@ mod tests {
             .unwrap()
             .resolve(&columns)
             .unwrap();
-        assert_eq!(order_by.render(), "created_at DESC, rank ASC");
+        assert_eq!(order_by.sql(), "created_at DESC, rank ASC");
     }
 
     #[test]

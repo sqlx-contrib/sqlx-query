@@ -35,7 +35,7 @@ pub enum Error {}
 /// the target driver accepts.
 pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
-    binds: Vec<Value>,
+    values: Vec<Value>,
     where_by: Option<WhereClause>,
     order_by: Option<OrderByClause>,
     _dialect: PhantomData<fn() -> DB>,
@@ -45,7 +45,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     pub fn new(sql: &'static str) -> Self {
         QueryComposer {
             sql,
-            binds: Vec::new(),
+            values: Vec::new(),
             where_by: None,
             order_by: None,
             _dialect: PhantomData,
@@ -56,7 +56,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// declaration order: the first `bind` call is the base query's `$1`
     /// (or first `?`), the second is `$2`, and so on.
     pub fn bind(&mut self, value: impl Into<Value>) -> &mut Self {
-        self.binds.push(value.into());
+        self.values.push(value.into());
         self
     }
 
@@ -84,7 +84,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// final placeholders reference them: base binds, then the `where_by`
     /// value's own values — regardless of where either sentinel physically
     /// sits in `sql`. `order_by` never contributes values (see
-    /// [`OrderByClause::render`]), so it isn't part of that offset
+    /// [`OrderByClause::sql`]), so it isn't part of that offset
     /// accounting.
     ///
     /// A sentinel whose value is absent, or whose value rendered to an
@@ -93,7 +93,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// `order_by` is also dropped — this matches pgxquery's handling of
     /// an unrecognized `query.<name>`.
     pub fn render(&self) -> (String, Vec<Value>) {
-        let offset = self.binds.len();
+        let offset = self.values.len();
         let (where_sql, where_values) = match &self.where_by {
             Some(where_by) if !where_by.sql().is_empty() => {
                 let sql = if DB::positional() {
@@ -109,7 +109,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         let order_by_sql = self
             .order_by
             .as_ref()
-            .map_or_else(String::new, OrderByClause::render);
+            .map_or_else(String::new, OrderByClause::sql);
 
         let sql = SENTINEL_RE
             .replace_all(self.sql, |caps: &Captures<'_>| {
@@ -126,7 +126,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             })
             .into_owned();
 
-        let mut values = self.binds.clone();
+        let mut values = self.values.clone();
         values.extend(where_values);
 
         (sql, values)

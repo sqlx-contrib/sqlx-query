@@ -12,7 +12,7 @@ use sqlx::Execute;
 use sqlx_query_v2::{OrderByClause, QueryComposer, Value, WhereClause};
 
 fn admin_filter() -> WhereClause {
-    WhereClause::new("role = 'admin'", Vec::new())
+    WhereClause::new("role = 'admin'")
 }
 
 fn name_order_by() -> OrderByClause {
@@ -152,10 +152,11 @@ fn multiple_sentinels_of_the_same_kind_all_substituted() {
 fn shifts_filter_placeholders_past_base_binds() {
     let sql = "SELECT * FROM t WHERE tenant = $1 /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.bind("acme").where_by(WhereClause::new(
-        "name = $1 AND score > $2",
-        vec![Value::String("alice".into()), Value::Int(90)],
-    ));
+    query.bind("acme").where_by(
+        WhereClause::new("name = $1 AND score > $2")
+            .bind("alice")
+            .bind(90i64),
+    );
 
     let (sql, values) = query.render();
 
@@ -200,10 +201,11 @@ fn order_by_never_contributes_bind_values() {
 fn zero_offset_leaves_filter_placeholders_unchanged() {
     let sql = "SELECT * FROM t WHERE 1 = 1 /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.where_by(WhereClause::new(
-        "name = $1 AND score > $2",
-        vec![Value::String("alice".into()), Value::Int(90)],
-    ));
+    query.where_by(
+        WhereClause::new("name = $1 AND score > $2")
+            .bind("alice")
+            .bind(90i64),
+    );
 
     let (sql, values) = query.render();
 
@@ -271,10 +273,7 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
     query
         .bind(50i64) // take -> $1
         .bind(0i64) // skip -> $2
-        .where_by(WhereClause::new(
-            "status = $1",
-            vec![Value::String("ACTIVE".into())],
-        ))
+        .where_by(WhereClause::new("status = $1").bind("ACTIVE"))
         .order_by(OrderByClause::parse("rank desc").unwrap());
 
     let (sql, values) = query.render();
