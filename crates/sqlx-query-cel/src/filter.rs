@@ -84,7 +84,7 @@ impl FilterClause {
         // Fails fast on anything with no reading as a condition. The
         // render is discarded here — `to_where_clause()` recomputes it
         // once fields are resolved to real columns.
-        render(&parsed)?;
+        Self::render(&parsed, &mut Vec::new())?;
 
         Ok(FilterClause { expr: parsed })
     }
@@ -95,11 +95,214 @@ impl FilterClause {
     /// naming, since both types answer "what's your WHERE-clause form?"
     /// the same way.
     pub fn to_where_clause(&self) -> WhereClause {
-        let (sql, values) =
-            render(&self.expr).expect("parse() already validated this tree renders");
+        let mut values = Vec::new();
+        let sql = Self::render(&self.expr, &mut values)
+            .expect("parse() already validated this tree renders");
         values
             .into_iter()
             .fold(WhereClause::new(sql), WhereClause::bind)
+    }
+
+    /// Replaces every field reference in `node` with a flat `Ident` node
+    /// carrying the column it resolves to — collapsing a dotted selection
+    /// (`v.created_at`) into whatever text the allow-list names for it
+    /// (which may itself be dotted, e.g. `v.rank_score`), so rendering
+    /// never needs to know the difference between a bare and a qualified
+    /// column.
+    fn rename(
+        node: &mut cel::IdedExpr,
+        columns: &HashMap<&str, &str>,
+    ) -> Result<(), FilterClauseError> {
+        if let Some(name) = Self::field_name(node) {
+            let column = columns
+                .get(name.as_str())
+                .ok_or_else(|| FilterClauseError::UnknownField(name.clone()))?;
+            node.expr = Expr::Ident((*column).to_owned());
+            return Ok(());
+        }
+
+        match &mut node.expr {
+            Expr::Call(call) => {
+                for arg in &mut call.args {
+                    Self::rename(arg, columns)?;
+                }
+            }
+            Expr::List(list) => {
+                for elem in &mut list.elements {
+                    Self::rename(elem, columns)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Renders `node` to SQL text, pushing each literal it contains onto
+    /// `values` as a `$N` placeholder in the order encountered — always
+    /// threaded through the same accumulator, since every literal in a
+    /// condition shares one placeholder numbering.
+    fn render(node: &cel::IdedExpr, values: &mut Vec<Value>) -> Result<String, FilterClauseError> {
+        match &node.expr {
+            Expr::Call(call) => Self::render_call(call, values),
+            Expr::Literal(value) => {
+                values.push(Self::literal(value)?);
+                Ok(format!("${}", values.len()))
+            }
+            Expr::Ident(_) | Expr::Select(_) => {
+                Self::field_name(node).ok_or_else(|| Self::refused(node))
+            }
+            _ => Err(Self::refused(node)),
+        }
+    }
+
+    fn render_call(call: &CallExpr, values: &mut Vec<Value>) -> Result<String, FilterClauseError> {
+        use cel::common::ast::operators as cel_ops;
+
+        match call.func_name.as_str() {
+            cel_ops::LOGICAL_AND => Self::render_binary(call, "AND", values),
+            cel_ops::LOGICAL_OR => Self::render_binary(call, "OR", values),
+            cel_ops::EQUALS => Self::render_comparison(call, true, values),
+            cel_ops::NOT_EQUALS => Self::render_comparison(call, false, values),
+            cel_ops::LESS => Self::render_binary(call, "<", values),
+            cel_ops::LESS_EQUALS => Self::render_binary(call, "<=", values),
+            cel_ops::GREATER => Self::render_binary(call, ">", values),
+            cel_ops::GREATER_EQUALS => Self::render_binary(call, ">=", values),
+            cel_ops::ADD => Self::render_binary(call, "+", values),
+            cel_ops::SUBSTRACT => Self::render_binary(call, "-", values),
+            cel_ops::MULTIPLY => Self::render_binary(call, "*", values),
+            cel_ops::DIVIDE => Self::render_binary(call, "/", values),
+            cel_ops::MODULO => Self::render_binary(call, "%", values),
+            cel_ops::IN => Self::render_in_list(call, values),
+            cel_ops::LOGICAL_NOT => Ok(format!(
+                "NOT ({})",
+                Self::render(Self::only(call)?, values)?
+            )),
+            cel_ops::NEGATE => Ok(format!("-({})", Self::render(Self::only(call)?, values)?)),
+            name => Err(FilterClauseError::Unsupported(format!(
+                "`{name}` has no reading as a condition"
+            ))),
+        }
+    }
+
+    fn render_binary(
+        call: &CallExpr,
+        op: &str,
+        values: &mut Vec<Value>,
+    ) -> Result<String, FilterClauseError> {
+        let [left, right] = Self::pair(call)?;
+        let left_sql = Self::render(left, values)?;
+        let right_sql = Self::render(right, values)?;
+        Ok(format!("({left_sql}) {op} ({right_sql})"))
+    }
+
+    /// `==`/`!=` against `null` are `IS NULL`/`IS NOT NULL` in SQL.
+    /// Written literally, `= NULL` is never true, so it is never what
+    /// was meant.
+    fn render_comparison(
+        call: &CallExpr,
+        is_eq: bool,
+        values: &mut Vec<Value>,
+    ) -> Result<String, FilterClauseError> {
+        let [left, right] = Self::pair(call)?;
+
+        let is_null = |node: &cel::IdedExpr| matches!(node.expr, Expr::Literal(LiteralValue::Null));
+
+        match (is_null(left), is_null(right)) {
+            (true, true) | (false, false) => {
+                Self::render_binary(call, if is_eq { "=" } else { "<>" }, values)
+            }
+            (true, false) => {
+                let sql = Self::render(right, values)?;
+                Ok(format!(
+                    "{sql} {}",
+                    if is_eq { "IS NULL" } else { "IS NOT NULL" }
+                ))
+            }
+            (false, true) => {
+                let sql = Self::render(left, values)?;
+                Ok(format!(
+                    "{sql} {}",
+                    if is_eq { "IS NULL" } else { "IS NOT NULL" }
+                ))
+            }
+        }
+    }
+
+    fn render_in_list(
+        call: &CallExpr,
+        values: &mut Vec<Value>,
+    ) -> Result<String, FilterClauseError> {
+        let [needle, haystack] = Self::pair(call)?;
+
+        let Expr::List(list) = &haystack.expr else {
+            return Err(FilterClauseError::Unsupported(
+                "`in` reads a list on its right".to_owned(),
+            ));
+        };
+
+        let needle_sql = Self::render(needle, values)?;
+        let mut items = Vec::with_capacity(list.elements.len());
+        for elem in &list.elements {
+            items.push(Self::render(elem, values)?);
+        }
+
+        Ok(format!("{needle_sql} IN ({})", items.join(", ")))
+    }
+
+    /// The dotted field a CEL identifier or selection names --
+    /// `v.created_at`.
+    fn field_name(node: &cel::IdedExpr) -> Option<String> {
+        match &node.expr {
+            Expr::Ident(name) => Some(name.clone()),
+            // `a.b?.c` tests for presence rather than naming a field.
+            Expr::Select(select) if !select.test => Some(format!(
+                "{}.{}",
+                Self::field_name(&select.operand)?,
+                select.field
+            )),
+            _ => None,
+        }
+    }
+
+    /// A CEL literal, as the [`Value`] it means.
+    fn literal(value: &LiteralValue) -> Result<Value, FilterClauseError> {
+        Ok(match value {
+            LiteralValue::String(string) => Value::String(string.to_string()),
+            LiteralValue::Boolean(boolean) => Value::Bool(**boolean),
+            LiteralValue::Int(int) => Value::Int(**int),
+            LiteralValue::UInt(uint) => Value::Int(**uint as i64),
+            LiteralValue::Double(double) => Value::Float(**double),
+            LiteralValue::Null => Value::Null,
+            LiteralValue::Bytes(_) => {
+                return Err(FilterClauseError::Unsupported(
+                    "a bytes literal has no SQL spelling".to_owned(),
+                ));
+            }
+        })
+    }
+
+    fn pair(call: &CallExpr) -> Result<[&cel::IdedExpr; 2], FilterClauseError> {
+        match call.args.as_slice() {
+            [left, right] => Ok([left, right]),
+            _ => Err(FilterClauseError::Unsupported(format!(
+                "`{}` reads two operands",
+                call.func_name
+            ))),
+        }
+    }
+
+    fn only(call: &CallExpr) -> Result<&cel::IdedExpr, FilterClauseError> {
+        match call.args.as_slice() {
+            [only] => Ok(only),
+            _ => Err(FilterClauseError::Unsupported(format!(
+                "`{}` reads one operand",
+                call.func_name
+            ))),
+        }
+    }
+
+    fn refused(node: &cel::IdedExpr) -> FilterClauseError {
+        FilterClauseError::Unsupported(format!("{:?} has no reading as a condition", node.expr))
     }
 }
 
@@ -112,7 +315,7 @@ impl QueryResolver for FilterClause {
     /// offered. Same allow-list shape as
     /// [`OrderByClause::resolve`](sqlx_query::OrderByClause::resolve).
     fn resolve(mut self, columns: &HashMap<&str, &str>) -> Result<Self, Self::Error> {
-        rename(&mut self.expr, columns)?;
+        Self::rename(&mut self.expr, columns)?;
         Ok(self)
     }
 }
@@ -121,197 +324,6 @@ impl From<FilterClause> for WhereClause {
     fn from(filter: FilterClause) -> Self {
         filter.to_where_clause()
     }
-}
-
-/// Replaces every field reference in `node` with a flat `Ident` node
-/// carrying the column it resolves to — collapsing a dotted selection
-/// (`v.created_at`) into whatever text the allow-list names for it (which
-/// may itself be dotted, e.g. `v.rank_score`), so rendering never needs
-/// to know the difference between a bare and a qualified column.
-fn rename(
-    node: &mut cel::IdedExpr,
-    columns: &HashMap<&str, &str>,
-) -> Result<(), FilterClauseError> {
-    if let Some(name) = field_name(node) {
-        let column = columns
-            .get(name.as_str())
-            .ok_or_else(|| FilterClauseError::UnknownField(name.clone()))?;
-        node.expr = Expr::Ident((*column).to_owned());
-        return Ok(());
-    }
-
-    match &mut node.expr {
-        Expr::Call(call) => {
-            for arg in &mut call.args {
-                rename(arg, columns)?;
-            }
-        }
-        Expr::List(list) => {
-            for elem in &mut list.elements {
-                rename(elem, columns)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Renders `node` to SQL text, pushing each literal it contains as a
-/// `$N` placeholder in the order encountered.
-fn render(node: &cel::IdedExpr) -> Result<(String, Vec<Value>), FilterClauseError> {
-    let mut values = Vec::new();
-    let sql = render_into(node, &mut values)?;
-    Ok((sql, values))
-}
-
-fn render_into(node: &cel::IdedExpr, values: &mut Vec<Value>) -> Result<String, FilterClauseError> {
-    match &node.expr {
-        Expr::Call(call) => call_sql(call, values),
-        Expr::Literal(value) => {
-            values.push(literal(value)?);
-            Ok(format!("${}", values.len()))
-        }
-        Expr::Ident(_) | Expr::Select(_) => field_name(node).ok_or_else(|| refused(node)),
-        _ => Err(refused(node)),
-    }
-}
-
-fn call_sql(call: &CallExpr, values: &mut Vec<Value>) -> Result<String, FilterClauseError> {
-    use cel::common::ast::operators as cel_ops;
-
-    match call.func_name.as_str() {
-        cel_ops::LOGICAL_AND => binary_sql(call, "AND", values),
-        cel_ops::LOGICAL_OR => binary_sql(call, "OR", values),
-        cel_ops::EQUALS => comparison_sql(call, true, values),
-        cel_ops::NOT_EQUALS => comparison_sql(call, false, values),
-        cel_ops::LESS => binary_sql(call, "<", values),
-        cel_ops::LESS_EQUALS => binary_sql(call, "<=", values),
-        cel_ops::GREATER => binary_sql(call, ">", values),
-        cel_ops::GREATER_EQUALS => binary_sql(call, ">=", values),
-        cel_ops::ADD => binary_sql(call, "+", values),
-        cel_ops::SUBSTRACT => binary_sql(call, "-", values),
-        cel_ops::MULTIPLY => binary_sql(call, "*", values),
-        cel_ops::DIVIDE => binary_sql(call, "/", values),
-        cel_ops::MODULO => binary_sql(call, "%", values),
-        cel_ops::IN => in_list_sql(call, values),
-        cel_ops::LOGICAL_NOT => Ok(format!("NOT ({})", render_into(only(call)?, values)?)),
-        cel_ops::NEGATE => Ok(format!("-({})", render_into(only(call)?, values)?)),
-        name => Err(FilterClauseError::Unsupported(format!(
-            "`{name}` has no reading as a condition"
-        ))),
-    }
-}
-
-fn binary_sql(
-    call: &CallExpr,
-    op: &str,
-    values: &mut Vec<Value>,
-) -> Result<String, FilterClauseError> {
-    let [left, right] = pair(call)?;
-    let left_sql = render_into(left, values)?;
-    let right_sql = render_into(right, values)?;
-    Ok(format!("({left_sql}) {op} ({right_sql})"))
-}
-
-/// `==`/`!=` against `null` are `IS NULL`/`IS NOT NULL` in SQL. Written
-/// literally, `= NULL` is never true, so it is never what was meant.
-fn comparison_sql(
-    call: &CallExpr,
-    is_eq: bool,
-    values: &mut Vec<Value>,
-) -> Result<String, FilterClauseError> {
-    let [left, right] = pair(call)?;
-
-    let is_null = |node: &cel::IdedExpr| matches!(node.expr, Expr::Literal(LiteralValue::Null));
-
-    match (is_null(left), is_null(right)) {
-        (true, true) | (false, false) => binary_sql(call, if is_eq { "=" } else { "<>" }, values),
-        (true, false) => {
-            let sql = render_into(right, values)?;
-            Ok(format!(
-                "{sql} {}",
-                if is_eq { "IS NULL" } else { "IS NOT NULL" }
-            ))
-        }
-        (false, true) => {
-            let sql = render_into(left, values)?;
-            Ok(format!(
-                "{sql} {}",
-                if is_eq { "IS NULL" } else { "IS NOT NULL" }
-            ))
-        }
-    }
-}
-
-fn in_list_sql(call: &CallExpr, values: &mut Vec<Value>) -> Result<String, FilterClauseError> {
-    let [needle, haystack] = pair(call)?;
-
-    let Expr::List(list) = &haystack.expr else {
-        return Err(FilterClauseError::Unsupported(
-            "`in` reads a list on its right".to_owned(),
-        ));
-    };
-
-    let needle_sql = render_into(needle, values)?;
-    let mut items = Vec::with_capacity(list.elements.len());
-    for elem in &list.elements {
-        items.push(render_into(elem, values)?);
-    }
-
-    Ok(format!("{needle_sql} IN ({})", items.join(", ")))
-}
-
-/// The dotted field a CEL identifier or selection names -- `v.created_at`.
-fn field_name(node: &cel::IdedExpr) -> Option<String> {
-    match &node.expr {
-        Expr::Ident(name) => Some(name.clone()),
-        // `a.b?.c` tests for presence rather than naming a field.
-        Expr::Select(select) if !select.test => {
-            Some(format!("{}.{}", field_name(&select.operand)?, select.field))
-        }
-        _ => None,
-    }
-}
-
-/// A CEL literal, as the [`Value`] it means.
-fn literal(value: &LiteralValue) -> Result<Value, FilterClauseError> {
-    Ok(match value {
-        LiteralValue::String(string) => Value::String(string.to_string()),
-        LiteralValue::Boolean(boolean) => Value::Bool(**boolean),
-        LiteralValue::Int(int) => Value::Int(**int),
-        LiteralValue::UInt(uint) => Value::Int(**uint as i64),
-        LiteralValue::Double(double) => Value::Float(**double),
-        LiteralValue::Null => Value::Null,
-        LiteralValue::Bytes(_) => {
-            return Err(FilterClauseError::Unsupported(
-                "a bytes literal has no SQL spelling".to_owned(),
-            ));
-        }
-    })
-}
-
-fn pair(call: &CallExpr) -> Result<[&cel::IdedExpr; 2], FilterClauseError> {
-    match call.args.as_slice() {
-        [left, right] => Ok([left, right]),
-        _ => Err(FilterClauseError::Unsupported(format!(
-            "`{}` reads two operands",
-            call.func_name
-        ))),
-    }
-}
-
-fn only(call: &CallExpr) -> Result<&cel::IdedExpr, FilterClauseError> {
-    match call.args.as_slice() {
-        [only] => Ok(only),
-        _ => Err(FilterClauseError::Unsupported(format!(
-            "`{}` reads one operand",
-            call.func_name
-        ))),
-    }
-}
-
-fn refused(node: &cel::IdedExpr) -> FilterClauseError {
-    FilterClauseError::Unsupported(format!("{:?} has no reading as a condition", node.expr))
 }
 
 #[cfg(test)]
