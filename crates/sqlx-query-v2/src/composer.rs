@@ -116,7 +116,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 
         let cursor_where_by = self.cursor.as_ref().map(Cursor::where_by);
         let where_by = match (self.where_by.clone(), cursor_where_by) {
-            (Some(filter), Some(cursor)) => Some(merge_where_by(filter, cursor)),
+            (Some(filter), Some(cursor)) => Some(filter.and(cursor)),
             (Some(filter), None) => Some(filter),
             (None, Some(cursor)) => Some(cursor),
             (None, None) => None,
@@ -162,24 +162,6 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 
         Ok((sql, values))
     }
-}
-
-/// ANDs a client filter together with a cursor's tuple comparison, since
-/// pagination must not silently drop the filter it's layered on top of.
-/// Built entirely from `WhereClause`'s existing public API (`sql()`,
-/// `values()`, `new()`, `bind()`) — `WhereClause` itself doesn't know
-/// anything about this.
-fn merge_where_by(filter: WhereClause, cursor: WhereClause) -> WhereClause {
-    let offset = filter.values().len();
-    let cursor_sql = shift_placeholders(cursor.sql().as_str(), offset);
-    let sql = format!("({}) AND ({})", filter.sql().as_str(), cursor_sql);
-
-    filter
-        .values()
-        .iter()
-        .chain(cursor.values())
-        .cloned()
-        .fold(WhereClause::new(sql), WhereClause::bind)
 }
 
 impl<DB> QueryComposer<DB>

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
 
+use crate::shift::shift_placeholders;
 use crate::Value;
 
 /// A `WHERE`-clause contribution: SQL text (no leading/trailing
@@ -63,5 +64,65 @@ impl WhereClause {
     /// is just a refcount bump for the `Arc` variant.
     pub fn sql(&self) -> SqlStr {
         self.sql.clone()
+    }
+
+    /// Combines two `WHERE`-shaped fragments with SQL `AND`, shifting
+    /// `other`'s placeholders past `self`'s own value count so both can
+    /// coexist as one fragment — e.g. a client filter and a pagination
+    /// cursor's tuple comparison, neither of which should silently
+    /// replace the other (see
+    /// [`QueryComposer::cursor`](crate::QueryComposer::cursor)).
+    pub fn and(self, other: WhereClause) -> WhereClause {
+        let offset = self.values.len();
+        let other_sql = shift_placeholders(other.sql().as_str(), offset);
+        let sql = format!("({}) AND ({})", self.sql().as_str(), other_sql);
+
+        self.values
+            .iter()
+            .chain(&other.values)
+            .cloned()
+            .fold(WhereClause::new(sql), WhereClause::bind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn and_shifts_the_second_clauses_placeholders_past_the_first() {
+        let a = WhereClause::new("status = $1").bind("ACTIVE");
+        let b = WhereClause::new("rank > $1 AND id < $2")
+            .bind(42i64)
+            .bind(7i64);
+
+        let combined = a.and(b);
+
+        assert_eq!(
+            combined.sql().as_str(),
+            "(status = $1) AND (rank > $2 AND id < $3)"
+        );
+        assert_eq!(
+            combined.values(),
+            &[
+                Value::String("ACTIVE".into()),
+                Value::Int(42),
+                Value::Int(7),
+            ]
+        );
+    }
+
+    #[test]
+    fn and_with_no_values_on_either_side_needs_no_shift() {
+        let a = WhereClause::new("deleted_at IS NULL");
+        let b = WhereClause::new("archived = FALSE");
+
+        let combined = a.and(b);
+
+        assert_eq!(
+            combined.sql().as_str(),
+            "(deleted_at IS NULL) AND (archived = FALSE)"
+        );
+        assert!(combined.values().is_empty());
     }
 }
