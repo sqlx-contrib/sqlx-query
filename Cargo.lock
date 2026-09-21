@@ -1108,6 +1108,7 @@ dependencies = [
 name = "sqlx-query"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "regex",
  "sqlx",

@@ -31,6 +31,16 @@ pub(crate) struct OrderKey {
 }
 
 impl OrderKey {
+    /// Builds a key directly from an already-resolved column/direction
+    /// pair — used by [`Cursor::parse`](crate::Cursor::parse) to
+    /// reconstruct keys from a decoded token, bypassing
+    /// [`OrderByClause::parse`]'s field-name grammar and
+    /// [`QueryResolver::resolve`]'s allow-list (a cursor token round-trips
+    /// the already-resolved column, not the client's original field name).
+    pub(crate) fn new(column: String, direction: OrderDirection) -> Self {
+        OrderKey { column, direction }
+    }
+
     pub(crate) fn column(&self) -> &str {
         &self.column
     }

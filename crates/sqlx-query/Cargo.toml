@@ -11,3 +11,4 @@ sqlx = { workspace = true, features = ["postgres", "mysql", "sqlite", "chrono"] 
 chrono = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
+base64 = { workspace = true }
