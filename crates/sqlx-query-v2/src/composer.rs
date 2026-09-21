@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use regex::{Captures, Regex};
 
 use crate::shift::shift_placeholders;
-use crate::{OrderBy, QueryDialect, Value, Where};
+use crate::{OrderByClause, QueryDialect, Value, WhereClause};
 
 /// Matches a sentinel comment of the form `/* query.<name> <suffix> */`,
 /// capturing the name and the trailing connective/separator text
@@ -28,15 +28,16 @@ static SENTINEL_RE: LazyLock<Regex> =
 #[derive(Debug, thiserror::Error)]
 pub enum Error {}
 
-/// Splices a [`Where`] and an [`OrderBy`] into `/* query.<name> */`
-/// sentinel comments in a static SQL template — the `pgx-contrib/pgxquery`
-/// port. `sql` is never parsed structurally, only scanned once for its own
-/// sentinel comments; it may contain any syntax the target driver accepts.
+/// Splices a [`WhereClause`] and an [`OrderByClause`] into
+/// `/* query.<name> */` sentinel comments in a static SQL template — the
+/// `pgx-contrib/pgxquery` port. `sql` is never parsed structurally, only
+/// scanned once for its own sentinel comments; it may contain any syntax
+/// the target driver accepts.
 pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
     binds: Vec<Value>,
-    where_by: Option<Where>,
-    order_by: Option<OrderBy>,
+    where_by: Option<WhereClause>,
+    order_by: Option<OrderByClause>,
     _dialect: PhantomData<fn() -> DB>,
 }
 
@@ -60,17 +61,17 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     }
 
     /// Splices onto `/* query.where */`. Accepts anything that converts
-    /// into [`Where`] — `sqlx-query-cel`'s `Filter`, a future keyset
-    /// `Cursor`, or a `Where` built by hand. Its placeholders are shifted
-    /// at [`build`](Self::build) time once the final offset (how many bind
-    /// values precede it) is known.
-    pub fn where_by(&mut self, filter: impl Into<Where>) -> &mut Self {
+    /// into [`WhereClause`] — `sqlx-query-cel`'s `Filter`, a future keyset
+    /// `Cursor`, or a `WhereClause` built by hand. Its placeholders are
+    /// shifted at [`build`](Self::build) time once the final offset (how
+    /// many bind values precede it) is known.
+    pub fn where_by(&mut self, filter: impl Into<WhereClause>) -> &mut Self {
         self.where_by = Some(filter.into());
         self
     }
 
     /// Splices onto `/* query.order_by */`.
-    pub fn order_by(&mut self, order_by: OrderBy) -> &mut Self {
+    pub fn order_by(&mut self, order_by: OrderByClause) -> &mut Self {
         self.order_by = Some(order_by);
         self
     }
@@ -80,7 +81,8 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// final placeholders reference them: base binds, then the `where_by`
     /// value's own values — regardless of where either sentinel physically
     /// sits in `sql`. `order_by` never contributes values (see
-    /// [`OrderBy::render`]), so it isn't part of that offset accounting.
+    /// [`OrderByClause::render`]), so it isn't part of that offset
+    /// accounting.
     ///
     /// A sentinel whose value is absent, or whose value rendered to an
     /// empty string, is dropped entirely (including its captured
@@ -104,7 +106,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         let order_by_sql = self
             .order_by
             .as_ref()
-            .map_or_else(String::new, OrderBy::render);
+            .map_or_else(String::new, OrderByClause::render);
 
         let sql = SENTINEL_RE
             .replace_all(self.sql, |caps: &Captures<'_>| {

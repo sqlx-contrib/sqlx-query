@@ -9,14 +9,14 @@
 //! values, without needing a live database connection.
 
 use sqlx::Execute;
-use sqlx_query_v2::{OrderBy, QueryComposer, Value, Where};
+use sqlx_query_v2::{OrderByClause, QueryComposer, Value, WhereClause};
 
-fn admin_filter() -> Where {
-    Where::new("role = 'admin'", Vec::new())
+fn admin_filter() -> WhereClause {
+    WhereClause::new("role = 'admin'", Vec::new())
 }
 
-fn name_order_by() -> OrderBy {
-    OrderBy::parse("name asc").unwrap()
+fn name_order_by() -> OrderByClause {
+    OrderByClause::parse("name asc").unwrap()
 }
 
 /// Ports pgxquery's "substitutes where and order_by sentinels" test.
@@ -58,7 +58,7 @@ fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
     assert!(sql.contains("name ASC , id"));
 }
 
-/// Ports pgxquery's "When OrderBy is empty: drops the order_by sentinel
+/// Ports pgxquery's "When OrderByClause is empty: drops the order_by sentinel
 /// and keeps where".
 #[test]
 fn missing_order_by_drops_sentinel_and_keeps_where() {
@@ -73,7 +73,7 @@ fn missing_order_by_drops_sentinel_and_keeps_where() {
     assert!(!sql.contains("ASC"));
 }
 
-/// Ports pgxquery's "When both Where and OrderBy are empty: drops both
+/// Ports pgxquery's "When both Where and OrderByClause are empty: drops both
 /// sentinels but still appends Args" — here, the base query's own binds.
 #[test]
 fn both_missing_drops_both_sentinels_but_keeps_base_binds() {
@@ -115,13 +115,13 @@ fn bare_sentinel_substitutes_value_alone() {
 
 /// Ports pgxquery's "the order_by sentinel is placed before the static
 /// list: preserves the trailing comma as the suffix", and its nested
-/// "OrderBy is empty: drops the sentinel leaving the static list intact".
+/// "OrderByClause is empty: drops the sentinel leaving the static list intact".
 #[test]
 fn order_by_sentinel_before_static_list() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
 
     let mut with_order_by = QueryComposer::<sqlx::Postgres>::new(sql);
-    with_order_by.order_by(OrderBy::parse("priority desc").unwrap());
+    with_order_by.order_by(OrderByClause::parse("priority desc").unwrap());
     let (sql_with, _) = with_order_by.render();
     assert!(sql_with.contains("priority DESC , id"));
 
@@ -152,7 +152,7 @@ fn multiple_sentinels_of_the_same_kind_all_substituted() {
 fn shifts_filter_placeholders_past_base_binds() {
     let sql = "SELECT * FROM t WHERE tenant = $1 /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.bind("acme").where_by(Where::new(
+    query.bind("acme").where_by(WhereClause::new(
         "name = $1 AND score > $2",
         vec![Value::String("alice".into()), Value::Int(90)],
     ));
@@ -170,11 +170,11 @@ fn shifts_filter_placeholders_past_base_binds() {
     );
 }
 
-/// `OrderBy` never carries bind values (it only ever renders column names
-/// and directions), so unlike `Where`, its sentinel never needs
+/// `OrderByClause` never carries bind values (it only ever renders column
+/// names and directions), so unlike `WhereClause`, its sentinel never needs
 /// placeholder shifting — this documents that invariant, replacing
 /// pgxquery's "OrderBy contains a placeholder" scenario, which doesn't
-/// apply to the concrete `OrderBy` type this crate uses.
+/// apply to the concrete `OrderByClause` type this crate uses.
 #[test]
 fn order_by_never_contributes_bind_values() {
     let sql = "SELECT id FROM users WHERE id = $1 /* query.where AND */ ORDER BY /* query.order_by , */ id LIMIT $2 OFFSET $3";
@@ -183,7 +183,7 @@ fn order_by_never_contributes_bind_values() {
         .bind("007")
         .bind(0i64)
         .bind(10i64)
-        .order_by(OrderBy::parse("rank desc").unwrap());
+        .order_by(OrderByClause::parse("rank desc").unwrap());
 
     let (sql, values) = query.render();
 
@@ -200,7 +200,7 @@ fn order_by_never_contributes_bind_values() {
 fn zero_offset_leaves_filter_placeholders_unchanged() {
     let sql = "SELECT * FROM t WHERE 1 = 1 /* query.where AND */";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
-    query.where_by(Where::new(
+    query.where_by(WhereClause::new(
         "name = $1 AND score > $2",
         vec![Value::String("alice".into()), Value::Int(90)],
     ));
@@ -271,11 +271,11 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
     query
         .bind(50i64) // take -> $1
         .bind(0i64) // skip -> $2
-        .where_by(Where::new(
+        .where_by(WhereClause::new(
             "status = $1",
             vec![Value::String("ACTIVE".into())],
         ))
-        .order_by(OrderBy::parse("rank desc").unwrap());
+        .order_by(OrderByClause::parse("rank desc").unwrap());
 
     let (sql, values) = query.render();
 
@@ -292,12 +292,12 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
     );
 }
 
-/// `OrderBy` end to end through the composer, using real column resolution
-/// rather than a hand-built `Where`.
+/// `OrderByClause` end to end through the composer, using real column
+/// resolution rather than a hand-built `WhereClause`.
 #[test]
 fn order_by_splices_through_composer() {
     let sql = "SELECT * FROM t ORDER BY /* query.order_by , */ id";
-    let order_by = OrderBy::parse("rank desc").unwrap();
+    let order_by = OrderByClause::parse("rank desc").unwrap();
 
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.order_by(order_by);

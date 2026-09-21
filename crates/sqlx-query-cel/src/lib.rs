@@ -1,7 +1,9 @@
 //! `Filter` (CEL -> `WHERE` fragment) belongs here, implementing
-//! [`sqlx_query_v2::QueryResolver`] and [`sqlx_query_v2::QueryFragment`]
-//! the same way [`sqlx_query_v2::OrderBy`] does, on top of `sqlx-cel`
-//! (see DESIGN.md's "Prior art this is a port of").
+//! [`sqlx_query_v2::QueryResolver`] the same way
+//! [`sqlx_query_v2::OrderByClause`] does, and `impl
+//! From<Filter> for sqlx_query_v2::WhereClause` so it plugs into
+//! `QueryComposer::where_by` — on top of `sqlx-cel` (see DESIGN.md's
+//! "Prior art this is a port of").
 //!
 //! Not implemented yet: as of this pass, `sqlx-cel` isn't reachable —
 //! it's absent from the `sqlx-contrib` org and unpublished on crates.io

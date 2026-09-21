@@ -9,17 +9,17 @@ use crate::Value;
 /// accepts. `sqlx-query-v2` doesn't know about (and per DESIGN.md's
 /// dependency direction, must never depend on) `sqlx-query-cel`'s
 /// `Filter` — so `Filter`, or any other future `WHERE`-shaped value (e.g.
-/// a keyset `Cursor`), converts *into* `Where` via [`Into`], rather than
-/// `Where` reaching out to know about them.
+/// a keyset `Cursor`), converts *into* `WhereClause` via [`Into`], rather than
+/// `WhereClause` reaching out to know about them.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Where {
+pub struct WhereClause {
     sql: String,
     values: Vec<Value>,
 }
 
-impl Where {
+impl WhereClause {
     pub fn new(sql: impl Into<String>, values: Vec<Value>) -> Self {
-        Where {
+        WhereClause {
             sql: sql.into(),
             values,
         }
