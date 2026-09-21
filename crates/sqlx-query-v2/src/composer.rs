@@ -3,7 +3,6 @@ use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 
-use crate::shift::shift_placeholders;
 use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
 
 /// Matches a sentinel comment of the form `/* query.<name> <suffix> */`,
@@ -125,26 +124,12 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         .flatten()
         .reduce(WhereClause::and);
 
-        let offset = self.values.len();
-        let where_sql = match &where_by {
-            Some(where_by) if !where_by.sql().as_str().is_empty() => {
-                if DB::positional() {
-                    shift_placeholders(where_by.sql().as_str(), offset)
-                } else {
-                    where_by.sql().as_str().to_owned()
-                }
-            }
-            _ => String::new(),
-        };
-        // Only the values of a where_by that actually got used above — an
-        // absent or empty-rendering where_by contributes nothing.
-        let where_values = if where_sql.is_empty() {
-            Vec::new()
-        } else {
-            where_by
-                .as_ref()
-                .map_or_else(Vec::new, |w| w.values().to_vec())
-        };
+        // Shifted past the base binds, or dropped entirely if empty/absent.
+        let where_by = where_by.and_then(|w| w.shift(self.values.len(), DB::positional()));
+        let where_by_sql = where_by
+            .as_ref()
+            .map_or_else(String::new, |w| w.sql().as_str().to_owned());
+        let where_by_values = where_by.map_or_else(Vec::new, |w| w.values().to_vec());
 
         // The explicit order_by if one was set; otherwise the cursor's own
         // (already checked above to match when both are present) — unlike
@@ -160,7 +145,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         let sql = SENTINEL_RE
             .replace_all(self.sql, |caps: &Captures<'_>| {
                 let value = match &caps[1] {
-                    "where" => where_sql.as_str(),
+                    "where" => where_by_sql.as_str(),
                     "order_by" => order_by_sql.as_str(),
                     _ => "",
                 };
@@ -173,7 +158,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .into_owned();
 
         let mut values = self.values.clone();
-        values.extend(where_values);
+        values.extend(where_by_values);
 
         Ok((sql, values))
     }
