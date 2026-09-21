@@ -28,6 +28,35 @@ pub enum Error {
     CursorOrderByMismatch,
 }
 
+/// [`QueryComposer::compose`]'s output: SQL text with every sentinel
+/// spliced in, plus the flat bind-value list in the same order the final
+/// placeholders reference them — a complete, executable SQL statement
+/// (text + parameters), which is what "statement" names here rather than
+/// "fragment": unlike [`WhereClause`]/[`OrderByClause`], this isn't a
+/// piece spliced into something larger, it's the whole thing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryStatement {
+    sql: String,
+    values: Vec<Value>,
+}
+
+impl QueryStatement {
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    pub fn values(&self) -> &[Value] {
+        &self.values
+    }
+
+    /// Consumes this statement into its two pieces — used internally by
+    /// [`QueryComposer::build`], and a convenient way to destructure in
+    /// tests: `let (sql, values) = composer.compose()?.into_parts();`.
+    pub fn into_parts(self) -> (String, Vec<Value>) {
+        (self.sql, self.values)
+    }
+}
+
 /// Splices a [`WhereClause`] and an [`OrderByClause`] into
 /// `/* query.<name> */` sentinel comments in a static SQL template — the
 /// `pgx-contrib/pgxquery` port. `sql` is never parsed structurally, only
@@ -68,7 +97,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// apply — neither silently replaces the other). Its
     /// `to_order_by_clause()` doesn't have to be repeated: if
     /// [`push_order_by`](Self::push_order_by) is left unset, the cursor's is
-    /// used directly; if it *is* set, [`render`](Self::render) checks the
+    /// used directly; if it *is* set, [`compose`](Self::compose) checks the
     /// two match, since a mismatch almost always means the client's sort
     /// changed between the request that issued this cursor and this one.
     /// Only one cursor makes sense per query, so unlike `push_where`/
@@ -86,7 +115,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// always-present tenant-scoping condition, then a client-supplied
     /// filter) rather than replacing it, and if
     /// [`with_cursor`](Self::with_cursor) is also set, that's AND-ed in
-    /// too — see [`render`](Self::render).
+    /// too — see [`compose`](Self::compose).
     pub fn push_where(&mut self, filter: impl Into<WhereClause>) -> &mut Self {
         self.where_by.push(filter.into());
         self
@@ -103,71 +132,21 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         self
     }
 
-    /// Performs the sentinel splice and placeholder shift, returning the
-    /// final SQL text and the flat bind-value list in the same order the
-    /// final placeholders reference them: base binds, then the effective
-    /// `where_by` value's own values — regardless of where either
-    /// sentinel physically sits in `sql`. `order_by` never contributes
-    /// values (see [`OrderByClause::sql`]), so it isn't part of that
-    /// offset accounting.
+    /// Splices [`compose_where`](Self::compose_where)'s and
+    /// [`compose_order_by`](Self::compose_order_by)'s output into their
+    /// sentinels, returning the final SQL text and the flat bind-value
+    /// list in the same order the final placeholders reference them: base
+    /// binds, then `where_by`'s — regardless of where either sentinel
+    /// physically sits in `sql`.
     ///
     /// A sentinel whose value is absent, or whose value rendered to an
     /// empty string, is dropped entirely (including its captured
     /// connective/separator). A sentinel name that isn't `where` or
     /// `order_by` is also dropped — this matches pgxquery's handling of
     /// an unrecognized `query.<name>`.
-    pub fn render(&self) -> Result<(String, Vec<Value>), Error> {
-        // All accumulated order_by values, in call order, as tie-breakers —
-        // "sort by the first push_order_by() call, then by the second", etc.
-        let order_by: Option<OrderByClause> = self
-            .order_by
-            .clone()
-            .into_iter()
-            .reduce(OrderByClause::then);
-
-        if let (Some(cursor), Some(order_by)) = (&self.cursor, &order_by) {
-            if cursor.to_order_by_clause() != *order_by {
-                return Err(Error::CursorOrderByMismatch);
-            }
-        }
-
-        // Every accumulated where_by value plus the cursor's, all AND-ed
-        // together (dropping any that's absent) — a tenant scope, a
-        // client-supplied filter, and pagination can all apply at once;
-        // none silently replaces another. Empty ones are dropped;
-        // positional dialects ($N) additionally get their placeholders
-        // shifted past the base binds — non-positional ones (?) have no
-        // placeholder numbering to shift.
-        let where_by = self
-            .where_by
-            .iter()
-            .cloned()
-            .chain(self.cursor.as_ref().map(Cursor::to_where_clause))
-            .reduce(WhereClause::and)
-            .filter(|w| !w.sql().as_str().is_empty())
-            .map(|w| {
-                if DB::positional() {
-                    w.shift(self.values.len())
-                } else {
-                    w
-                }
-            });
-
-        let where_by_sql = where_by
-            .as_ref()
-            .map_or_else(String::new, |w| w.sql().as_str().to_owned());
-
-        let where_by_values = where_by.map_or_else(Vec::new, |w| w.values().to_vec());
-
-        // The accumulated order_by if any push_order_by() calls were made;
-        // otherwise the cursor's own (already checked above to match when
-        // both are present) — the cursor's order_by only ever substitutes
-        // for a completely absent explicit one, it doesn't get appended as
-        // an extra tie-breaker onto an explicit order_by that IS present.
-        let order_by = order_by.or_else(|| self.cursor.as_ref().map(Cursor::to_order_by_clause));
-
-        let order_by_sql =
-            order_by.map_or_else(String::new, |order_by| order_by.sql().as_str().to_owned());
+    pub fn compose(&self) -> Result<QueryStatement, Error> {
+        let order_by_sql = self.compose_order_by()?;
+        let (where_by_sql, where_by_values) = self.compose_where();
 
         let sql = SENTINEL_RE
             .replace_all(self.sql, |caps: &Captures<'_>| {
@@ -187,7 +166,66 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         let mut values = self.values.clone();
         values.extend(where_by_values);
 
-        Ok((sql, values))
+        Ok(QueryStatement { sql, values })
+    }
+
+    /// Every accumulated `where_by` value plus the cursor's, all AND-ed
+    /// together (dropping any that's absent) — a tenant scope, a
+    /// client-supplied filter, and pagination can all apply at once; none
+    /// silently replaces another. Empty ones are dropped; positional
+    /// dialects (`$N`) additionally get their placeholders shifted past
+    /// the base binds — non-positional ones (`?`) have no placeholder
+    /// numbering to shift. Unlike `order_by`, this can't fail: `where_by`
+    /// values are always AND-ed, never checked for equality against the
+    /// cursor's.
+    fn compose_where(&self) -> (String, Vec<Value>) {
+        let where_by = self
+            .where_by
+            .iter()
+            .cloned()
+            .chain(self.cursor.as_ref().map(Cursor::to_where_clause))
+            .reduce(WhereClause::and)
+            .filter(|w| !w.sql().as_str().is_empty())
+            .map(|w| {
+                if DB::positional() {
+                    w.shift(self.values.len())
+                } else {
+                    w
+                }
+            });
+
+        let sql = where_by
+            .as_ref()
+            .map_or_else(String::new, |w| w.sql().as_str().to_owned());
+        let values = where_by.map_or_else(Vec::new, |w| w.values().to_vec());
+        (sql, values)
+    }
+
+    /// The accumulated `order_by` if any `push_order_by()` calls were
+    /// made; otherwise the cursor's own. If both are present, they must
+    /// match — the cursor's `order_by` only ever substitutes for a
+    /// completely absent explicit one, it doesn't get appended as an
+    /// extra tie-breaker onto an explicit `order_by` that IS present, and
+    /// a mismatch almost always means the client's sort changed between
+    /// the request that issued this cursor and this one. `order_by`
+    /// never contributes bind values (see [`OrderByClause::sql`]).
+    fn compose_order_by(&self) -> Result<String, Error> {
+        // All accumulated order_by values, in call order, as tie-breakers —
+        // "sort by the first push_order_by() call, then by the second", etc.
+        let order_by: Option<OrderByClause> = self
+            .order_by
+            .clone()
+            .into_iter()
+            .reduce(OrderByClause::then);
+
+        if let (Some(cursor), Some(order_by)) = (&self.cursor, &order_by) {
+            if cursor.to_order_by_clause() != *order_by {
+                return Err(Error::CursorOrderByMismatch);
+            }
+        }
+
+        let order_by = order_by.or_else(|| self.cursor.as_ref().map(Cursor::to_order_by_clause));
+        Ok(order_by.map_or_else(String::new, |order_by| order_by.sql().as_str().to_owned()))
     }
 }
 
@@ -201,16 +239,16 @@ where
     chrono::DateTime<chrono::Utc>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
     Option<String>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
 {
-    /// Renders the query (see [`render`](Self::render)) and binds it into
-    /// an executable `sqlx` query.
+    /// Composes the query (see [`compose`](Self::compose)) and binds it
+    /// into an executable `sqlx` query.
     ///
-    /// The rendered SQL text is only known at `build` time (it depends on
+    /// The composed SQL text is only known at `build` time (it depends on
     /// which values were spliced in) — `sqlx::query()` accepts an owned
     /// `String` directly via [`sqlx::AssertSqlSafe`] (as of sqlx 0.9's
     /// `SqlSafeStr`), so unlike an earlier version of this method, nothing
     /// needs to be leaked to satisfy a `'static` bound.
     pub fn build(&self) -> Result<sqlx::query::Query<'static, DB, DB::Arguments>, Error> {
-        let (sql, values) = self.render()?;
+        let (sql, values) = self.compose()?.into_parts();
 
         let mut query = sqlx::query::<DB>(sqlx::AssertSqlSafe(sql));
         for value in values {

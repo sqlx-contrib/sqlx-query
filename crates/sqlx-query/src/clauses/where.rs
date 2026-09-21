@@ -89,7 +89,15 @@ impl WhereClause {
     /// positional `$N` dialects, not `?`-style ones) is the composer's
     /// call to make, not this type's; see
     /// [`QueryDialect::positional`](crate::QueryDialect::positional).
-    pub fn shift(self, offset: usize) -> WhereClause {
+    ///
+    /// `pub(crate)`, not `pub`: this is an offset-bookkeeping primitive
+    /// specific to how [`QueryComposer`](crate::QueryComposer) splices
+    /// fragments together — there's no reason for code outside this crate
+    /// to reach for it directly, and keeping it internal means its only
+    /// caller ([`QueryComposer::compose_where`](crate::QueryComposer))
+    /// is one we already know always gates it behind
+    /// [`QueryDialect::positional`](crate::QueryDialect::positional).
+    pub(crate) fn shift(self, offset: usize) -> WhereClause {
         let sql = shift_placeholders(self.sql().as_str(), offset);
         self.values
             .into_iter()

@@ -14,7 +14,7 @@ mod value;
 pub use clauses::{
     Cursor, CursorError, OrderByClause, OrderByClauseError, OrderDirection, WhereClause,
 };
-pub use composer::{Error, QueryComposer};
+pub use composer::{Error, QueryComposer, QueryStatement};
 pub use dialect::QueryDialect;
 pub use value::Value;
 

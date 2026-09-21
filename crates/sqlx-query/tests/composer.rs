@@ -5,7 +5,7 @@
 //! */`) — see DESIGN.md. Each test's *intent* (what pgxquery scenario it
 //! ports) is named in its doc comment.
 //!
-//! These exercise [`QueryComposer::render`] directly: SQL text + bind
+//! These exercise [`QueryComposer::compose`] directly: SQL text + bind
 //! values, without needing a live database connection.
 
 use sqlx::Execute;
@@ -31,7 +31,7 @@ fn substitutes_where_and_order_by_sentinels() {
         .push_where(admin_filter())
         .push_order_by(name_order_by());
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("role = 'admin' AND"));
     assert!(sql.contains("name ASC , id"));
@@ -51,7 +51,7 @@ fn missing_filter_drops_where_sentinel_and_keeps_order_by() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.bind("007").push_order_by(name_order_by());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(!sql.contains("query.where"));
     assert!(!sql.contains("role = 'admin'"));
@@ -66,7 +66,7 @@ fn missing_order_by_drops_sentinel_and_keeps_where() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.bind("007").push_where(admin_filter());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("role = 'admin' AND"));
     assert!(!sql.contains("query.order_by"));
@@ -81,7 +81,7 @@ fn both_missing_drops_both_sentinels_but_keeps_base_binds() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.bind("007");
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(!sql.contains("query."));
     assert_eq!(values, vec![Value::String("007".into())]);
@@ -94,7 +94,7 @@ fn preserves_or_connective() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.push_where(admin_filter());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("role = 'admin' OR"));
     assert!(!sql.contains("query.where"));
@@ -107,7 +107,7 @@ fn bare_sentinel_substitutes_value_alone() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.push_where(admin_filter());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("role = 'admin'"));
     assert!(!sql.contains("query.where"));
@@ -122,11 +122,11 @@ fn order_by_sentinel_before_static_list() {
 
     let mut with_order_by = QueryComposer::<sqlx::Postgres>::new(sql);
     with_order_by.push_order_by(OrderByClause::parse("priority desc").unwrap());
-    let (sql_with, _) = with_order_by.render().unwrap();
+    let (sql_with, _) = with_order_by.compose().unwrap().into_parts();
     assert!(sql_with.contains("priority DESC , id"));
 
     let without_order_by = QueryComposer::<sqlx::Postgres>::new(sql);
-    let (sql_without, _) = without_order_by.render().unwrap();
+    let (sql_without, _) = without_order_by.compose().unwrap().into_parts();
     assert!(!sql_without.contains("query.order_by"));
     assert!(!sql_without.contains(','));
     assert!(sql_without.contains("id"));
@@ -140,7 +140,7 @@ fn multiple_sentinels_of_the_same_kind_all_substituted() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.push_where(admin_filter());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert_eq!(sql.matches("role = 'admin' AND").count(), 2);
     assert!(!sql.contains("query.where"));
@@ -158,7 +158,7 @@ fn shifts_filter_placeholders_past_base_binds() {
             .bind(90i64),
     );
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("name = $2 AND score > $3 AND"));
     assert_eq!(
@@ -186,7 +186,7 @@ fn order_by_never_contributes_bind_values() {
         .bind(10i64)
         .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("rank DESC , id"));
     assert_eq!(
@@ -207,7 +207,7 @@ fn zero_offset_leaves_filter_placeholders_unchanged() {
             .bind(90i64),
     );
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("name = $1 AND score > $2 AND"));
     assert_eq!(values, vec![Value::String("alice".into()), Value::Int(90)]);
@@ -221,7 +221,7 @@ fn leaves_non_matching_comments_untouched() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.push_where(admin_filter());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("/* regular comment */"));
     assert!(sql.contains("role = 'admin' AND"));
@@ -234,7 +234,7 @@ fn unknown_sentinel_name_dropped_entirely() {
     let sql = "SELECT 1 FROM t WHERE TRUE /* query.unknown AND */";
     let query = QueryComposer::<sqlx::Postgres>::new(sql);
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(!sql.contains("query.unknown"));
     assert!(!sql.contains("AND"));
@@ -249,7 +249,7 @@ fn no_sentinels_present_leaves_sql_untouched() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.bind(1i64);
 
-    let (rendered, values) = query.render().unwrap();
+    let (rendered, values) = query.compose().unwrap().into_parts();
 
     assert_eq!(rendered, sql);
     assert_eq!(values, vec![Value::Int(1)]);
@@ -276,7 +276,7 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
         .push_where(WhereClause::new("status = $1").bind("ACTIVE"))
         .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("WHERE status = $3 AND TRUE"));
     assert!(sql.contains("ORDER BY rank DESC , collection_id"));
@@ -301,17 +301,17 @@ fn order_by_splices_through_composer() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.push_order_by(order_by);
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("rank DESC , id"));
     assert!(values.is_empty());
 }
 
 /// `build()` actually produces an executable `sqlx::query::Query` (not
-/// just testing `render()` in isolation) for each dialect this crate
+/// just testing `compose()` in isolation) for each dialect this crate
 /// implements `QueryDialect` for.
 #[test]
-fn build_produces_a_query_with_the_rendered_sql() {
+fn build_produces_a_query_with_the_composed_sql() {
     let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.push_where(admin_filter());
@@ -337,7 +337,7 @@ fn cursor_alone_supplies_its_own_order_by() {
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
     query.with_cursor(rank_cursor());
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("WHERE (rank < $1) OR (rank = $1 AND id > $2) AND TRUE"));
     assert!(sql.contains("ORDER BY rank DESC, id ASC , id"));
@@ -355,7 +355,7 @@ fn cursor_with_matching_order_by_is_accepted() {
         .with_cursor(rank_cursor())
         .push_order_by(OrderByClause::parse("rank desc, id asc").unwrap());
 
-    assert!(query.render().is_ok());
+    assert!(query.compose().is_ok());
 }
 
 /// A cursor whose order_by no longer matches the request's current
@@ -369,7 +369,7 @@ fn cursor_with_mismatched_order_by_is_rejected() {
         .push_order_by(OrderByClause::parse("id asc").unwrap());
 
     assert!(matches!(
-        query.render().unwrap_err(),
+        query.compose().unwrap_err(),
         Error::CursorOrderByMismatch
     ));
 }
@@ -384,7 +384,7 @@ fn cursor_and_filter_are_combined_with_and() {
         .push_where(WhereClause::new("status = $1").bind("ACTIVE"))
         .with_cursor(rank_cursor());
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(
         sql.contains("WHERE (status = $1) AND ((rank < $2) OR (rank = $2 AND id > $3)) AND TRUE")
@@ -410,7 +410,7 @@ fn non_positional_dialects_do_not_shift_where_by_placeholders() {
         .bind("acme")
         .push_where(WhereClause::new("name = ?").bind("alice"));
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("name = ? AND"));
     assert_eq!(
@@ -430,7 +430,7 @@ fn where_by_accumulates_across_multiple_calls() {
         .push_where(WhereClause::new("tenant_id = $1").bind("acme"))
         .push_where(WhereClause::new("status = $1").bind("ACTIVE"));
 
-    let (sql, values) = query.render().unwrap();
+    let (sql, values) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("WHERE (tenant_id = $1) AND (status = $2) AND TRUE"));
     assert_eq!(
@@ -449,7 +449,7 @@ fn push_order_accumulates_as_tie_breakers_in_call_order() {
         .push_order_by(OrderByClause::parse("tenant_id asc").unwrap())
         .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("ORDER BY tenant_id ASC, rank DESC , id"));
 }
@@ -465,7 +465,7 @@ fn explicit_order_by_is_not_duplicated_by_a_matching_cursor() {
         .push_order_by(OrderByClause::parse("rank desc, id asc").unwrap())
         .with_cursor(rank_cursor());
 
-    let (sql, _) = query.render().unwrap();
+    let (sql, _) = query.compose().unwrap().into_parts();
 
     assert!(sql.contains("ORDER BY rank DESC, id ASC , id"));
     assert_eq!(sql.matches("rank DESC").count(), 1);
