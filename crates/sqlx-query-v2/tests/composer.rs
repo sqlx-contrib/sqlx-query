@@ -318,5 +318,5 @@ fn build_produces_a_query_with_the_rendered_sql() {
 
     let built = query.build().unwrap();
 
-    assert!(built.sql().contains("role = 'admin' AND TRUE"));
+    assert!(built.sql().as_str().contains("role = 'admin' AND TRUE"));
 }

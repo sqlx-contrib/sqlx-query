@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
+
 use crate::QueryResolver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,21 +89,21 @@ impl OrderByClause {
         Ok(OrderByClause { terms })
     }
 
-    /// Renders to `"col1 ASC, col2 DESC"`. `OrderByClause` never carries bind
-    /// values (it only ever emits column names and directions), so unlike
-    /// [`WhereClause::sql`](crate::WhereClause::sql) this computes the text
-    /// on demand from `terms` rather than returning a stored field — hence
-    /// `String`, not `&str` — but the name matches
-    /// [`WhereClause::sql`](crate::WhereClause::sql) so both clause types
-    /// answer "what's your SQL text?" the same way. There's no matching
-    /// `values()`: it would always be empty, see
+    /// Renders to `"col1 ASC, col2 DESC"`, returning the same [`SqlStr`]
+    /// type as [`WhereClause::sql`](crate::WhereClause::sql) so both clause
+    /// types answer "what's your SQL text?" identically. Unlike
+    /// `WhereClause`'s (a cheap clone of an `Arc`-backed field), this is
+    /// computed fresh from `terms` on every call — `OrderByClause` never
+    /// carries bind values, so there's no matching `values()`; see
     /// [`QueryComposer::order_by`](crate::QueryComposer::order_by).
-    pub fn sql(&self) -> String {
-        self.terms
+    pub fn sql(&self) -> SqlStr {
+        let sql = self
+            .terms
             .iter()
             .map(|term| format!("{} {}", term.field, term.direction))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", ");
+        AssertSqlSafe(sql).into_sql_str()
     }
 }
 

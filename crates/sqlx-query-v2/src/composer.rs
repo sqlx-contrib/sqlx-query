@@ -95,11 +95,11 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     pub fn render(&self) -> (String, Vec<Value>) {
         let offset = self.values.len();
         let (where_sql, where_values) = match &self.where_by {
-            Some(where_by) if !where_by.sql().is_empty() => {
+            Some(where_by) if !where_by.sql().as_str().is_empty() => {
                 let sql = if DB::positional() {
-                    shift_placeholders(where_by.sql(), offset)
+                    shift_placeholders(where_by.sql().as_str(), offset)
                 } else {
-                    where_by.sql().to_owned()
+                    where_by.sql().as_str().to_owned()
                 };
                 (sql, where_by.values().to_vec())
             }
@@ -109,7 +109,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         let order_by_sql = self
             .order_by
             .as_ref()
-            .map_or_else(String::new, OrderByClause::sql);
+            .map_or_else(String::new, |order_by| order_by.sql().as_str().to_owned());
 
         let sql = SENTINEL_RE
             .replace_all(self.sql, |caps: &Captures<'_>| {
@@ -147,17 +147,14 @@ where
     /// an executable `sqlx` query.
     ///
     /// The rendered SQL text is only known at `build` time (it depends on
-    /// which values were spliced in), but `sqlx::query::Query` needs a
-    /// `'static` SQL string. This leaks the rendered text (`Box::leak`) to
-    /// get that `'static` lifetime honestly rather than faking it — each
-    /// `build()` call leaks the size of its composed SQL. That's fine for
-    /// the intended one-composer-per-request usage; do not call `build` in
-    /// a loop expecting bounded memory.
-    pub fn build(&self) -> Result<sqlx::query::Query<'static, DB, DB::Arguments<'static>>, Error> {
+    /// which values were spliced in) — `sqlx::query()` accepts an owned
+    /// `String` directly via [`sqlx::AssertSqlSafe`] (as of sqlx 0.9's
+    /// `SqlSafeStr`), so unlike an earlier version of this method, nothing
+    /// needs to be leaked to satisfy a `'static` bound.
+    pub fn build(&self) -> Result<sqlx::query::Query<'static, DB, DB::Arguments>, Error> {
         let (sql, values) = self.render();
-        let sql: &'static str = Box::leak(sql.into_boxed_str());
 
-        let mut query = sqlx::query::<DB>(sql);
+        let mut query = sqlx::query::<DB>(sqlx::AssertSqlSafe(sql));
         for value in values {
             query = match value {
                 Value::Null => query.bind(None::<String>),

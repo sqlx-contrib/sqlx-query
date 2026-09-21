@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
+
 use crate::Value;
 
 /// A `WHERE`-clause contribution: SQL text (no leading/trailing
@@ -13,18 +17,22 @@ use crate::Value;
 /// `WhereClause` reaching out to know about them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhereClause {
-    sql: String,
+    sql: SqlStr,
     values: Vec<Value>,
 }
 
 impl WhereClause {
     /// A `WhereClause` with no bind values — most hand-written filters
     /// (e.g. `"deleted_at IS NULL"`) don't reference any. Attach values
-    /// with [`with_values`](Self::with_values) when the SQL has
-    /// placeholders.
+    /// with [`bind`](Self::bind) when the SQL has placeholders.
+    ///
+    /// `sql` is stored as an `Arc<str>`-backed [`SqlStr`] up front, so
+    /// every later [`sql()`](Self::sql) call is just a refcount bump, not
+    /// a copy — see [`sql()`](Self::sql)'s doc for why that matters.
     pub fn new(sql: impl Into<String>) -> Self {
+        let sql: Arc<str> = Arc::from(sql.into());
         WhereClause {
-            sql: sql.into(),
+            sql: AssertSqlSafe(sql).into_sql_str(),
             values: Vec::new(),
         }
     }
@@ -40,7 +48,14 @@ impl WhereClause {
         &self.values
     }
 
-    pub fn sql(&self) -> &str {
-        &self.sql
+    /// This clause's SQL text. Matches
+    /// [`OrderByClause::sql`](crate::OrderByClause::sql)'s return type —
+    /// both clause types answer "what's your SQL text?" as [`SqlStr`], the
+    /// same type `sqlx::query()` itself wants. Unlike `OrderByClause`'s
+    /// (computed fresh from `terms` on every call), this one is a cheap
+    /// clone: `new()` stores the text `Arc`-backed, and `SqlStr::clone`
+    /// is just a refcount bump for the `Arc` variant.
+    pub fn sql(&self) -> SqlStr {
+        self.sql.clone()
     }
 }
