@@ -103,40 +103,6 @@ impl FilterClause {
             .fold(WhereClause::new(sql), WhereClause::bind)
     }
 
-    /// Replaces every field reference in `node` with a flat `Ident` node
-    /// carrying the column it resolves to — collapsing a dotted selection
-    /// (`v.created_at`) into whatever text the allow-list names for it
-    /// (which may itself be dotted, e.g. `v.rank_score`), so rendering
-    /// never needs to know the difference between a bare and a qualified
-    /// column.
-    fn rename(
-        node: &mut cel::IdedExpr,
-        columns: &HashMap<&str, &str>,
-    ) -> Result<(), FilterClauseError> {
-        if let Some(name) = Self::field_name(node) {
-            let column = columns
-                .get(name.as_str())
-                .ok_or_else(|| FilterClauseError::UnknownField(name.clone()))?;
-            node.expr = Expr::Ident((*column).to_owned());
-            return Ok(());
-        }
-
-        match &mut node.expr {
-            Expr::Call(call) => {
-                for arg in &mut call.args {
-                    Self::rename(arg, columns)?;
-                }
-            }
-            Expr::List(list) => {
-                for elem in &mut list.elements {
-                    Self::rename(elem, columns)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     /// Renders `node` to SQL text, pushing each literal it contains onto
     /// `values` as a `$N` placeholder in the order encountered — always
     /// threaded through the same accumulator, since every literal in a
@@ -249,21 +215,6 @@ impl FilterClause {
         Ok(format!("{needle_sql} IN ({})", items.join(", ")))
     }
 
-    /// The dotted field a CEL identifier or selection names --
-    /// `v.created_at`.
-    fn field_name(node: &cel::IdedExpr) -> Option<String> {
-        match &node.expr {
-            Expr::Ident(name) => Some(name.clone()),
-            // `a.b?.c` tests for presence rather than naming a field.
-            Expr::Select(select) if !select.test => Some(format!(
-                "{}.{}",
-                Self::field_name(&select.operand)?,
-                select.field
-            )),
-            _ => None,
-        }
-    }
-
     /// A CEL literal, as the [`Value`] it means.
     fn literal(value: &LiteralValue) -> Result<Value, FilterClauseError> {
         Ok(match value {
@@ -303,6 +254,63 @@ impl FilterClause {
 
     fn refused(node: &cel::IdedExpr) -> FilterClauseError {
         FilterClauseError::Unsupported(format!("{:?} has no reading as a condition", node.expr))
+    }
+}
+
+// A separate inherent `impl FilterClause` block, rather than folding
+// `rename`/`field_name` into the block above, purely to keep them
+// textually next to the `QueryResolver` impl they exist for — Rust
+// doesn't allow a non-trait helper to live inside
+// `impl QueryResolver for FilterClause` itself, since a trait impl block
+// may only contain that trait's own members.
+impl FilterClause {
+    /// The dotted field a CEL identifier or selection names --
+    /// `v.created_at`.
+    fn field_name(node: &cel::IdedExpr) -> Option<String> {
+        match &node.expr {
+            Expr::Ident(name) => Some(name.clone()),
+            // `a.b?.c` tests for presence rather than naming a field.
+            Expr::Select(select) if !select.test => Some(format!(
+                "{}.{}",
+                Self::field_name(&select.operand)?,
+                select.field
+            )),
+            _ => None,
+        }
+    }
+
+    /// Replaces every field reference in `node` with a flat `Ident` node
+    /// carrying the column it resolves to — collapsing a dotted selection
+    /// (`v.created_at`) into whatever text the allow-list names for it
+    /// (which may itself be dotted, e.g. `v.rank_score`), so rendering
+    /// never needs to know the difference between a bare and a qualified
+    /// column.
+    fn rename(
+        node: &mut cel::IdedExpr,
+        columns: &HashMap<&str, &str>,
+    ) -> Result<(), FilterClauseError> {
+        if let Some(name) = Self::field_name(node) {
+            let column = columns
+                .get(name.as_str())
+                .ok_or_else(|| FilterClauseError::UnknownField(name.clone()))?;
+            node.expr = Expr::Ident((*column).to_owned());
+            return Ok(());
+        }
+
+        match &mut node.expr {
+            Expr::Call(call) => {
+                for arg in &mut call.args {
+                    Self::rename(arg, columns)?;
+                }
+            }
+            Expr::List(list) => {
+                for elem in &mut list.elements {
+                    Self::rename(elem, columns)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
