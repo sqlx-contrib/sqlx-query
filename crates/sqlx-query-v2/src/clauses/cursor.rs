@@ -1,5 +1,5 @@
 //! Keyset ("seek method") pagination cursor: an OR-of-ANDs tuple
-//! comparison built from a resolved [`OrderByClause`] and one boundary
+//! comparison built from a resolved [`OrderClause`] and one boundary
 //! value per key.
 //!
 //! `Cursor::parse` (decoding an opaque `page_token` from the client) and
@@ -12,8 +12,8 @@
 //! the source Rust type is always known; here, a column alone doesn't say
 //! which `Value` variant it should become).
 
-use crate::order_by::OrderKey;
-use crate::{OrderByClause, OrderDirection, Value, WhereClause};
+use super::order::OrderKey;
+use crate::{OrderClause, OrderDirection, Value, WhereClause};
 
 /// One ordered comparison key: a resolved column/direction pair, paired
 /// with the cursor's boundary value for it. `value` is `None` between
@@ -43,7 +43,7 @@ pub enum CursorError {
 impl Cursor {
     /// Clause only, no boundary values yet — supply them with
     /// [`after`](Self::after).
-    pub fn new(order_by: impl Into<OrderByClause>) -> Self {
+    pub fn new(order_by: impl Into<OrderClause>) -> Self {
         let keys = order_by
             .into()
             .keys()
@@ -70,10 +70,10 @@ impl Cursor {
         Ok(self)
     }
 
-    /// Reconstructs the `OrderByClause` this cursor was built against, to
+    /// Reconstructs the `OrderClause` this cursor was built against, to
     /// re-apply to the next page's query — see
     /// [`QueryComposer::cursor`](crate::QueryComposer::cursor).
-    pub fn order_by(&self) -> OrderByClause {
+    pub fn order_by(&self) -> OrderClause {
         self.keys.iter().map(|ck| ck.key.clone()).collect()
     }
 
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn builds_tuple_comparison_for_two_keys() {
-        let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
+        let order_by = OrderClause::parse("rank desc, id asc").unwrap();
         let cursor = Cursor::new(order_by)
             .after(vec![Value::Int(42), Value::Int(7)])
             .unwrap();
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn after_rejects_wrong_value_count() {
-        let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
+        let order_by = OrderClause::parse("rank desc, id asc").unwrap();
         let err = Cursor::new(order_by)
             .after(vec![Value::Int(1)])
             .unwrap_err();
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn order_by_round_trips() {
-        let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
+        let order_by = OrderClause::parse("rank desc, id asc").unwrap();
         let cursor = Cursor::new(order_by.clone())
             .after(vec![Value::Int(42), Value::Int(7)])
             .unwrap();

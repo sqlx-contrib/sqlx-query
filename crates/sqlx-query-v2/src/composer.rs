@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 
-use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
+use crate::{Cursor, OrderClause, QueryDialect, Value, WhereClause};
 
 /// Matches a sentinel comment of the form `/* query.<name> <suffix> */`,
 /// capturing the name and the trailing connective/separator text
@@ -21,14 +21,14 @@ static SENTINEL_RE: LazyLock<Regex> =
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// `order_by` was set to something that doesn't match the
-    /// `OrderByClause` a `cursor()` was built against — almost always
+    /// `OrderClause` a `cursor()` was built against — almost always
     /// means the client changed their sort between the request that
     /// issued the page token and the one using it.
     #[error("order_by doesn't match the order_by the cursor was built against")]
     CursorOrderByMismatch,
 }
 
-/// Splices a [`WhereClause`] and an [`OrderByClause`] into
+/// Splices a [`WhereClause`] and an [`OrderClause`] into
 /// `/* query.<name> */` sentinel comments in a static SQL template — the
 /// `pgx-contrib/pgxquery` port. `sql` is never parsed structurally, only
 /// scanned once for its own sentinel comments; it may contain any syntax
@@ -37,7 +37,7 @@ pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
     values: Vec<Value>,
     where_by: Option<WhereClause>,
-    order_by: Option<OrderByClause>,
+    order_by: Option<OrderClause>,
     cursor: Option<Cursor>,
     _dialect: PhantomData<fn() -> DB>,
 }
@@ -72,10 +72,10 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     }
 
     /// Splices onto `/* query.order_by */`. Accepts anything that converts
-    /// into [`OrderByClause`], mirroring [`where_by`](Self::where_by) —
-    /// today that's only `OrderByClause` itself, but this keeps the two
+    /// into [`OrderClause`], mirroring [`where_by`](Self::where_by) —
+    /// today that's only `OrderClause` itself, but this keeps the two
     /// builder methods symmetric without committing to that forever.
-    pub fn order_by(&mut self, order_by: impl Into<OrderByClause>) -> &mut Self {
+    pub fn order_by(&mut self, order_by: impl Into<OrderClause>) -> &mut Self {
         self.order_by = Some(order_by.into());
         self
     }
@@ -98,7 +98,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// final placeholders reference them: base binds, then the effective
     /// `where_by` value's own values — regardless of where either
     /// sentinel physically sits in `sql`. `order_by` never contributes
-    /// values (see [`OrderByClause::sql`]), so it isn't part of that
+    /// values (see [`OrderClause::sql`]), so it isn't part of that
     /// offset accounting.
     ///
     /// A sentinel whose value is absent, or whose value rendered to an

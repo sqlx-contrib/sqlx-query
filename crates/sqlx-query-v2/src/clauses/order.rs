@@ -43,20 +43,20 @@ impl OrderKey {
 /// A parsed AIP-132 `order_by` value: `"field [asc|desc], ..."`. No CEL
 /// involved — this is a plain comma-separated field list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OrderByClause {
+pub struct OrderClause {
     keys: Vec<OrderKey>,
 }
 
-impl FromIterator<OrderKey> for OrderByClause {
+impl FromIterator<OrderKey> for OrderClause {
     fn from_iter<T: IntoIterator<Item = OrderKey>>(iter: T) -> Self {
-        OrderByClause {
+        OrderClause {
             keys: iter.into_iter().collect(),
         }
     }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum OrderByClauseError {
+pub enum OrderClauseError {
     #[error("empty order_by term in `{0}`")]
     EmptyTerm(String),
     #[error("invalid sort direction `{direction}` for field `{field}`")]
@@ -65,28 +65,28 @@ pub enum OrderByClauseError {
     UnknownField(String),
 }
 
-impl OrderByClause {
+impl OrderClause {
     /// Parses `"field [asc|desc], field2 [asc|desc], ..."`. An empty or
-    /// all-whitespace string parses to an empty `OrderByClause`, which renders
+    /// all-whitespace string parses to an empty `OrderClause`, which renders
     /// to an empty fragment (and is dropped by the composer's sentinel,
     /// same as an unset `order_by`).
-    pub fn parse(order_by: &str) -> Result<Self, OrderByClauseError> {
+    pub fn parse(order_by: &str) -> Result<Self, OrderClauseError> {
         let order_by = order_by.trim();
         if order_by.is_empty() {
-            return Ok(OrderByClause::default());
+            return Ok(OrderClause::default());
         }
 
         let mut keys = Vec::new();
         for part in order_by.split(',') {
             let part = part.trim();
             if part.is_empty() {
-                return Err(OrderByClauseError::EmptyTerm(order_by.to_owned()));
+                return Err(OrderClauseError::EmptyTerm(order_by.to_owned()));
             }
 
             let mut words = part.split_whitespace();
             let field = words.next().unwrap_or_default().to_owned();
             if field.is_empty() {
-                return Err(OrderByClauseError::EmptyTerm(order_by.to_owned()));
+                return Err(OrderClauseError::EmptyTerm(order_by.to_owned()));
             }
 
             let direction = match words.next() {
@@ -94,7 +94,7 @@ impl OrderByClause {
                 Some(word) if word.eq_ignore_ascii_case("asc") => OrderDirection::Asc,
                 Some(word) if word.eq_ignore_ascii_case("desc") => OrderDirection::Desc,
                 Some(word) => {
-                    return Err(OrderByClauseError::InvalidDirection {
+                    return Err(OrderClauseError::InvalidDirection {
                         field,
                         direction: word.to_owned(),
                     });
@@ -102,7 +102,7 @@ impl OrderByClause {
             };
 
             if words.next().is_some() {
-                return Err(OrderByClauseError::EmptyTerm(order_by.to_owned()));
+                return Err(OrderClauseError::EmptyTerm(order_by.to_owned()));
             }
 
             keys.push(OrderKey {
@@ -111,14 +111,14 @@ impl OrderByClause {
             });
         }
 
-        Ok(OrderByClause { keys })
+        Ok(OrderClause { keys })
     }
 
     /// Renders to `"col1 ASC, col2 DESC"`, returning the same [`SqlStr`]
     /// type as [`WhereClause::sql`](crate::WhereClause::sql) so both clause
     /// types answer "what's your SQL text?" identically. Unlike
     /// `WhereClause`'s (a cheap clone of an `Arc`-backed field), this is
-    /// computed fresh from `keys` on every call — `OrderByClause` never
+    /// computed fresh from `keys` on every call — `OrderClause` never
     /// carries bind values, so there's no matching `values()`; see
     /// [`QueryComposer::order_by`](crate::QueryComposer::order_by).
     pub fn sql(&self) -> SqlStr {
@@ -138,14 +138,14 @@ impl OrderByClause {
     }
 }
 
-impl QueryResolver for OrderByClause {
-    type Error = OrderByClauseError;
+impl QueryResolver for OrderClause {
+    type Error = OrderClauseError;
 
     fn resolve(mut self, columns: &HashMap<&str, &str>) -> Result<Self, Self::Error> {
         for key in &mut self.keys {
             match columns.get(key.column.as_str()) {
                 Some(column) => key.column = (*column).to_owned(),
-                None => return Err(OrderByClauseError::UnknownField(key.column.clone())),
+                None => return Err(OrderClauseError::UnknownField(key.column.clone())),
             }
         }
         Ok(self)
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn parses_default_direction() {
-        let order_by = OrderByClause::parse("rank").unwrap();
+        let order_by = OrderClause::parse("rank").unwrap();
         assert_eq!(
             order_by.keys,
             vec![OrderKey {
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn parses_explicit_direction_case_insensitively() {
-        let order_by = OrderByClause::parse("rank DESC, created asc").unwrap();
+        let order_by = OrderClause::parse("rank DESC, created asc").unwrap();
         assert_eq!(
             order_by.keys,
             vec![
@@ -188,17 +188,17 @@ mod tests {
 
     #[test]
     fn empty_string_parses_to_empty_order_by() {
-        let order_by = OrderByClause::parse("").unwrap();
-        assert_eq!(order_by, OrderByClause::default());
+        let order_by = OrderClause::parse("").unwrap();
+        assert_eq!(order_by, OrderClause::default());
         assert_eq!(order_by.sql(), "");
     }
 
     #[test]
     fn rejects_invalid_direction() {
-        let err = OrderByClause::parse("rank sideways").unwrap_err();
+        let err = OrderClause::parse("rank sideways").unwrap_err();
         assert_eq!(
             err,
-            OrderByClauseError::InvalidDirection {
+            OrderClauseError::InvalidDirection {
                 field: "rank".into(),
                 direction: "sideways".into()
             }
@@ -207,14 +207,14 @@ mod tests {
 
     #[test]
     fn rejects_empty_term() {
-        let err = OrderByClause::parse("rank,,created").unwrap_err();
-        assert_eq!(err, OrderByClauseError::EmptyTerm("rank,,created".into()));
+        let err = OrderClause::parse("rank,,created").unwrap_err();
+        assert_eq!(err, OrderClauseError::EmptyTerm("rank,,created".into()));
     }
 
     #[test]
     fn resolve_renames_fields_against_allow_list() {
         let columns = HashMap::from([("rank", "rank"), ("created", "created_at")]);
-        let order_by = OrderByClause::parse("created desc, rank")
+        let order_by = OrderClause::parse("created desc, rank")
             .unwrap()
             .resolve(&columns)
             .unwrap();
@@ -224,13 +224,10 @@ mod tests {
     #[test]
     fn resolve_fails_closed_on_unknown_field() {
         let columns = HashMap::from([("rank", "rank")]);
-        let err = OrderByClause::parse("internal_notes")
+        let err = OrderClause::parse("internal_notes")
             .unwrap()
             .resolve(&columns)
             .unwrap_err();
-        assert_eq!(
-            err,
-            OrderByClauseError::UnknownField("internal_notes".into())
-        );
+        assert_eq!(err, OrderClauseError::UnknownField("internal_notes".into()));
     }
 }
