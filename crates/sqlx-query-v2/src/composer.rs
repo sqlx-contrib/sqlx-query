@@ -124,6 +124,10 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         .into_iter()
         .flatten()
         .reduce(WhereClause::and);
+
+        // The explicit order_by if one was set; otherwise the cursor's own
+        // (already checked above to match when both are present) — unlike
+        // where_by, there's nothing to combine, just one or the other.
         let order_by = self
             .order_by
             .clone()
