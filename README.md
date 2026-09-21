@@ -7,18 +7,13 @@
 [![Nix Flake](https://img.shields.io/badge/Nix-Flake-5277C3?logo=nixos&logoColor=white)](https://nixos.wiki/wiki/Flakes)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A Rust/[sqlx](https://github.com/launchbadge/sqlx) port of
-[`pgx-contrib/pgxquery`](https://github.com/pgx-contrib/pgxquery)'s
-sentinel-comment splicing, with the [AIP-132](https://google.aip.dev/132)
-`filter` / `order_by` / `page_token` request shape on top.
-
 > [!WARNING]
 > **Work in progress — a spike, not a release.** Neither crate is published to
 > crates.io, the API is unstable and unannounced, and the end-to-end tests run
 > against rendered SQL text rather than a live server. It is here so the shape
 > of the thing can be looked at and argued with.
 
-## Why splice comments instead of building the query?
+## Why
 
 The usual answer to "the client can filter and sort" is a query builder: you
 stop writing SQL and start writing Rust that emits SQL. That trade costs you
@@ -57,7 +52,7 @@ it.
 
 ## Table of contents
 
-- [Why splice comments instead of building the query?](#why-splice-comments-instead-of-building-the-query)
+- [Why](#why)
 - [The crates](#the-crates)
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
