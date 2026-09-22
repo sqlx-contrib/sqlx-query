@@ -1,36 +1,41 @@
 use std::marker::PhantomData;
-use std::sync::LazyLock;
 
-use regex::{Captures, Regex};
+use crate::lexer::{Placeholder, Token};
+use crate::{Cursor, CursorError, Error, OrderByClause, QueryDialect, Quoting, Value, WhereClause};
 
-use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
-
-/// Matches a sentinel comment of the form `/* query.<name> <suffix> */`,
-/// capturing the name and the trailing connective/separator text
-/// (`AND`, `OR`, `,`, or nothing) so it's preserved verbatim around the
-/// substituted fragment.
-///
-/// This is the **name-first** convention used by `sqlc-gen-sqlx`'s
-/// generated SQL (`/* query.where AND */`), not `pgx-contrib/pgxquery`'s
-/// own connective-first convention (`/* AND query.where */`). Name-first
-/// means there's no leading connective to capture, which is why this
-/// pattern only has two groups.
-static SENTINEL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"/\*\s*\bquery\.(\w+)\b([^*]*?)\s*\*/").unwrap());
-
-/// Errors [`QueryComposer::compose`]/[`QueryComposer::build`] can return.
+/// What can go wrong while splicing, as opposed to what can go wrong with
+/// a clause the composer was handed — those keep their own errors and
+/// reach the caller through [`Error`](crate::Error).
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// `order_by` was set to something that doesn't match the
-    /// `OrderByClause` the [`Cursor`] passed to
-    /// [`QueryComposer::with_cursor`] was built against — almost always
-    /// means the client changed their sort between the request that
-    /// issued the page token and the one using it.
-    #[error("order_by doesn't match the order_by the cursor was built against")]
-    CursorOrderByMismatch,
+pub enum QueryComposerError {
+    /// A query references more (or fewer) placeholders than the values
+    /// bound for them.
+    ///
+    /// Checked rather than assumed because everything downstream depends
+    /// on it: a fragment is shifted past the highest placeholder number
+    /// ahead of it, and every placeholder is resolved by *index* into the
+    /// value list. Those two agree only when the placeholders a query
+    /// uses are exactly `$1..$n` for `n` bound values — so a base query
+    /// that reaches for `$3` with two values bound would otherwise splice
+    /// its fragment on top of a number already in use, and bind the wrong
+    /// value to it rather than failing.
+    #[error("query references {placeholders} placeholder(s), but {values} value(s) are bound")]
+    BindMismatch { placeholders: usize, values: usize },
+
+    /// A clause was set, but the base query has no slot to splice it
+    /// into.
+    ///
+    /// The mirror of a slot with nothing to put in it, which is dropped
+    /// rather than reported — the asymmetry is deliberate. An empty filter
+    /// is the ordinary case and means "no filter"; a filter with nowhere
+    /// to go means the query and the code disagree about what the query
+    /// supports. Silently dropping it is how a
+    /// [`Cursor`] ends up returning page one forever.
+    #[error("a {name} clause was set, but the base query has no /* query.{name} */ slot")]
+    MissingSlot { name: &'static str },
 }
 
-/// [`QueryComposer::compose`]'s output: SQL text with every sentinel
+/// [`QueryComposer::compose`]'s output: SQL text with every slot
 /// spliced in, plus the flat bind-value list in the same order the final
 /// placeholders reference them — a complete, executable SQL statement
 /// (text + parameters), which is what "statement" names here rather than
@@ -43,7 +48,7 @@ pub struct QueryStatement {
 }
 
 impl QueryStatement {
-    /// This statement's SQL text, sentinels already spliced in.
+    /// This statement's SQL text, slots already spliced in.
     #[must_use]
     pub fn sql(&self) -> &str {
         &self.sql
@@ -66,9 +71,9 @@ impl QueryStatement {
 }
 
 /// Splices a [`WhereClause`] and an [`OrderByClause`] into
-/// `/* query.<name> */` sentinel comments in a static SQL template — the
+/// `/* query.<name> */` slots in a static SQL template — the
 /// `pgx-contrib/pgxquery` port. `sql` is never parsed structurally, only
-/// scanned once for its own sentinel comments; it may contain any syntax
+/// scanned once for its own slots; it may contain any syntax
 /// the target driver accepts.
 pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
@@ -82,9 +87,9 @@ pub struct QueryComposer<DB: QueryDialect> {
 impl<DB: QueryDialect> QueryComposer<DB> {
     /// Starts composing `sql` — a base query the caller already wrote,
     /// containing zero or more `/* query.where */`/`/* query.order_by */`
-    /// sentinel comments. `sql` is never parsed structurally, so it may
+    /// slots. `sql` is never parsed structurally, so it may
     /// contain any syntax the target driver accepts; only its own
-    /// sentinel comments are ever touched, and only once, by
+    /// slots are ever touched, and only once, by
     /// [`compose`](Self::compose)/[`build`](Self::build).
     #[must_use]
     pub fn new(sql: &'static str) -> Self {
@@ -148,56 +153,189 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     }
 
     /// Splices `compose_where`'s and `compose_order_by`'s output (both
-    /// private helpers below) into their sentinels, returning the final
-    /// SQL text and the flat bind-value list in the same order the final
-    /// placeholders reference them: base binds, then `where_by`'s —
-    /// regardless of where either sentinel physically sits in `sql`.
+    /// private helpers below) into their slots, returning the final
+    /// SQL text and the bind-value list in the order the final
+    /// placeholders reference them.
     ///
-    /// A sentinel whose value is absent, or whose value rendered to an
+    /// Everything is numbered on the way through, whatever the dialect.
+    /// A `?` can't be written down before its position in the finished
+    /// statement is known — and a fragment's position isn't known until
+    /// it has been spliced, which is *after* it was built. So for a
+    /// `?`-style dialect the base query's markers are numbered first
+    /// (`?` → `$1`, `$2`, ... in textual order), everything is composed as
+    /// if it were PostgreSQL, and the numbering is converted back to `?`
+    /// in one final pass. That last pass is what makes the value list
+    /// come out in *textual* order rather than base-then-fragments: a
+    /// slot ahead of the base query's own `?` binds ahead of it too.
+    ///
+    /// The conversion emits one value per *reference*, not per value, so a
+    /// number used twice (a [`Cursor`]'s tuple comparison reuses each
+    /// boundary value) becomes two `?`s and two copies of the value —
+    /// which is the thing a numbered placeholder can express and a bare
+    /// marker can't.
+    ///
+    /// For PostgreSQL both extra passes are skipped and the output is
+    /// what it always was.
+    ///
+    /// A slot whose value is absent, or whose value rendered to an
     /// empty string, is dropped entirely (including its captured
-    /// connective/separator). A sentinel name that isn't `where` or
+    /// connective/separator). A slot name that isn't `where` or
     /// `order_by` is also dropped — this matches pgxquery's handling of
     /// an unrecognized `query.<name>`.
     ///
     /// # Errors
     ///
-    /// [`Error::CursorOrderByMismatch`] if a cursor and an explicit
-    /// `order_by` are both set and disagree.
+    /// [`CursorError::OrderByMismatch`] if a cursor and an explicit
+    /// `order_by` are both set and disagree;
+    /// [`PlaceholderError::Unsupported`](crate::PlaceholderError) for a
+    /// `$N` in a base query whose dialect spells placeholders `?`;
+    /// [`QueryComposerError::BindMismatch`] if the placeholders and the
+    /// values don't correspond one-to-one;
+    /// [`QueryComposerError::MissingSlot`] for a clause with nowhere to go.
     pub fn compose(&self) -> Result<QueryStatement, Error> {
-        let order_by_sql = self.compose_order_by()?;
-        let (where_by_sql, where_by_values) = self.compose_where();
+        let syntax = DB::syntax();
+        let tokens = Token::scan(self.sql, syntax.quoting);
 
-        let sql = SENTINEL_RE
-            .replace_all(self.sql, |caps: &Captures<'_>| {
-                let value = match &caps[1] {
-                    "where" => where_by_sql.as_str(),
-                    "order_by" => order_by_sql.as_str(),
-                    _ => "",
-                };
-                if value.is_empty() {
-                    String::new()
-                } else {
-                    format!("{value}{}", &caps[2])
+        let placeholders = Token::count_placeholders(&tokens, syntax.placeholder)?;
+        if placeholders != self.values.len() {
+            return Err(QueryComposerError::BindMismatch {
+                placeholders,
+                values: self.values.len(),
+            }
+            .into());
+        }
+
+        let order_by_sql = self.compose_order_by()?;
+        let (where_by_sql, where_by_values) = self.compose_where(placeholders);
+
+        let mut sql = String::with_capacity(self.sql.len());
+        let mut last = 0;
+        let mut marker = 0;
+        let mut spliced_where = false;
+        let mut spliced_order_by = false;
+
+        for token in &tokens {
+            match *token {
+                Token::Slot {
+                    start,
+                    end,
+                    ref name,
+                    ref suffix,
+                } => {
+                    let fragment = match name.as_str() {
+                        "where" => {
+                            spliced_where = true;
+                            where_by_sql.as_str()
+                        }
+                        "order_by" => {
+                            spliced_order_by = true;
+                            order_by_sql.as_str()
+                        }
+                        _ => "",
+                    };
+                    sql.push_str(&self.sql[last..start]);
+                    if !fragment.is_empty() {
+                        sql.push_str(fragment);
+                        sql.push_str(suffix);
+                    }
+                    last = end;
                 }
-            })
-            .into_owned();
+                // Left alone for positional dialects, where `?` is an
+                // operator (`jsonb ? text`) and never a placeholder.
+                Token::Placeholder(Placeholder::Question { start, end })
+                    if !syntax.placeholder.is_number() =>
+                {
+                    marker += 1;
+                    sql.push_str(&self.sql[last..start]);
+                    sql.push('$');
+                    sql.push_str(&marker.to_string());
+                    last = end;
+                }
+                Token::Placeholder(_) => {}
+            }
+        }
+        sql.push_str(&self.sql[last..]);
+
+        if !where_by_sql.is_empty() && !spliced_where {
+            return Err(QueryComposerError::MissingSlot { name: "where" }.into());
+        }
+        // Only for an `order_by` the caller pushed. A cursor's own
+        // `order_by` reaching a query with no slot for it is the
+        // ordinary case of a base query that sorts statically — the sort
+        // is already what the cursor was cut against, so there's nothing
+        // to splice and nothing wrong. A `where` has no such out: a
+        // boundary predicate can't have been written into the base query
+        // ahead of time.
+        if !order_by_sql.is_empty() && !self.order_by.is_empty() && !spliced_order_by {
+            return Err(QueryComposerError::MissingSlot { name: "order_by" }.into());
+        }
 
         let mut values = self.values.clone();
         values.extend(where_by_values);
 
-        Ok(QueryStatement { sql, values })
+        // The same check as above, now over the whole statement: the base
+        // was verified before the fragments were shifted past it, and this
+        // catches a hand-written fragment whose own numbering doesn't
+        // match the values it carries.
+        let placeholders = Placeholder::max_number(&sql, syntax.quoting);
+        if placeholders != values.len() {
+            return Err(QueryComposerError::BindMismatch {
+                placeholders,
+                values: values.len(),
+            }
+            .into());
+        }
+
+        if syntax.placeholder.is_number() {
+            return Ok(QueryStatement { sql, values });
+        }
+        Self::render_markers(&sql, &values, syntax.quoting)
+    }
+
+    /// Converts a fully numbered statement back to the bare `?` markers a
+    /// non-positional driver binds by position, emitting each placeholder's
+    /// value as it's encountered so the value list ends up in textual
+    /// order.
+    fn render_markers(
+        sql: &str,
+        values: &[Value],
+        quoting: Quoting,
+    ) -> Result<QueryStatement, Error> {
+        let mut out = String::with_capacity(sql.len());
+        let mut rendered = Vec::with_capacity(values.len());
+        let mut last = 0;
+
+        for token in Token::scan(sql, quoting) {
+            if let Token::Placeholder(Placeholder::Number { start, end, number }) = token {
+                let value = number
+                    .checked_sub(1)
+                    .and_then(|index| values.get(index))
+                    .ok_or(QueryComposerError::BindMismatch {
+                        placeholders: number,
+                        values: values.len(),
+                    })?;
+                out.push_str(&sql[last..start]);
+                out.push('?');
+                rendered.push(value.clone());
+                last = end;
+            }
+        }
+        out.push_str(&sql[last..]);
+
+        Ok(QueryStatement {
+            sql: out,
+            values: rendered,
+        })
     }
 
     /// Every accumulated `where_by` value plus the cursor's, all AND-ed
     /// together (dropping any that's absent) — a tenant scope, a
     /// client-supplied filter, and pagination can all apply at once; none
-    /// silently replaces another. Empty ones are dropped; positional
-    /// dialects (`$N`) additionally get their placeholders shifted past
-    /// the base binds — non-positional ones (`?`) have no placeholder
-    /// numbering to shift. Unlike `order_by`, this can't fail: `where_by`
-    /// values are always AND-ed, never checked for equality against the
-    /// cursor's.
-    fn compose_where(&self) -> (String, Vec<Value>) {
+    /// silently replaces another. Empty ones are dropped, and what's left
+    /// is shifted past `offset`, the base query's own placeholders.
+    /// Unlike `order_by`, this can't fail: `where_by` values are always
+    /// AND-ed, never checked for equality against the cursor's.
+    fn compose_where(&self, offset: usize) -> (String, Vec<Value>) {
         let where_by = self
             .where_by
             .iter()
@@ -205,13 +343,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .chain(self.cursor.as_ref().map(Cursor::to_where_clause))
             .reduce(WhereClause::and)
             .filter(|w| !w.sql().as_str().is_empty())
-            .map(|w| {
-                if DB::positional() {
-                    w.shift(self.values.len())
-                } else {
-                    w
-                }
-            });
+            .map(|w| w.shift(offset));
 
         let sql = where_by
             .as_ref()
@@ -239,7 +371,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 
         if let (Some(cursor), Some(order_by)) = (&self.cursor, &order_by) {
             if cursor.to_order_by_clause() != *order_by {
-                return Err(Error::CursorOrderByMismatch);
+                return Err(CursorError::OrderByMismatch.into());
             }
         }
 

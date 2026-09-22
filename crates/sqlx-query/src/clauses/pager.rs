@@ -77,6 +77,9 @@ pub enum CursorError {
     #[error("expected {expected} cursor values (one per order_by key), got {actual}")]
     ValueCountMismatch { expected: usize, actual: usize },
 
+    #[error("order_by doesn't match the order_by the cursor was built against")]
+    OrderByMismatch,
+
     #[error("cursor token is not valid base64")]
     TokenInvalidBase64,
 

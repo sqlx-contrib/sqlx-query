@@ -1,84 +1,283 @@
-//! Faithful port of `shiftPlaceholders` from `pgx-contrib/pgxquery`
-//! (`rewriter.go`). See that file's doc comment for the full rationale;
-//! summary: rewrites every *live* `$N` placeholder in a fragment of SQL
-//! text to `$(N+offset)`, skipping `$N`-looking text that is actually
-//! inside a single-quoted string, a double-quoted identifier, a
-//! dollar-quoted body, a line comment, or a (possibly nested) block
-//! comment — so a fragment can be authored with local `$1`, `$2`, ...
-//! numbering independent of how many bind values already exist in the
-//! base query it gets spliced into.
+//! A single-pass scanner over SQL text that finds the two things
+//! [`QueryComposer`](crate::QueryComposer) needs — placeholders and
+//! slots — while skipping everything that only *looks* like
+//! one: string literals, quoted identifiers, dollar-quoted bodies, line
+//! comments and block comments.
+//!
+//! Grown out of a faithful port of `shiftPlaceholders` from
+//! `pgx-contrib/pgxquery` (`rewriter.go`), which did the skipping for
+//! PostgreSQL only and reported nothing back. Two things forced it wider:
+//! the composer now scans the caller's *base* query (not just fragments
+//! this crate generated itself), so the rules have to match the target
+//! engine; and it needs to find slots here rather than with a separate
+//! regex pass, so a `/* query.where */` inside a string literal isn't
+//! mistaken for a real one.
 
-/// Rewrites every active `$N` placeholder in `sql` to `$(N+offset)`.
-pub(crate) fn shift_placeholders(sql: &str, offset: usize) -> String {
-    if offset == 0 {
-        return sql.to_owned();
-    }
+use std::sync::LazyLock;
 
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0;
+use regex::Regex;
 
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
-                let end = skip_single_quoted(bytes, i);
-                out.push_str(&sql[i..end]);
-                i = end;
-            }
-            b'"' => {
-                let end = skip_double_quoted(bytes, i);
-                out.push_str(&sql[i..end]);
-                i = end;
-            }
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                let end = skip_line_comment(bytes, i);
-                out.push_str(&sql[i..end]);
-                i = end;
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                let end = skip_block_comment(bytes, i);
-                out.push_str(&sql[i..end]);
-                i = end;
-            }
-            b'$' => {
-                if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
-                    let mut end = i + 1;
-                    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-                        end += 1;
-                    }
-                    let number: usize = sql[i + 1..end].parse().expect("scanned only ascii digits");
-                    out.push('$');
-                    out.push_str(&(number + offset).to_string());
-                    i = end;
-                    continue;
-                }
-                if let Some(end) = skip_dollar_quoted(bytes, i) {
-                    out.push_str(&sql[i..end]);
-                    i = end;
-                    continue;
-                }
-                out.push('$');
-                i += 1;
-            }
-            _ => {
-                // Step by whole characters so a multibyte one is never split.
-                // `i` is always on a char boundary: every other arm keys off an
-                // ASCII byte, and no byte of a multibyte character is ASCII.
-                let width = sql[i..].chars().next().map_or(1, char::len_utf8);
-                out.push_str(&sql[i..i + width]);
-                i += width;
-            }
+use crate::{PlaceholderStyle, Quoting};
+
+/// Matches a slot of the form `/* query.<name> <suffix> */`,
+/// capturing the name and the trailing connective/separator text
+/// (`AND`, `OR`, `,`, or nothing) so it's preserved verbatim around the
+/// substituted fragment.
+///
+/// Anchored, and applied only to a span [`Token::scan`] has already established
+/// *is* a comment — so unlike a free-running regex over the whole query,
+/// a slot spelled out inside a string literal can't match.
+///
+/// This is the **name-first** convention used by `sqlc-gen-sqlx`'s
+/// generated SQL (`/* query.where AND */`), not `pgx-contrib/pgxquery`'s
+/// own connective-first convention (`/* AND query.where */`). Name-first
+/// means there's no leading connective to capture, which is why this
+/// pattern only has two groups.
+static SLOT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)^/\*\s*query\.(\w+)\b([^*]*?)\s*\*/$").unwrap());
+
+/// Something [`Token::scan`] found that the composer acts on, named after what
+/// it looks like in the text:
+///
+/// ```text
+///   WHERE /* query.where AND */ tenant_id = $1 AND note LIKE ?
+///         └───────  Slot ──────┘            └┬┘            └┬┘
+///                                         Number         Question
+/// ```
+///
+/// Everything else — literals, identifiers, comments, ordinary SQL — is
+/// skipped and never reported, so a `Vec<Token>` is a sparse map of the
+/// interesting offsets in the text it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Token {
+    /// A bind parameter, in whichever spelling the dialect uses.
+    Placeholder(Placeholder),
+    /// `/* query.where AND */` — the span a clause is spliced into,
+    /// and the only comment this scanner reports rather than skips.
+    Slot {
+        start: usize,
+        end: usize,
+        name: String,
+        /// The connective or separator that followed the name inside the
+        /// comment, preserved so it can be re-emitted after the spliced
+        /// fragment (or dropped with it, when there's nothing to splice).
+        suffix: String,
+    },
+}
+
+/// One bind parameter, in one of the two spellings SQL dialects use. Which
+/// spelling a query uses is fixed by its dialect and never mixed —
+/// numbered for PostgreSQL, bare for MySQL and SQLite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Placeholder {
+    /// `$1`, `$2`, ... — names its value by number.
+    ///
+    /// `number` is `N` as written, which is *not* necessarily its position
+    /// among the tokens: PostgreSQL lets one value be referenced more than
+    /// once, and a [`Cursor`](crate::Cursor) deliberately does.
+    Number {
+        start: usize,
+        end: usize,
+        number: usize,
+    },
+    /// `?` — names its value by where it sits, with no number of its own
+    /// ("parameter marker", in the JDBC/ODBC sense).
+    ///
+    /// Reported for every dialect, acted on only by the non-positional
+    /// ones: in PostgreSQL `?` is an operator (`jsonb ? text`), never a
+    /// placeholder.
+    Question { start: usize, end: usize },
+}
+
+/// A placeholder spelled in a way the target dialect doesn't use.
+#[derive(Debug, thiserror::Error)]
+pub enum PlaceholderError {
+    /// A base query for a `?`-style dialect contains a numbered `$N`.
+    ///
+    /// Rejected rather than passed through: SQLite would read `$1` as a
+    /// *named* parameter (`$` plus an identifier) and never fill it from
+    /// a positional bind, and MySQL rejects it outright. Neither failure
+    /// is one this crate should let through quietly, and no sqlc-generated
+    /// query for these dialects produces one.
+    #[error("base query uses the numbered placeholder ${number}, but this dialect's is `?`")]
+    Unsupported { number: usize },
+}
+
+impl Token {
+    /// The `$N` number, for a numbered placeholder only — the shape most
+    /// callers want when folding over a scan.
+    pub(crate) fn placeholder_number(&self) -> Option<usize> {
+        match *self {
+            Token::Placeholder(Placeholder::Number { number, .. }) => Some(number),
+            _ => None,
         }
     }
 
-    out
+    /// Whether this is a bare `?`, the spelling that has to be numbered
+    /// before anything can be spliced past it.
+    pub(crate) fn is_placeholder_question(&self) -> bool {
+        matches!(self, Token::Placeholder(Placeholder::Question { .. }))
+    }
+
+    /// How many values these tokens' placeholders call for: the highest
+    /// `$N` for a numbered dialect, the number of `?`s for one that isn't.
+    ///
+    /// The *highest*, not a count, because PostgreSQL lets one value be
+    /// referenced repeatedly — `WHERE a = $1 OR b = $1` is one value, two
+    /// references. A `?` dialect has no such thing, so counting is exact
+    /// there by construction.
+    ///
+    /// # Errors
+    ///
+    /// [`PlaceholderError::Unsupported`] for a `$N` found where the
+    /// dialect spells placeholders `?`.
+    pub(crate) fn count_placeholders(
+        tokens: &[Token],
+        placeholder: PlaceholderStyle,
+    ) -> Result<usize, PlaceholderError> {
+        if placeholder.is_number() {
+            return Ok(tokens
+                .iter()
+                .filter_map(Token::placeholder_number)
+                .max()
+                .unwrap_or(0));
+        }
+        if let Some(number) = tokens.iter().find_map(Token::placeholder_number) {
+            return Err(PlaceholderError::Unsupported { number });
+        }
+        Ok(tokens
+            .iter()
+            .filter(|token| token.is_placeholder_question())
+            .count())
+    }
+
+    /// Finds every placeholder and slot in `sql`, in textual order.
+    pub(crate) fn scan(sql: &str, quoting: Quoting) -> Vec<Token> {
+        let bytes = sql.as_bytes();
+        let mut tokens = Vec::new();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\'' => i = skip_quoted(bytes, i, b'\'', quoting.backslash_escapes),
+                b'"' => i = skip_quoted(bytes, i, b'"', quoting.backslash_escapes),
+                b'`' if quoting.backtick_identifiers => i = skip_quoted(bytes, i, b'`', false),
+                b'[' if quoting.bracket_identifiers => i = skip_bracketed(bytes, i),
+                b'-' if bytes.get(i + 1) == Some(&b'-') => i = skip_line_comment(bytes, i),
+                b'#' if quoting.hash_line_comments => i = skip_line_comment(bytes, i),
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    let end = skip_block_comment(bytes, i, quoting.nested_block_comments);
+                    if let Some(captures) = SLOT_RE.captures(&sql[i..end]) {
+                        tokens.push(Token::Slot {
+                            start: i,
+                            end,
+                            name: captures[1].to_owned(),
+                            suffix: captures[2].to_owned(),
+                        });
+                    }
+                    i = end;
+                }
+                b'$' => {
+                    if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                        let mut end = i + 1;
+                        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                            end += 1;
+                        }
+                        // A number too big for `usize` can't be a placeholder
+                        // anyone meant; leave it as text rather than panicking.
+                        if let Ok(number) = sql[i + 1..end].parse() {
+                            tokens.push(Token::Placeholder(Placeholder::Number {
+                                start: i,
+                                end,
+                                number,
+                            }));
+                        }
+                        i = end;
+                        continue;
+                    }
+                    if quoting.dollar {
+                        if let Some(end) = skip_dollar_quoted(bytes, i) {
+                            i = end;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                }
+                b'?' => {
+                    tokens.push(Token::Placeholder(Placeholder::Question {
+                        start: i,
+                        end: i + 1,
+                    }));
+                    i += 1;
+                }
+                _ => {
+                    // Step by whole characters so a multibyte one is never split.
+                    // `i` is always on a char boundary: every other arm keys off an
+                    // ASCII byte, and no byte of a multibyte character is ASCII.
+                    i += sql[i..].chars().next().map_or(1, char::len_utf8);
+                }
+            }
+        }
+
+        tokens
+    }
 }
 
-fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
+impl Placeholder {
+    /// Rewrites every active `$N` in `sql` to `$(N+offset)`, so a fragment
+    /// authored with local `$1`, `$2`, ... numbering can be spliced past
+    /// placeholders that already exist ahead of it.
+    pub(crate) fn shift(sql: &str, offset: usize, quoting: Quoting) -> String {
+        if offset == 0 {
+            return sql.to_owned();
+        }
+
+        let mut out = String::with_capacity(sql.len());
+        let mut last = 0;
+
+        for token in Token::scan(sql, quoting) {
+            if let Token::Placeholder(Placeholder::Number { start, end, number }) = token {
+                out.push_str(&sql[last..start]);
+                out.push('$');
+                out.push_str(&(number + offset).to_string());
+                last = end;
+            }
+        }
+        out.push_str(&sql[last..]);
+
+        out
+    }
+
+    /// The highest `$N` in `sql`, or 0 if it has none — the offset a
+    /// fragment spliced after it must be shifted by.
+    ///
+    /// The *highest*, not the count: a value referenced twice is still one
+    /// value, and numbering that skips is numbering the caller got wrong,
+    /// which [`QueryComposer::compose`](crate::QueryComposer::compose)
+    /// reports rather than silently absorbing.
+    pub(crate) fn max_number(sql: &str, quoting: Quoting) -> usize {
+        Token::scan(sql, quoting)
+            .iter()
+            .filter_map(Token::placeholder_number)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Skips a `quote`-delimited run, treating a doubled quote as an escaped
+/// one and (where the dialect allows it) a backslash as escaping the next
+/// character. An unterminated run swallows the rest of the input, same as
+/// pgxquery.
+fn skip_quoted(bytes: &[u8], start: usize, quote: u8, backslash_escapes: bool) -> usize {
     let mut i = start + 1;
     while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            if bytes.get(i + 1) == Some(&b'\'') {
+        let byte = bytes[i];
+        if backslash_escapes && byte == b'\\' {
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        if byte == quote {
+            if bytes.get(i + 1) == Some(&quote) {
                 i += 2;
                 continue;
             }
@@ -89,14 +288,11 @@ fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
     i
 }
 
-fn skip_double_quoted(bytes: &[u8], start: usize) -> usize {
+/// Skips SQLite's `[identifier]`, which has no escape: the first `]` ends it.
+fn skip_bracketed(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 1;
     while i < bytes.len() {
-        if bytes[i] == b'"' {
-            if bytes.get(i + 1) == Some(&b'"') {
-                i += 2;
-                continue;
-            }
+        if bytes[i] == b']' {
             return i + 1;
         }
         i += 1;
@@ -105,7 +301,7 @@ fn skip_double_quoted(bytes: &[u8], start: usize) -> usize {
 }
 
 fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 2;
+    let mut i = start;
     while i < bytes.len() && bytes[i] != b'\n' {
         i += 1;
     }
@@ -115,12 +311,13 @@ fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
     i
 }
 
-/// Handles `/* ... */` with Postgres's nesting semantics.
-fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+/// Handles `/* ... */`, with PostgreSQL's nesting semantics when `nested`
+/// — MySQL and SQLite close at the first `*/` however many were opened.
+fn skip_block_comment(bytes: &[u8], start: usize, nested: bool) -> usize {
     let mut i = start + 2;
-    let mut depth = 1;
+    let mut depth = 1usize;
     while i < bytes.len() && depth > 0 {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+        if nested && i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
             depth += 1;
             i += 2;
         } else if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
@@ -172,17 +369,33 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::shift_placeholders;
+    use super::{Placeholder, Token};
+    use crate::{QueryDialect, Quoting};
+
+    fn quoting<DB: QueryDialect>() -> Quoting {
+        DB::syntax().quoting
+    }
+
+    fn shift(sql: &str, offset: usize) -> String {
+        Placeholder::shift(sql, offset, quoting::<sqlx::Postgres>())
+    }
+
+    fn markers(sql: &str, quoting: Quoting) -> usize {
+        Token::scan(sql, quoting)
+            .iter()
+            .filter(|token| token.is_placeholder_question())
+            .count()
+    }
 
     #[test]
     fn zero_offset_is_a_no_op() {
-        assert_eq!(shift_placeholders("x = $1", 0), "x = $1");
+        assert_eq!(shift("x = $1", 0), "x = $1");
     }
 
     #[test]
     fn shifts_simple_placeholders() {
         assert_eq!(
-            shift_placeholders("name = $1 AND score > $2", 1),
+            shift("name = $1 AND score > $2", 1),
             "name = $2 AND score > $3"
         );
     }
@@ -190,7 +403,7 @@ mod tests {
     #[test]
     fn shifts_placeholders_in_order_by_fragment() {
         assert_eq!(
-            shift_placeholders("CASE WHEN role = $1 THEN 0 ELSE 1 END", 4),
+            shift("CASE WHEN role = $1 THEN 0 ELSE 1 END", 4),
             "CASE WHEN role = $5 THEN 0 ELSE 1 END"
         );
     }
@@ -201,20 +414,20 @@ mod tests {
             "name = $1 AND note = 'literal $1 stays' AND body = $body$raw $1 stays$body$ AND score > $2";
         let expected =
             "name = $2 AND note = 'literal $1 stays' AND body = $body$raw $1 stays$body$ AND score > $3";
-        assert_eq!(shift_placeholders(input, 1), expected);
+        assert_eq!(shift(input, 1), expected);
     }
 
     #[test]
     fn shifts_multi_digit_placeholders() {
         assert_eq!(
-            shift_placeholders("x = $1 AND y = $10 AND z = $12", 1),
+            shift("x = $1 AND y = $10 AND z = $12", 1),
             "x = $2 AND y = $11 AND z = $13"
         );
     }
 
     #[test]
     fn leaves_quoted_identifier_bodies_untouched() {
-        assert_eq!(shift_placeholders(r#""col$1" = $1"#, 1), r#""col$1" = $2"#);
+        assert_eq!(shift(r#""col$1" = $1"#, 1), r#""col$1" = $2"#);
     }
 
     #[test]
@@ -223,20 +436,20 @@ mod tests {
             "x = $1 -- ignore $1 here\n   AND y = $2 /* and /* nested $1 */ stays */ AND z = $3";
         let expected =
             "x = $2 -- ignore $1 here\n   AND y = $3 /* and /* nested $1 */ stays */ AND z = $4";
-        assert_eq!(shift_placeholders(input, 1), expected);
+        assert_eq!(shift(input, 1), expected);
     }
 
     #[test]
     fn treats_doubled_quote_as_escape_and_leaves_lone_dollar_alone() {
         let input = r"note = 'it''s $1 inside' AND price > $1 AND tag <> 'A' || '$' || 'B'";
         let expected = r"note = 'it''s $1 inside' AND price > $2 AND tag <> 'A' || '$' || 'B'";
-        assert_eq!(shift_placeholders(input, 1), expected);
+        assert_eq!(shift(input, 1), expected);
     }
 
     #[test]
     fn leaves_empty_tag_dollar_quoted_body_untouched() {
         assert_eq!(
-            shift_placeholders("raw = $$keep $1 raw$$ AND id = $1", 1),
+            shift("raw = $$keep $1 raw$$ AND id = $1", 1),
             "raw = $$keep $1 raw$$ AND id = $2"
         );
     }
@@ -244,7 +457,7 @@ mod tests {
     #[test]
     fn shifts_before_an_unterminated_string_literal() {
         assert_eq!(
-            shift_placeholders("x = $1 AND note = 'unterminated $1", 1),
+            shift("x = $1 AND note = 'unterminated $1", 1),
             "x = $2 AND note = 'unterminated $1"
         );
     }
@@ -252,7 +465,7 @@ mod tests {
     #[test]
     fn shifts_before_an_unterminated_dollar_quoted_body() {
         assert_eq!(
-            shift_placeholders("x = $1 AND raw = $tag$body $1 still raw", 1),
+            shift("x = $1 AND raw = $tag$body $1 still raw", 1),
             "x = $2 AND raw = $tag$body $1 still raw"
         );
     }
@@ -260,7 +473,7 @@ mod tests {
     #[test]
     fn passes_lone_dollar_and_unclosed_tag_opener_through() {
         assert_eq!(
-            shift_placeholders("x = $1 AND amount > $ AND label = $abc", 1),
+            shift("x = $1 AND amount > $ AND label = $abc", 1),
             "x = $2 AND amount > $ AND label = $abc"
         );
     }
@@ -268,8 +481,70 @@ mod tests {
     #[test]
     fn treats_doubled_double_quote_as_escape_in_identifiers() {
         assert_eq!(
-            shift_placeholders(r#""weird""col $1" = $1 AND "open $1"#, 1),
+            shift(r#""weird""col $1" = $1 AND "open $1"#, 1),
             r#""weird""col $1" = $2 AND "open $1"#
+        );
+    }
+
+    #[test]
+    fn max_placeholder_reads_the_highest_number_not_the_count() {
+        // The cursor's shape: two values, three references.
+        assert_eq!(
+            Placeholder::max_number(
+                "(rank < $1) OR (rank = $1 AND id > $2)",
+                quoting::<sqlx::Postgres>()
+            ),
+            2
+        );
+        assert_eq!(
+            Placeholder::max_number("role = 'admin'", quoting::<sqlx::Postgres>()),
+            0
+        );
+    }
+
+    #[test]
+    fn markers_are_found_outside_literals_and_comments() {
+        let sql = "tenant = ? AND note = 'why? really' -- ? here\n AND id = ?";
+        assert_eq!(markers(sql, quoting::<sqlx::Sqlite>()), 2);
+    }
+
+    #[test]
+    fn mysql_skips_backtick_identifiers_hash_comments_and_backslash_escapes() {
+        let sql = "`weird?col` = ? AND note = 'it\\'s ? inside' # trailing ?\n AND x = ?";
+        assert_eq!(markers(sql, quoting::<sqlx::MySql>()), 2);
+    }
+
+    #[test]
+    fn sqlite_skips_bracket_identifiers_and_does_not_nest_block_comments() {
+        assert_eq!(markers("[weird?col] = ?", quoting::<sqlx::Sqlite>()), 1);
+        // Non-nesting: the first `*/` closes, so the trailing `?` is live.
+        assert_eq!(markers("/* a /* b */ x = ?", quoting::<sqlx::Sqlite>()), 1);
+    }
+
+    #[test]
+    fn a_slot_inside_a_string_literal_is_not_a_slot() {
+        let sql = "note = '/* query.where AND */' AND /* query.where AND */ TRUE";
+        let slots = Token::scan(sql, quoting::<sqlx::Postgres>())
+            .into_iter()
+            .filter(|token| matches!(token, Token::Slot { .. }))
+            .count();
+        assert_eq!(slots, 1);
+    }
+
+    #[test]
+    fn a_slot_carries_its_name_and_suffix() {
+        let tokens = Token::scan("/* query.where AND */", quoting::<sqlx::Postgres>());
+        assert_eq!(
+            tokens,
+            vec![Token::Slot {
+                start: 0,
+                end: 21,
+                // The leading space is deliberate: the suffix is
+                // re-emitted verbatim after the fragment, so it carries
+                // its own separation from it.
+                name: "where".to_owned(),
+                suffix: " AND".to_owned(),
+            }]
         );
     }
 }
