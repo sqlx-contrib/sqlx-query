@@ -224,6 +224,9 @@ impl QueryLexer {
     /// How many values these tokens' placeholders call for: the highest
     /// `$N` for a numbered dialect, the number of `?`s for one that isn't.
     ///
+    /// Not a count of placeholders — `WHERE a = $1 OR b = $1` has two of
+    /// those and needs one value.
+    ///
     /// The *highest*, not a count, because PostgreSQL lets one value be
     /// referenced repeatedly — `WHERE a = $1 OR b = $1` is one value, two
     /// references. A `?` dialect has no such thing, so counting is exact
@@ -233,7 +236,7 @@ impl QueryLexer {
     ///
     /// [`PlaceholderError::Unsupported`] for a `$N` found where the
     /// dialect spells placeholders `?`.
-    pub(crate) fn count_placeholders(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
+    pub(crate) fn required_values(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
         if self.syntax.placeholder.is_number() {
             return Ok(tokens
                 .iter()
@@ -406,7 +409,7 @@ mod tests {
         lexer::<sqlx::Postgres>().shift_placeholder_numbers(sql, offset)
     }
 
-    fn markers<DB: QueryDialect>(sql: &str) -> usize {
+    fn questions<DB: QueryDialect>(sql: &str) -> usize {
         lexer::<DB>()
             .scan(sql)
             .iter()
@@ -528,22 +531,22 @@ mod tests {
     }
 
     #[test]
-    fn markers_are_found_outside_literals_and_comments() {
+    fn questions_are_found_outside_literals_and_comments() {
         let sql = "tenant = ? AND note = 'why? really' -- ? here\n AND id = ?";
-        assert_eq!(markers::<sqlx::Sqlite>(sql), 2);
+        assert_eq!(questions::<sqlx::Sqlite>(sql), 2);
     }
 
     #[test]
     fn mysql_skips_backtick_identifiers_hash_comments_and_backslash_escapes() {
         let sql = "`weird?col` = ? AND note = 'it\\'s ? inside' # trailing ?\n AND x = ?";
-        assert_eq!(markers::<sqlx::MySql>(sql), 2);
+        assert_eq!(questions::<sqlx::MySql>(sql), 2);
     }
 
     #[test]
     fn sqlite_skips_bracket_identifiers_and_does_not_nest_block_comments() {
-        assert_eq!(markers::<sqlx::Sqlite>("[weird?col] = ?"), 1);
+        assert_eq!(questions::<sqlx::Sqlite>("[weird?col] = ?"), 1);
         // Non-nesting: the first `*/` closes, so the trailing `?` is live.
-        assert_eq!(markers::<sqlx::Sqlite>("/* a /* b */ x = ?"), 1);
+        assert_eq!(questions::<sqlx::Sqlite>("/* a /* b */ x = ?"), 1);
     }
 
     #[test]

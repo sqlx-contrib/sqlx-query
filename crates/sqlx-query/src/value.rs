@@ -23,6 +23,17 @@ pub enum Value {
     Float(f64),
     String(String),
     Timestamp(DateTime<Utc>),
+    /// A `BLOB`/`bytea`, which completes SQLite's storage classes:
+    /// null, integer, real, text, blob.
+    ///
+    /// On the other dialects it's one binary type among many. `Value` is
+    /// closed and can't be extended from outside this crate, so a
+    /// parameter it can't hold — a `Uuid`, a `serde_json::Value`, a
+    /// decimal — has to be converted by the caller. On PostgreSQL that
+    /// only works where the server accepts the converted form: bytes
+    /// bound to a `uuid` column are rejected, bytes bound to a `bytea`
+    /// are not.
+    Bytes(Vec<u8>),
 }
 
 impl From<bool> for Value {
@@ -68,6 +79,18 @@ impl From<String> for Value {
 impl From<&str> for Value {
     fn from(value: &str) -> Self {
         Value::String(value.to_owned())
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        Value::Bytes(value)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(value: &[u8]) -> Self {
+        Value::Bytes(value.to_vec())
     }
 }
 
@@ -117,7 +140,8 @@ pub(crate) trait RowExtension: Row {
         f32: Decode<'r, Self::Database> + Type<Self::Database>,
         f64: Decode<'r, Self::Database> + Type<Self::Database>,
         String: Decode<'r, Self::Database> + Type<Self::Database>,
-        DateTime<Utc>: Decode<'r, Self::Database> + Type<Self::Database>;
+        DateTime<Utc>: Decode<'r, Self::Database> + Type<Self::Database>,
+        Vec<u8>: Decode<'r, Self::Database> + Type<Self::Database>;
 }
 
 impl<R: Row> RowExtension for R {
@@ -132,6 +156,7 @@ impl<R: Row> RowExtension for R {
         f64: Decode<'r, Self::Database> + Type<Self::Database>,
         String: Decode<'r, Self::Database> + Type<Self::Database>,
         DateTime<Utc>: Decode<'r, Self::Database> + Type<Self::Database>,
+        Vec<u8>: Decode<'r, Self::Database> + Type<Self::Database>,
     {
         let label = column.rsplit('.').next().unwrap_or(column);
         let ordinal = self
@@ -172,6 +197,11 @@ impl<R: Row> RowExtension for R {
         }
         if let Ok(v) = self.try_get::<String, _>(ordinal) {
             return Ok(Value::String(v));
+        }
+        // Last: on some drivers a text column will also decode as bytes,
+        // so every textual candidate has to have been tried first.
+        if let Ok(v) = self.try_get::<Vec<u8>, _>(ordinal) {
+            return Ok(Value::Bytes(v));
         }
 
         Err(CursorError::RowValueUndecodable(label.to_owned()))

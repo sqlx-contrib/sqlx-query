@@ -19,8 +19,8 @@ pub enum QueryComposerError {
     /// that reaches for `$3` with two values bound would otherwise splice
     /// its fragment on top of a number already in use, and bind the wrong
     /// value to it rather than failing.
-    #[error("query references {placeholders} placeholder(s), but {values} value(s) are bound")]
-    BindMismatch { placeholders: usize, values: usize },
+    #[error("query requires {required} value(s), but {bound} are bound")]
+    BindMismatch { required: usize, bound: usize },
 
     /// A clause was set, but the base query has no slot to splice it
     /// into.
@@ -60,14 +60,6 @@ impl QueryStatement {
     pub fn values(&self) -> &[Value] {
         &self.values
     }
-
-    /// Consumes this statement into its two pieces — used internally by
-    /// [`QueryComposer::build`], and a convenient way to destructure in
-    /// tests: `let (sql, values) = composer.compose()?.into_parts();`.
-    #[must_use]
-    pub fn into_parts(self) -> (String, Vec<Value>) {
-        (self.sql, self.values)
-    }
 }
 
 /// Splices a [`WhereClause`] and an [`OrderByClause`] into
@@ -104,9 +96,9 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     }
 
     /// A value for one of the base query's own placeholders, filled in
-    /// declaration order: the first `bind` call is the base query's `$1`
+    /// declaration order: the first `bind_value` call is the base query's `$1`
     /// (or first `?`), the second is `$2`, and so on.
-    pub fn bind(&mut self, value: impl Into<Value>) -> &mut Self {
+    pub fn bind_value(&mut self, value: impl Into<Value>) -> &mut Self {
         self.values.push(value.into());
         self
     }
@@ -161,7 +153,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// A `?` can't be written down before its position in the finished
     /// statement is known — and a fragment's position isn't known until
     /// it has been spliced, which is *after* it was built. So for a
-    /// `?`-style dialect the base query's markers are numbered first
+    /// `?`-style dialect the base query's `?` placeholders are numbered first
     /// (`?` → `$1`, `$2`, ... in textual order), everything is composed as
     /// if it were PostgreSQL, and the numbering is converted back to `?`
     /// in one final pass. That last pass is what makes the value list
@@ -172,7 +164,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// number used twice (a [`Cursor`]'s tuple comparison reuses each
     /// boundary value) becomes two `?`s and two copies of the value —
     /// which is the thing a numbered placeholder can express and a bare
-    /// marker can't.
+    /// bare `?` can't.
     ///
     /// For PostgreSQL both extra passes are skipped and the output is
     /// what it always was.
@@ -197,21 +189,21 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         let lexer = QueryLexer::new(syntax);
         let tokens = lexer.scan(self.sql);
 
-        let placeholders = lexer.count_placeholders(&tokens)?;
-        if placeholders != self.values.len() {
+        let required = lexer.required_values(&tokens)?;
+        if required != self.values.len() {
             return Err(QueryComposerError::BindMismatch {
-                placeholders,
-                values: self.values.len(),
+                required,
+                bound: self.values.len(),
             }
             .into());
         }
 
         let order_by_sql = self.compose_order_by()?;
-        let (where_by_sql, where_by_values) = self.compose_where(placeholders);
+        let (where_by_sql, where_by_values) = self.compose_where(required);
 
         let mut sql = String::with_capacity(self.sql.len());
         let mut last = 0;
-        let mut marker = 0;
+        let mut question = 0;
         let mut spliced_where = false;
         let mut spliced_order_by = false;
 
@@ -246,10 +238,10 @@ impl<DB: QueryDialect> QueryComposer<DB> {
                 Token::Placeholder(Placeholder::Question { start, end })
                     if !syntax.placeholder.is_number() =>
                 {
-                    marker += 1;
+                    question += 1;
                     sql.push_str(&self.sql[last..start]);
                     sql.push('$');
-                    sql.push_str(&marker.to_string());
+                    sql.push_str(&question.to_string());
                     last = end;
                 }
                 Token::Placeholder(_) => {}
@@ -278,11 +270,11 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         // was verified before the fragments were shifted past it, and this
         // catches a hand-written fragment whose own numbering doesn't
         // match the values it carries.
-        let placeholders = lexer.max_placeholder_number(&sql);
-        if placeholders != values.len() {
+        let required = lexer.max_placeholder_number(&sql);
+        if required != values.len() {
             return Err(QueryComposerError::BindMismatch {
-                placeholders,
-                values: values.len(),
+                required,
+                bound: values.len(),
             }
             .into());
         }
@@ -290,14 +282,14 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         if syntax.placeholder.is_number() {
             return Ok(QueryStatement { sql, values });
         }
-        Self::render_markers(&sql, &values, &lexer)
+        Self::render_question_placeholders(&sql, &values, &lexer)
     }
 
-    /// Converts a fully numbered statement back to the bare `?` markers a
-    /// non-positional driver binds by position, emitting each placeholder's
-    /// value as it's encountered so the value list ends up in textual
-    /// order.
-    fn render_markers(
+    /// Converts a fully numbered statement back to the bare `?`
+    /// placeholders a non-positional driver binds by position, emitting
+    /// each one's value as it's encountered so the value list ends up in
+    /// textual order.
+    fn render_question_placeholders(
         sql: &str,
         values: &[Value],
         lexer: &QueryLexer,
@@ -312,8 +304,8 @@ impl<DB: QueryDialect> QueryComposer<DB> {
                     .checked_sub(1)
                     .and_then(|index| values.get(index))
                     .ok_or(QueryComposerError::BindMismatch {
-                        placeholders: number,
-                        values: values.len(),
+                        required: number,
+                        bound: values.len(),
                     })?;
                 out.push_str(&sql[last..start]);
                 out.push('?');
@@ -389,6 +381,7 @@ where
     f64: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
     String: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
     chrono::DateTime<chrono::Utc>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
+    Vec<u8>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
     Option<String>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
 {
     /// Composes the query (see [`compose`](Self::compose)) and binds it
@@ -405,7 +398,7 @@ where
     /// Whatever [`compose`](Self::compose) returns — this only binds what
     /// that produced.
     pub fn build(&self) -> Result<sqlx::query::Query<'static, DB, DB::Arguments>, Error> {
-        let (sql, values) = self.compose()?.into_parts();
+        let QueryStatement { sql, values } = self.compose()?;
 
         let mut query = sqlx::query::<DB>(sqlx::AssertSqlSafe(sql));
         for value in values {
@@ -416,6 +409,7 @@ where
                 Value::Float(v) => query.bind(v),
                 Value::String(v) => query.bind(v),
                 Value::Timestamp(v) => query.bind(v),
+                Value::Bytes(v) => query.bind(v),
             };
         }
         Ok(query)

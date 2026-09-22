@@ -18,7 +18,7 @@ pub trait QueryDialect: sqlx::Database {
 /// The two parts are separate because they answer different questions.
 /// [`placeholder`](Self::placeholder) decides what the composer *produces*
 /// — whether the finished statement is numbered or converted back to bare
-/// markers. [`quoting`](Self::quoting) decides what the scanner *skips*,
+/// `?`. [`quoting`](Self::quoting) decides what the scanner *skips*,
 /// and is all the scanner needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuerySyntax {

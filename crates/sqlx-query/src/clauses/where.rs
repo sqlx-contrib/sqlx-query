@@ -25,7 +25,7 @@ pub struct WhereClause {
 impl WhereClause {
     /// A `WhereClause` with no bind values — most hand-written filters
     /// (e.g. `"deleted_at IS NULL"`) don't reference any. Attach values
-    /// with [`bind`](Self::bind) when the SQL has placeholders.
+    /// with [`bind_value`](Self::bind_value) when the SQL has placeholders.
     ///
     /// `sql` is stored as an `Arc<str>`-backed [`SqlStr`] up front, so
     /// every later [`sql()`](Self::sql) call is just a refcount bump, not
@@ -45,9 +45,9 @@ impl WhereClause {
     }
 
     /// A value for one of this clause's own placeholders, filled in
-    /// declaration order — mirrors [`QueryComposer::bind`](crate::QueryComposer::bind).
+    /// declaration order — mirrors [`QueryComposer::bind_value`](crate::QueryComposer::bind_value).
     #[must_use]
-    pub fn bind(mut self, value: impl Into<Value>) -> Self {
+    pub fn bind_value(mut self, value: impl Into<Value>) -> Self {
         self.values.push(value.into());
         self
     }
@@ -93,7 +93,7 @@ impl WhereClause {
         self.values
             .into_iter()
             .chain(other.values)
-            .fold(WhereClause::new(sql), WhereClause::bind)
+            .fold(WhereClause::new(sql), WhereClause::bind_value)
     }
 
     /// Shifts this clause's placeholders past `offset` placeholders that
@@ -113,7 +113,7 @@ impl WhereClause {
         let sql = QueryLexer::standard().shift_placeholder_numbers(self.sql().as_str(), offset);
         self.values
             .into_iter()
-            .fold(WhereClause::new(sql), WhereClause::bind)
+            .fold(WhereClause::new(sql), WhereClause::bind_value)
     }
 }
 
@@ -123,10 +123,10 @@ mod tests {
 
     #[test]
     fn and_shifts_the_second_clauses_placeholders_past_the_first() {
-        let a = WhereClause::new("status = $1").bind("ACTIVE");
+        let a = WhereClause::new("status = $1").bind_value("ACTIVE");
         let b = WhereClause::new("rank > $1 AND id < $2")
-            .bind(42i64)
-            .bind(7i64);
+            .bind_value(42i64)
+            .bind_value(7i64);
 
         let combined = a.and(b);
 
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn shift_moves_placeholders_past_the_offset() {
-        let where_by = WhereClause::new("name = $1").bind("alice");
+        let where_by = WhereClause::new("name = $1").bind_value("alice");
         let shifted = where_by.shift(2);
 
         assert_eq!(shifted.sql().as_str(), "name = $3");
