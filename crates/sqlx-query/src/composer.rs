@@ -19,8 +19,8 @@ pub enum QueryComposerError {
     /// that reaches for `$3` with two values bound would otherwise splice
     /// its fragment on top of a number already in use, and bind the wrong
     /// value to it rather than failing.
-    #[error("query requires {required} value(s), but {bound} are bound")]
-    BindMismatch { required: usize, bound: usize },
+    #[error("query references {placeholders} placeholder(s), but {values} value(s) are bound")]
+    BindMismatch { placeholders: usize, values: usize },
 
     /// A clause was set, but the base query has no slot to splice it
     /// into.
@@ -189,17 +189,17 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         let lexer = QueryLexer::new(syntax);
         let tokens = lexer.scan(self.sql);
 
-        let required = lexer.required_values(&tokens)?;
-        if required != self.values.len() {
+        let placeholders = lexer.count_placeholders(&tokens)?;
+        if placeholders != self.values.len() {
             return Err(QueryComposerError::BindMismatch {
-                required,
-                bound: self.values.len(),
+                placeholders,
+                values: self.values.len(),
             }
             .into());
         }
 
         let order_by_sql = self.compose_order_by()?;
-        let (where_by_sql, where_by_values) = self.compose_where(required);
+        let (where_by_sql, where_by_values) = self.compose_where(placeholders);
 
         let mut sql = String::with_capacity(self.sql.len());
         let mut last = 0;
@@ -270,11 +270,11 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         // was verified before the fragments were shifted past it, and this
         // catches a hand-written fragment whose own numbering doesn't
         // match the values it carries.
-        let required = lexer.max_placeholder_number(&sql);
-        if required != values.len() {
+        let placeholders = lexer.max_placeholder_number(&sql);
+        if placeholders != values.len() {
             return Err(QueryComposerError::BindMismatch {
-                required,
-                bound: values.len(),
+                placeholders,
+                values: values.len(),
             }
             .into());
         }
@@ -304,8 +304,8 @@ impl<DB: QueryDialect> QueryComposer<DB> {
                     .checked_sub(1)
                     .and_then(|index| values.get(index))
                     .ok_or(QueryComposerError::BindMismatch {
-                        required: number,
-                        bound: values.len(),
+                        placeholders: number,
+                        values: values.len(),
                     })?;
                 out.push_str(&sql[last..start]);
                 out.push('?');

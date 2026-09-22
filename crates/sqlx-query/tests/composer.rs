@@ -535,8 +535,8 @@ fn a_base_query_with_more_placeholders_than_values_is_rejected() {
     assert!(matches!(
         query.compose(),
         Err(Error::Composer(QueryComposerError::BindMismatch {
-            required: 2,
-            bound: 1
+            placeholders: 2,
+            values: 1
         }))
     ));
 }

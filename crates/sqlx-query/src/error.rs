@@ -1,7 +1,7 @@
 use crate::lexer::PlaceholderError;
-use crate::{CursorError, OrderByClauseError, QueryComposerError};
+use crate::{CursorError, QueryComposerError};
 
-/// Everything this crate can fail at, one variant per domain that owns a
+/// Everything composing can fail at, one variant per domain that owns a
 /// failure of its own.
 ///
 /// Each variant forwards to the error the failing type defines, rather
@@ -10,15 +10,17 @@ use crate::{CursorError, OrderByClauseError, QueryComposerError};
 /// whether it came out of [`Cursor::parse`](crate::Cursor::parse) or out
 /// of [`QueryComposer::compose`](crate::QueryComposer::compose).
 ///
-/// Every variant is `#[from]`, so a layer above can `?` a parse, a
-/// resolve and a compose into this one type. Not all of them can come out
-/// of `compose` — [`OrderBy`](Self::OrderBy) is raised while parsing,
-/// before a composer exists — which is what makes this the crate's
-/// aggregate rather than the composer's error.
+/// Every variant is `#[from]`, and every one of them can actually come out
+/// of [`compose`](crate::QueryComposer::compose) — a caller matching
+/// exhaustively is never handling a case this crate can't produce.
+/// [`OrderByClauseError`](crate::OrderByClauseError) is deliberately
+/// absent: parsing and resolving an `order_by` happen before a composer
+/// exists, so a caller who wants one type for both stages builds that
+/// aggregate themselves.
 ///
 /// Ordered by descending scope: the operation the crate exists to perform,
-/// then the two clause domains that feed it, then the lexical detail
-/// underneath them all.
+/// then the clause domain that feeds it, then the lexical detail
+/// underneath them both.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Splicing failed: the query and the values, or the query and the
@@ -29,10 +31,6 @@ pub enum Error {
     /// A cursor couldn't be built, decoded, or applied.
     #[error(transparent)]
     Cursor(#[from] CursorError),
-
-    /// An `order_by` couldn't be parsed or resolved.
-    #[error(transparent)]
-    OrderBy(#[from] OrderByClauseError),
 
     /// A placeholder spelled in a way the dialect doesn't use.
     #[error(transparent)]

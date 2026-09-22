@@ -224,8 +224,10 @@ impl QueryLexer {
     /// How many values these tokens' placeholders call for: the highest
     /// `$N` for a numbered dialect, the number of `?`s for one that isn't.
     ///
-    /// Not a count of placeholders — `WHERE a = $1 OR b = $1` has two of
-    /// those and needs one value.
+    /// Counting and taking the highest coincide on a bare dialect, where
+    /// every `?` is its own value position, and don't on a numbered one:
+    /// `WHERE a = $1 OR b = $1` has two placeholders and needs one value.
+    /// The highest is what the caller needs, so that's what's returned.
     ///
     /// The *highest*, not a count, because PostgreSQL lets one value be
     /// referenced repeatedly — `WHERE a = $1 OR b = $1` is one value, two
@@ -236,7 +238,7 @@ impl QueryLexer {
     ///
     /// [`PlaceholderError::Unsupported`] for a `$N` found where the
     /// dialect spells placeholders `?`.
-    pub(crate) fn required_values(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
+    pub(crate) fn count_placeholders(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
         if self.syntax.placeholder.is_number() {
             return Ok(tokens
                 .iter()
