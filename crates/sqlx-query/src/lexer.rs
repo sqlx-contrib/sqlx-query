@@ -149,35 +149,6 @@ impl QueryLexer {
         QueryLexer::new(QuerySyntax::STANDARD)
     }
 
-    /// How many values these tokens' placeholders call for: the highest
-    /// `$N` for a numbered dialect, the number of `?`s for one that isn't.
-    ///
-    /// The *highest*, not a count, because PostgreSQL lets one value be
-    /// referenced repeatedly — `WHERE a = $1 OR b = $1` is one value, two
-    /// references. A `?` dialect has no such thing, so counting is exact
-    /// there by construction.
-    ///
-    /// # Errors
-    ///
-    /// [`PlaceholderError::Unsupported`] for a `$N` found where the
-    /// dialect spells placeholders `?`.
-    pub(crate) fn count_placeholders(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
-        if self.syntax.placeholder.is_number() {
-            return Ok(tokens
-                .iter()
-                .filter_map(Token::placeholder_number)
-                .max()
-                .unwrap_or(0));
-        }
-        if let Some(number) = tokens.iter().find_map(Token::placeholder_number) {
-            return Err(PlaceholderError::Unsupported { number });
-        }
-        Ok(tokens
-            .iter()
-            .filter(|token| token.is_placeholder_question())
-            .count())
-    }
-
     /// Finds every placeholder and slot in `sql`, in textual order.
     pub(crate) fn scan(&self, sql: &str) -> Vec<Token> {
         let quoting = self.syntax.quoting;
@@ -250,6 +221,50 @@ impl QueryLexer {
         tokens
     }
 
+    /// How many values these tokens' placeholders call for: the highest
+    /// `$N` for a numbered dialect, the number of `?`s for one that isn't.
+    ///
+    /// The *highest*, not a count, because PostgreSQL lets one value be
+    /// referenced repeatedly — `WHERE a = $1 OR b = $1` is one value, two
+    /// references. A `?` dialect has no such thing, so counting is exact
+    /// there by construction.
+    ///
+    /// # Errors
+    ///
+    /// [`PlaceholderError::Unsupported`] for a `$N` found where the
+    /// dialect spells placeholders `?`.
+    pub(crate) fn count_placeholders(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
+        if self.syntax.placeholder.is_number() {
+            return Ok(tokens
+                .iter()
+                .filter_map(Token::placeholder_number)
+                .max()
+                .unwrap_or(0));
+        }
+        if let Some(number) = tokens.iter().find_map(Token::placeholder_number) {
+            return Err(PlaceholderError::Unsupported { number });
+        }
+        Ok(tokens
+            .iter()
+            .filter(|token| token.is_placeholder_question())
+            .count())
+    }
+
+    /// The highest `$N` in `sql`, or 0 if it has none — the offset a
+    /// fragment spliced after it must be shifted by.
+    ///
+    /// The *highest*, not the count: a value referenced twice is still one
+    /// value, and numbering that skips is numbering the caller got wrong,
+    /// which [`QueryComposer::compose`](crate::QueryComposer::compose)
+    /// reports rather than silently absorbing.
+    pub(crate) fn max_placeholder_number(&self, sql: &str) -> usize {
+        self.scan(sql)
+            .iter()
+            .filter_map(Token::placeholder_number)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Rewrites every active `$N` in `sql` to `$(N+offset)`, so a fragment
     /// authored with local `$1`, `$2`, ... numbering can be spliced past
     /// placeholders that already exist ahead of it.
@@ -272,21 +287,6 @@ impl QueryLexer {
         out.push_str(&sql[last..]);
 
         out
-    }
-
-    /// The highest `$N` in `sql`, or 0 if it has none — the offset a
-    /// fragment spliced after it must be shifted by.
-    ///
-    /// The *highest*, not the count: a value referenced twice is still one
-    /// value, and numbering that skips is numbering the caller got wrong,
-    /// which [`QueryComposer::compose`](crate::QueryComposer::compose)
-    /// reports rather than silently absorbing.
-    pub(crate) fn max_placeholder_number(&self, sql: &str) -> usize {
-        self.scan(sql)
-            .iter()
-            .filter_map(Token::placeholder_number)
-            .max()
-            .unwrap_or(0)
     }
 }
 
