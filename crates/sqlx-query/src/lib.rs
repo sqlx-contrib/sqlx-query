@@ -1,7 +1,7 @@
 //! Splices a [`WhereClause`] and an [`OrderByClause`] into
-//! `/* query.<name> */` sentinel comments in a base SQL query the caller
+//! `/* query.<name> */` slots in a base SQL query the caller
 //! already wrote, instead of building a `SELECT` from scratch — a port of
-//! `pgx-contrib/pgxquery`'s sentinel-comment splicing technique to
+//! `pgx-contrib/pgxquery`'s slot-comment splicing technique to
 //! Rust/sqlx.
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ pub use clauses::{
     Cursor, CursorError, OrderByClause, OrderByClauseError, OrderDirection, WhereClause,
 };
 pub use composer::{Error, QueryComposer, QueryStatement};
-pub use dialect::QueryDialect;
+pub use dialect::{PlaceholderStyle, QueryDialect, QuerySyntax, Quoting};
 pub use value::Value;
 
 /// Renames the field names a fragment was parsed with to real column names,

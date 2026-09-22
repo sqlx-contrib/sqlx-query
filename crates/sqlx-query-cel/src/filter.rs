@@ -106,7 +106,7 @@ impl FilterClause {
             .expect("parse() already validated this tree renders");
         values
             .into_iter()
-            .fold(WhereClause::new(sql), WhereClause::bind)
+            .fold(WhereClause::new(sql), WhereClause::bind_value)
     }
 
     /// Confirms `node` has a reading as a condition, without building

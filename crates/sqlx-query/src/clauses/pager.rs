@@ -159,7 +159,7 @@ impl Cursor {
     }
 
     /// Supplies all boundary values at once, one per key, in order — not
-    /// chainable per-value like [`WhereClause::bind`], since a cursor
+    /// chainable per-value like [`WhereClause::bind_value`], since a cursor
     /// position isn't meaningful with only some of its values known.
     ///
     /// # Errors
@@ -204,6 +204,7 @@ impl Cursor {
         f64: Decode<'r, R::Database> + Type<R::Database>,
         String: Decode<'r, R::Database> + Type<R::Database>,
         DateTime<Utc>: Decode<'r, R::Database> + Type<R::Database>,
+        Vec<u8>: Decode<'r, R::Database> + Type<R::Database>,
     {
         for key in &mut self.keys {
             key.value = Some(row.get_value(key.order.column())?);
@@ -258,7 +259,7 @@ impl Cursor {
         self.keys
             .iter()
             .fold(WhereClause::new(sql), |where_by, key| {
-                where_by.bind(
+                where_by.bind_value(
                     key.value
                         .clone()
                         .expect("Cursor::to_where_clause called before after() set all values"),

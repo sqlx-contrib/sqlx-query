@@ -12,6 +12,13 @@
 > crates.io, the API is unstable and unannounced, and the end-to-end tests run
 > against rendered SQL text rather than a live server. It is here so the shape
 > of the thing can be looked at and argued with.
+>
+> The bind surface is a closed set of seven scalars — null, bool, int, float,
+> string, timestamp and bytes. That covers SQLite's storage classes entirely,
+> but `Value` can't be extended from outside the crate, so a `Uuid`, a
+> `serde_json::Value` or a decimal has to be converted by the caller first —
+> which PostgreSQL will only accept where the converted form matches the
+> column.
 
 ## Why
 
@@ -31,7 +38,7 @@ SELECT id, name, rank, created_at
  LIMIT $2
 ```
 
-That query runs as-is — the sentinels are comments, so an empty filter is not a
+That query runs as-is — the slots are comments, so an empty filter is not a
 special case, it is just a comment nobody replaced. What you get over a
 builder:
 
@@ -41,7 +48,7 @@ builder:
   request text ever reaches the SQL.
 - Fields are resolved against a fail-closed allow-list, so a request can only
   filter and sort on columns you offered by name.
-- The placement of the clause is your decision, not the library's. A sentinel
+- The placement of the clause is your decision, not the library's. A slot
   inside a CTE, a sub-select, or one of two `UNION` arms goes exactly where you
   put it.
 
@@ -104,11 +111,13 @@ Three things happen on the way through:
    &str>` of allowed field → column. A miss is an error, not a pass-through.
 2. **Render.** The condition becomes SQL text plus a flat list of bind values,
    numbered locally (`$1`, `$2`, …) as if the fragment were the whole query.
-3. **Splice.** Each sentinel is replaced by its fragment, and the fragment's
-   placeholders are shifted past the base query's own binds — so a fragment
-   written with local numbering lands correctly no matter how many values the
-   base query already had. A sentinel with nothing to put in it is dropped
-   whole, trailing connective and all.
+3. **Splice.** Each slot is replaced by its fragment, and the fragment's
+   placeholders are shifted past the base query's own — so a fragment written
+   with local numbering lands correctly no matter how many values the base
+   query already had. A slot with nothing to put in it is dropped whole,
+   trailing connective and all; a clause with no slot to go into is an
+   error, not a silent drop. On a `?` dialect the whole statement is then
+   renumbered back to bare `?` (see [Dialects](#dialects)).
 
 ## Quick start
 
@@ -119,7 +128,7 @@ use sqlx::Postgres;
 use sqlx_query::{OrderByClause, QueryComposer, QueryResolver};
 use sqlx_query_cel::FilterClause;
 
-// Left where it can be read: the sentinels are comments, so this runs as-is.
+// Left where it can be read: the slots are comments, so this runs as-is.
 const LIST_USERS: &str = "
     SELECT id, name, rank, created_at
       FROM users
@@ -141,8 +150,8 @@ let order_by = OrderByClause::parse("rank desc, created asc")?.resolve(&columns)
 
 let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
 query
-    .bind(tenant_id)      // the base query's own $1
-    .bind(50i64)          // ... and $2
+    .bind_value(tenant_id)      // the base query's own $1
+    .bind_value(50i64)          // ... and $2
     .push_where(filter)   // -> /* query.where AND */
     .push_order_by(order_by); // -> /* query.order_by , */
 
@@ -153,7 +162,8 @@ let users = query.build()?.fetch_all(&pool).await?;
 without touching a connection, which is what the tests in this repo use:
 
 ```rust
-let (sql, values) = query.compose()?.into_parts();
+let statement = query.compose()?;
+let (sql, values) = (statement.sql(), statement.values());
 ```
 
 ## Filtering
@@ -186,7 +196,7 @@ OrderByClause::parse("rank desc, created asc")?.resolve(&columns)?;
 // -> rank DESC, created_at ASC
 ```
 
-An empty string parses to an empty clause, which drops its sentinel rather than
+An empty string parses to an empty clause, which drops its slot rather than
 erroring. Clauses accumulate as tie-breakers: `push_order_by` twice means "sort
 by the first, **then** by the second".
 
@@ -205,7 +215,7 @@ let page_token = cursor.encode();
 // ... and on the next request:
 let cursor = Cursor::parse(&page_token)?;
 let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
-query.bind(tenant_id).bind(50i64).with_cursor(cursor);
+query.bind_value(tenant_id).bind_value(50i64).with_cursor(cursor);
 ```
 
 The token is the cursor `postcard`-serialized, checksummed and base64'd,
@@ -218,9 +228,26 @@ fails rather than paging through a different sort than the token was cut for.
 
 `QueryComposer<DB>` is generic over a `QueryDialect`, implemented for
 `Postgres`, `MySql` and `Sqlite`. The distinction that matters is how a
-placeholder names its value: Postgres's `$N` carries a number that can be
-shifted when a fragment moves, while MySQL's and SQLite's bare `?` is positional
-by where it sits in the text. Only the numbered kind gets shifted.
+placeholder names its value: Postgres's `$N` carries a number, while MySQL's
+and SQLite's bare `?` is positional by where it sits in the text.
+
+A `?` can't be written down before its position in the finished statement is
+known — and a fragment's position isn't known until it has been spliced, which
+is after it was built. So everything is numbered on the way through: for a `?`
+dialect the base query's `?` placeholders are numbered first (`?` → `$1`, `$2`, … in
+textual order), the clauses are spliced and shifted as if it were Postgres, and
+the numbering is converted back to `?` in one final pass. That last pass emits
+one value per *reference*, so a number used twice — a cursor reuses each
+boundary value — becomes two `?`s and two copies of the value.
+
+The consequence worth knowing: on a `?` dialect the bind list comes out in
+textual order, so a slot ahead of the base query's own `?` placeholders binds ahead
+of them too. On Postgres nothing moves and the list stays in
+bind-declaration order.
+
+Each dialect is also lexed by its own rules — backtick and bracket identifiers,
+`#` comments, backslash escapes, nested block comments — so a `?` inside a
+string literal or a quoted identifier is text, not a placeholder.
 
 ## Development
 
@@ -246,7 +273,7 @@ actually binds — which is the one thing comparing strings cannot tell you.
   driver marker types
 - [`cel`](https://crates.io/crates/cel) for the filter syntax —
   `default-features = false`, because this parses CEL and never evaluates it
-- [`regex`](https://crates.io/crates/regex) to find the sentinels
+- [`regex`](https://crates.io/crates/regex) to find the slots
 - [`postcard`](https://crates.io/crates/postcard) +
   [`base64`](https://crates.io/crates/base64) for the page token
 - [`chrono`](https://crates.io/crates/chrono) for timestamp bind values

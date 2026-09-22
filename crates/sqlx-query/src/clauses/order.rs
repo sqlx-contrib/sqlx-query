@@ -71,7 +71,7 @@ pub enum OrderByClauseError {
 impl OrderByClause {
     /// Parses `"field [asc|desc], field2 [asc|desc], ..."`. An empty or
     /// all-whitespace string parses to an empty `OrderByClause`, which renders
-    /// to an empty fragment (and is dropped by the composer's sentinel,
+    /// to an empty fragment (and is dropped by the composer's slot,
     /// same as an unset `order_by`).
     ///
     /// # Errors
