@@ -9,17 +9,14 @@ use std::collections::HashMap;
 mod clauses;
 mod composer;
 mod dialect;
-mod error;
 mod lexer;
 mod value;
 
 pub use clauses::{
     Cursor, CursorError, OrderByClause, OrderByClauseError, OrderDirection, WhereClause,
 };
-pub use composer::{QueryComposer, QueryComposerError, QueryStatement};
+pub use composer::{Error, QueryComposer, QueryStatement};
 pub use dialect::{PlaceholderStyle, QueryDialect, QuerySyntax, Quoting};
-pub use error::Error;
-pub use lexer::PlaceholderError;
 pub use value::Value;
 
 /// Renames the field names a fragment was parsed with to real column names,

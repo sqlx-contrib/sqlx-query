@@ -89,20 +89,6 @@ pub(crate) enum Placeholder {
     Question { start: usize, end: usize },
 }
 
-/// A placeholder spelled in a way the target dialect doesn't use.
-#[derive(Debug, thiserror::Error)]
-pub enum PlaceholderError {
-    /// A base query for a `?`-style dialect contains a numbered `$N`.
-    ///
-    /// Rejected rather than passed through: SQLite would read `$1` as a
-    /// *named* parameter (`$` plus an identifier) and never fill it from
-    /// a positional bind, and MySQL rejects it outright. Neither failure
-    /// is one this crate should let through quietly, and no sqlc-generated
-    /// query for these dialects produces one.
-    #[error("base query uses the numbered placeholder ${number}, but this dialect's is `?`")]
-    Unsupported { number: usize },
-}
-
 impl Token {
     /// The `$N` number, for a numbered placeholder only — the shape most
     /// callers want when folding over a scan.
@@ -233,26 +219,18 @@ impl QueryLexer {
     /// referenced repeatedly — `WHERE a = $1 OR b = $1` is one value, two
     /// references. A `?` dialect has no such thing, so counting is exact
     /// there by construction.
-    ///
-    /// # Errors
-    ///
-    /// [`PlaceholderError::Unsupported`] for a `$N` found where the
-    /// dialect spells placeholders `?`.
-    pub(crate) fn count_placeholders(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
+    pub(crate) fn count_placeholders(&self, tokens: &[Token]) -> usize {
         if self.syntax.placeholder.is_number() {
-            return Ok(tokens
+            return tokens
                 .iter()
                 .filter_map(Token::placeholder_number)
                 .max()
-                .unwrap_or(0));
+                .unwrap_or(0);
         }
-        if let Some(number) = tokens.iter().find_map(Token::placeholder_number) {
-            return Err(PlaceholderError::Unsupported { number });
-        }
-        Ok(tokens
+        tokens
             .iter()
             .filter(|token| token.is_placeholder_question())
-            .count())
+            .count()
     }
 
     /// The highest `$N` in `sql`, or 0 if it has none — the offset a

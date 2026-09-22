@@ -1,13 +1,24 @@
 use std::marker::PhantomData;
 
 use crate::lexer::{Placeholder, QueryLexer, Token};
-use crate::{Cursor, CursorError, Error, OrderByClause, QueryDialect, Value, WhereClause};
+use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
 
-/// What can go wrong while splicing, as opposed to what can go wrong with
-/// a clause the composer was handed — those keep their own errors and
-/// reach the caller through [`Error`](crate::Error).
+/// What splicing can fail at.
+///
+/// Flat, and every variant is reachable from
+/// [`compose`](QueryComposer::compose) — a caller matching exhaustively is
+/// never handling a case this crate can't produce there. That's why the
+/// clause types' own errors aren't wrapped here: `compose` can raise
+/// exactly one of [`CursorError`](crate::CursorError)'s variants and none
+/// of [`OrderByClauseError`](crate::OrderByClauseError)'s, so wrapping
+/// them would hand the caller cases that can't occur. They stay what
+/// `Cursor` and `OrderByClause` raise when *they* are asked to do
+/// something.
+///
+/// Ordered by descending scope: the two faults about the whole statement,
+/// then the cursor's disagreement with it, then the lexical detail.
 #[derive(Debug, thiserror::Error)]
-pub enum QueryComposerError {
+pub enum Error {
     /// A query references more (or fewer) placeholders than the values
     /// bound for them.
     ///
@@ -33,6 +44,25 @@ pub enum QueryComposerError {
     /// [`Cursor`] ends up returning page one forever.
     #[error("a {name} clause was set, but the base query has no /* query.{name} */ slot")]
     MissingSlot { name: &'static str },
+
+    /// `order_by` was set to something that doesn't match the
+    /// `OrderByClause` the [`Cursor`] passed to
+    /// [`QueryComposer::with_cursor`] was built against — almost always
+    /// means the client changed their sort between the request that
+    /// issued the page token and the one using it.
+    #[error("order_by doesn't match the order_by the cursor was built against")]
+    CursorMismatch,
+
+    /// A base query for a `?`-style dialect contains a numbered `$N`
+    /// placeholder.
+    ///
+    /// Rejected rather than passed through: SQLite would read `$1` as a
+    /// *named* parameter (`$` plus an identifier) and never fill it from
+    /// a positional bind, and MySQL rejects it outright. Neither failure
+    /// is one this crate should let through quietly, and no sqlc-generated
+    /// query for these dialects produces one.
+    #[error("base query uses the numbered placeholder ${number}, but this dialect's is `?`")]
+    UnsupportedPlaceholder { number: usize },
 }
 
 /// [`QueryComposer::compose`]'s output: SQL text with every slot
@@ -177,25 +207,28 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     ///
     /// # Errors
     ///
-    /// [`CursorError::OrderByMismatch`] if a cursor and an explicit
-    /// `order_by` are both set and disagree;
-    /// [`PlaceholderError::Unsupported`](crate::PlaceholderError) for a
+    /// [`Error::CursorMismatch`] if a cursor and an explicit `order_by`
+    /// are both set and disagree; [`Error::UnsupportedPlaceholder`] for a
     /// `$N` in a base query whose dialect spells placeholders `?`;
-    /// [`QueryComposerError::BindMismatch`] if the placeholders and the
-    /// values don't correspond one-to-one;
-    /// [`QueryComposerError::MissingSlot`] for a clause with nowhere to go.
+    /// [`Error::BindMismatch`] if the placeholders and the values don't
+    /// correspond one-to-one; [`Error::MissingSlot`] for a clause with
+    /// nowhere to go.
     pub fn compose(&self) -> Result<QueryStatement, Error> {
         let syntax = DB::syntax();
         let lexer = QueryLexer::new(syntax);
         let tokens = lexer.scan(self.sql);
 
-        let placeholders = lexer.count_placeholders(&tokens)?;
+        if !syntax.placeholder.is_number() {
+            if let Some(number) = tokens.iter().find_map(Token::placeholder_number) {
+                return Err(Error::UnsupportedPlaceholder { number });
+            }
+        }
+        let placeholders = lexer.count_placeholders(&tokens);
         if placeholders != self.values.len() {
-            return Err(QueryComposerError::BindMismatch {
+            return Err(Error::BindMismatch {
                 placeholders,
                 values: self.values.len(),
-            }
-            .into());
+            });
         }
 
         let order_by_sql = self.compose_order_by()?;
@@ -250,7 +283,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         sql.push_str(&self.sql[last..]);
 
         if !where_by_sql.is_empty() && !spliced_where {
-            return Err(QueryComposerError::MissingSlot { name: "where" }.into());
+            return Err(Error::MissingSlot { name: "where" });
         }
         // Only for an `order_by` the caller pushed. A cursor's own
         // `order_by` reaching a query with no slot for it is the
@@ -260,7 +293,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         // boundary predicate can't have been written into the base query
         // ahead of time.
         if !order_by_sql.is_empty() && !self.order_by.is_empty() && !spliced_order_by {
-            return Err(QueryComposerError::MissingSlot { name: "order_by" }.into());
+            return Err(Error::MissingSlot { name: "order_by" });
         }
 
         let mut values = self.values.clone();
@@ -272,11 +305,10 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         // match the values it carries.
         let placeholders = lexer.max_placeholder_number(&sql);
         if placeholders != values.len() {
-            return Err(QueryComposerError::BindMismatch {
+            return Err(Error::BindMismatch {
                 placeholders,
                 values: values.len(),
-            }
-            .into());
+            });
         }
 
         if syntax.placeholder.is_number() {
@@ -303,7 +335,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
                 let value = number
                     .checked_sub(1)
                     .and_then(|index| values.get(index))
-                    .ok_or(QueryComposerError::BindMismatch {
+                    .ok_or(Error::BindMismatch {
                         placeholders: number,
                         values: values.len(),
                     })?;
@@ -364,7 +396,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 
         if let (Some(cursor), Some(order_by)) = (&self.cursor, &order_by) {
             if cursor.to_order_by_clause() != *order_by {
-                return Err(CursorError::OrderByMismatch.into());
+                return Err(Error::CursorMismatch);
             }
         }
 

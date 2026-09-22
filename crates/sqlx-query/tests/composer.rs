@@ -9,10 +9,7 @@
 //! values, without needing a live database connection.
 
 use sqlx::Execute;
-use sqlx_query::{
-    Cursor, CursorError, Error, OrderByClause, PlaceholderError, QueryComposer, QueryComposerError,
-    Value, WhereClause,
-};
+use sqlx_query::{Cursor, Error, OrderByClause, QueryComposer, Value, WhereClause};
 
 fn admin_filter() -> WhereClause {
     WhereClause::new("role = 'admin'")
@@ -381,7 +378,7 @@ fn cursor_with_mismatched_order_by_is_rejected() {
 
     assert!(matches!(
         query.compose().unwrap_err(),
-        Error::Cursor(CursorError::OrderByMismatch)
+        Error::CursorMismatch
     ));
 }
 
@@ -517,9 +514,7 @@ fn numbered_placeholder_in_a_non_positional_base_is_rejected() {
 
     assert!(matches!(
         query.compose(),
-        Err(Error::Placeholder(PlaceholderError::Unsupported {
-            number: 1
-        }))
+        Err(Error::UnsupportedPlaceholder { number: 1 })
     ));
 }
 
@@ -534,10 +529,10 @@ fn a_base_query_with_more_placeholders_than_values_is_rejected() {
 
     assert!(matches!(
         query.compose(),
-        Err(Error::Composer(QueryComposerError::BindMismatch {
+        Err(Error::BindMismatch {
             placeholders: 2,
             values: 1
-        }))
+        })
     ));
 }
 
@@ -553,9 +548,7 @@ fn a_clause_with_no_slot_to_splice_it_into_is_rejected() {
 
     assert!(matches!(
         query.compose(),
-        Err(Error::Composer(QueryComposerError::MissingSlot {
-            name: "where"
-        }))
+        Err(Error::MissingSlot { name: "where" })
     ));
 }
 
