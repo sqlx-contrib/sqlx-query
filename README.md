@@ -13,12 +13,12 @@
 > against rendered SQL text rather than a live server. It is here so the shape
 > of the thing can be looked at and argued with.
 >
-> The bind surface is a closed set of seven scalars — null, bool, int, float,
-> string, timestamp and bytes. That covers SQLite's storage classes entirely,
-> but `Value` can't be extended from outside the crate, so a `Uuid`, a
-> `serde_json::Value` or a decimal has to be converted by the caller first —
-> which PostgreSQL will only accept where the converted form matches the
-> column.
+> There are two ways to supply a parameter. `bind_value` takes one of
+> `Value`'s seven scalars — null, bool, int, float, string, timestamp, bytes —
+> and stays visible in `compose()`'s output. `bind` takes anything sqlx can
+> encode, including a `Uuid`, a `serde_json::Value` or your own
+> `#[derive(sqlx::Type)]`, at the cost of the composer no longer being able to
+> show you the value.
 
 ## Why
 
@@ -163,7 +163,7 @@ without touching a connection, which is what the tests in this repo use:
 
 ```rust
 let statement = query.compose()?;
-let (sql, values) = (statement.sql(), statement.values());
+let (sql, arguments) = (statement.sql(), statement.arguments());
 ```
 
 ## Filtering

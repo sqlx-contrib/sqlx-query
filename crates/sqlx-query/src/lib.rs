@@ -6,12 +6,14 @@
 
 use std::collections::HashMap;
 
+mod argument;
 mod clauses;
 mod composer;
 mod dialect;
 mod lexer;
 mod value;
 
+pub use argument::{Bindable, QueryArgument};
 pub use clauses::{
     Cursor, CursorError, OrderByClause, OrderByClauseError, OrderDirection, WhereClause,
 };

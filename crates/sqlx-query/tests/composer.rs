@@ -9,7 +9,24 @@
 //! values, without needing a live database connection.
 
 use sqlx::Execute;
-use sqlx_query::{Cursor, Error, OrderByClause, QueryComposer, Value, WhereClause};
+use sqlx_query::{Cursor, Error, OrderByClause, QueryComposer, QueryStatement, Value, WhereClause};
+
+/// Every test here supplies its parameters through `bind_value`, so every
+/// argument is a visible scalar. This unwraps that once rather than making
+/// each assertion carry `Some(...)` -- and it fails loudly if a test ever
+/// starts using `bind`, whose values the composer deliberately can't show.
+fn values<DB: sqlx::Database>(statement: &QueryStatement<DB>) -> Vec<Value> {
+    statement
+        .arguments()
+        .iter()
+        .map(|argument| {
+            argument
+                .value()
+                .expect("these tests bind scalars, not opaque values")
+                .clone()
+        })
+        .collect()
+}
 
 fn admin_filter() -> WhereClause {
     WhereClause::new("role = 'admin'")
@@ -32,7 +49,7 @@ fn substitutes_where_and_order_by_slots() {
         .push_order_by(name_order_by());
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("role = 'admin' AND"));
     assert!(sql.contains("name ASC , id"));
@@ -83,7 +100,7 @@ fn both_missing_drops_both_slots_but_keeps_base_binds() {
     query.bind_value("007");
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(!sql.contains("query."));
     assert_eq!(values, vec![Value::String("007".into())]);
@@ -161,7 +178,7 @@ fn shifts_filter_placeholders_past_base_binds() {
     );
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("name = $2 AND score > $3 AND"));
     assert_eq!(
@@ -190,7 +207,7 @@ fn order_by_never_contributes_bind_values() {
         .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("rank DESC , id"));
     assert_eq!(
@@ -212,7 +229,7 @@ fn zero_offset_leaves_filter_placeholders_unchanged() {
     );
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("name = $1 AND score > $2 AND"));
     assert_eq!(values, vec![Value::String("alice".into()), Value::Int(90)]);
@@ -255,7 +272,7 @@ fn no_slots_present_leaves_sql_untouched() {
     query.bind_value(1i64);
 
     let statement = query.compose().unwrap();
-    let (rendered, values) = (statement.sql(), statement.values());
+    let (rendered, values) = (statement.sql(), values(&statement));
 
     assert_eq!(rendered, sql);
     assert_eq!(values, vec![Value::Int(1)]);
@@ -282,7 +299,7 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
         .push_order_by(OrderByClause::parse("rank desc").unwrap());
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("WHERE status = $3 AND TRUE"));
     assert!(sql.contains("ORDER BY rank DESC , collection_id"));
@@ -308,7 +325,7 @@ fn order_by_splices_through_composer() {
     query.push_order_by(order_by);
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("rank DESC , id"));
     assert!(values.is_empty());
@@ -345,7 +362,7 @@ fn cursor_alone_supplies_its_own_order_by() {
     query.with_cursor(rank_cursor());
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("WHERE (rank < $1) OR (rank = $1 AND id > $2) AND TRUE"));
     assert!(sql.contains("ORDER BY rank DESC, id ASC , id"));
@@ -393,7 +410,7 @@ fn cursor_and_filter_are_combined_with_and() {
         .with_cursor(rank_cursor());
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(
         sql.contains("WHERE (status = $1) AND ((rank < $2) OR (rank = $2 AND id > $3)) AND TRUE")
@@ -427,7 +444,7 @@ fn non_positional_binds_in_textual_order_not_base_then_fragments() {
         .with_cursor(rank_cursor());
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert_eq!(
         sql,
@@ -464,7 +481,7 @@ fn positional_keeps_numbering_and_declaration_order() {
         .with_cursor(rank_cursor());
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert_eq!(
         sql,
@@ -495,7 +512,7 @@ fn mysql_markers_inside_quoting_and_comments_are_not_placeholders() {
         .push_where(WhereClause::new("rank > $1").bind_value(10i64));
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("SELECT `why?` FROM t"));
     assert!(sql.contains("'it\\'s ? here'"));
@@ -564,7 +581,7 @@ fn where_by_accumulates_across_multiple_calls() {
         .push_where(WhereClause::new("status = $1").bind_value("ACTIVE"));
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(sql.contains("WHERE (tenant_id = $1) AND (status = $2) AND TRUE"));
     assert_eq!(
@@ -618,11 +635,35 @@ fn bytes_bind_as_a_value() {
         .push_where(WhereClause::new("rank > $1").bind_value(10i64));
 
     let statement = query.compose().unwrap();
-    let (sql, values) = (statement.sql(), statement.values());
+    let (sql, values) = (statement.sql(), values(&statement));
 
     assert_eq!(sql, "SELECT * FROM t WHERE rank > ? AND receipt = ?");
     assert_eq!(
         values,
         vec![Value::Int(10), Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])]
     );
+}
+
+/// `bind` takes anything sqlx can encode, including types `Value` has no
+/// variant for and no `From` impl reaching — a `NaiveDate` here, a
+/// `uuid::Uuid` or `serde_json::Value` in a real schema. The composer
+/// never sees the value, so `QueryArgument::value` answers `None` and
+/// `compose()` can't print it back.
+#[test]
+fn bind_accepts_a_type_value_cannot_hold() {
+    let sql = "SELECT * FROM t WHERE /* query.where AND */ due = ?";
+    let mut query = QueryComposer::<sqlx::Sqlite>::new(sql);
+    query
+        .bind(chrono::NaiveDate::from_ymd_opt(2026, 9, 22).unwrap())
+        .push_where(WhereClause::new("rank > $1").bind_value(10i64));
+
+    let statement = query.compose().unwrap();
+
+    assert_eq!(
+        statement.sql(),
+        "SELECT * FROM t WHERE rank > ? AND due = ?"
+    );
+    // Textual order: the slot precedes the base query's own `?`.
+    assert_eq!(statement.arguments()[0].value(), Some(&Value::Int(10)));
+    assert_eq!(statement.arguments()[1].value(), None);
 }

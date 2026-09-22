@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::lexer::{Placeholder, QueryLexer, Token};
+use crate::QueryArgument;
 use crate::{Cursor, OrderByClause, QueryDialect, Value, WhereClause};
 
 /// What splicing can fail at.
@@ -71,24 +72,30 @@ pub enum Error {
 /// (text + parameters), which is what "statement" names here rather than
 /// "fragment": unlike [`WhereClause`]/[`OrderByClause`], this isn't a
 /// piece spliced into something larger, it's the whole thing.
-#[derive(Debug, Clone, PartialEq)]
-pub struct QueryStatement {
+#[derive(Debug)]
+pub struct QueryStatement<DB: sqlx::Database> {
     sql: String,
-    values: Vec<Value>,
+    arguments: Vec<QueryArgument<DB>>,
 }
 
-impl QueryStatement {
+impl<DB: sqlx::Database> QueryStatement<DB> {
     /// This statement's SQL text, slots already spliced in.
     #[must_use]
     pub fn sql(&self) -> &str {
         &self.sql
     }
 
-    /// The bind values `sql()`'s placeholders reference, in declaration
-    /// order.
+    /// The arguments `sql()`'s placeholders reference, in the order they
+    /// reference them.
+    ///
+    /// One per placeholder *occurrence*, not per value: on a `?` dialect a
+    /// number referenced twice produces two entries. Use
+    /// [`QueryArgument::value`] to look inside one — it answers `None` for
+    /// anything bound through [`QueryComposer::bind`], which the composer
+    /// never sees the value of.
     #[must_use]
-    pub fn values(&self) -> &[Value] {
-        &self.values
+    pub fn arguments(&self) -> &[QueryArgument<DB>] {
+        &self.arguments
     }
 }
 
@@ -99,7 +106,7 @@ impl QueryStatement {
 /// the target driver accepts.
 pub struct QueryComposer<DB: QueryDialect> {
     sql: &'static str,
-    values: Vec<Value>,
+    arguments: Vec<QueryArgument<DB>>,
     where_by: Vec<WhereClause>,
     order_by: Vec<OrderByClause>,
     cursor: Option<Cursor>,
@@ -117,7 +124,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     pub fn new(sql: &'static str) -> Self {
         QueryComposer {
             sql,
-            values: Vec::new(),
+            arguments: Vec::new(),
             where_by: Vec::new(),
             order_by: Vec::new(),
             cursor: None,
@@ -125,11 +132,28 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         }
     }
 
-    /// A value for one of the base query's own placeholders, filled in
-    /// declaration order: the first `bind_value` call is the base query's `$1`
-    /// (or first `?`), the second is `$2`, and so on.
+    /// Anything sqlx can encode, for one of the base query's own
+    /// placeholders — a `uuid::Uuid`, a `serde_json::Value`, a
+    /// `#[derive(sqlx::Type)]` newtype.
+    ///
+    /// The composer never sees the value, so
+    /// [`compose`](Self::compose) can't show it back and
+    /// [`QueryArgument::value`] answers `None` for it. When the value is
+    /// one of [`Value`]'s kinds,
+    /// [`bind_value`](Self::bind_value) keeps it visible.
+    pub fn bind<T>(&mut self, value: T) -> &mut Self
+    where
+        T: sqlx::Encode<'static, DB> + sqlx::Type<DB> + Send + 'static,
+    {
+        self.arguments.push(QueryArgument::Opaque(Box::new(value)));
+        self
+    }
+
+    /// A scalar for one of the base query's own placeholders, filled in
+    /// declaration order: the first call is the base query's `$1` (or
+    /// first `?`), the second is `$2`, and so on.
     pub fn bind_value(&mut self, value: impl Into<Value>) -> &mut Self {
-        self.values.push(value.into());
+        self.arguments.push(QueryArgument::Value(value.into()));
         self
     }
 
@@ -213,7 +237,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// [`Error::BindMismatch`] if the placeholders and the values don't
     /// correspond one-to-one; [`Error::MissingSlot`] for a clause with
     /// nowhere to go.
-    pub fn compose(&self) -> Result<QueryStatement, Error> {
+    pub fn compose(self) -> Result<QueryStatement<DB>, Error> {
         let syntax = DB::syntax();
         let lexer = QueryLexer::new(syntax);
         let tokens = lexer.scan(self.sql);
@@ -224,10 +248,10 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             }
         }
         let placeholders = lexer.count_placeholders(&tokens);
-        if placeholders != self.values.len() {
+        if placeholders != self.arguments.len() {
             return Err(Error::BindMismatch {
                 placeholders,
-                values: self.values.len(),
+                values: self.arguments.len(),
             });
         }
 
@@ -296,52 +320,74 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             return Err(Error::MissingSlot { name: "order_by" });
         }
 
-        let mut values = self.values.clone();
-        values.extend(where_by_values);
+        let mut arguments = self.arguments;
+        arguments.extend(where_by_values.into_iter().map(QueryArgument::Value));
 
         // The same check as above, now over the whole statement: the base
         // was verified before the fragments were shifted past it, and this
         // catches a hand-written fragment whose own numbering doesn't
         // match the values it carries.
         let placeholders = lexer.max_placeholder_number(&sql);
-        if placeholders != values.len() {
+        if placeholders != arguments.len() {
             return Err(Error::BindMismatch {
                 placeholders,
-                values: values.len(),
+                values: arguments.len(),
             });
         }
 
         if syntax.placeholder.is_number() {
-            return Ok(QueryStatement { sql, values });
+            return Ok(QueryStatement { sql, arguments });
         }
-        Self::render_question_placeholders(&sql, &values, &lexer)
+        Self::render_question_placeholders(&sql, arguments, &lexer)
     }
 
     /// Converts a fully numbered statement back to the bare `?`
     /// placeholders a non-positional driver binds by position, emitting
-    /// each one's value as it's encountered so the value list ends up in
+    /// each one's argument as it's encountered so the list ends up in
     /// textual order.
     fn render_question_placeholders(
         sql: &str,
-        values: &[Value],
+        arguments: Vec<QueryArgument<DB>>,
         lexer: &QueryLexer,
-    ) -> Result<QueryStatement, Error> {
+    ) -> Result<QueryStatement<DB>, Error> {
+        let count = arguments.len();
+        let mut pool: Vec<Option<QueryArgument<DB>>> = arguments.into_iter().map(Some).collect();
         let mut out = String::with_capacity(sql.len());
-        let mut rendered = Vec::with_capacity(values.len());
+        let mut rendered = Vec::with_capacity(count);
         let mut last = 0;
 
         for token in lexer.scan(sql) {
             if let Token::Placeholder(Placeholder::Number { start, end, number }) = token {
-                let value = number
+                let slot = number
                     .checked_sub(1)
-                    .and_then(|index| values.get(index))
+                    .and_then(|index| pool.get_mut(index))
                     .ok_or(Error::BindMismatch {
                         placeholders: number,
-                        values: values.len(),
+                        values: count,
                     })?;
+
+                let argument = match slot.take() {
+                    // A scalar can back more than one reference -- a cursor
+                    // reuses each boundary value -- so it goes back in the
+                    // pool for the next one.
+                    Some(QueryArgument::Value(value)) => {
+                        *slot = Some(QueryArgument::Value(value.clone()));
+                        QueryArgument::Value(value)
+                    }
+                    // An opaque bind can't be cloned, and never needs to be:
+                    // every `?` was numbered uniquely on the way in.
+                    Some(QueryArgument::Opaque(bind)) => QueryArgument::Opaque(bind),
+                    None => {
+                        return Err(Error::BindMismatch {
+                            placeholders: number,
+                            values: count,
+                        })
+                    }
+                };
+
                 out.push_str(&sql[last..start]);
                 out.push('?');
-                rendered.push(value.clone());
+                rendered.push(argument);
                 last = end;
             }
         }
@@ -349,7 +395,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 
         Ok(QueryStatement {
             sql: out,
-            values: rendered,
+            arguments: rendered,
         })
     }
 
@@ -408,13 +454,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
 impl<DB> QueryComposer<DB>
 where
     DB: QueryDialect,
-    bool: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
-    i64: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
-    f64: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
-    String: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
-    chrono::DateTime<chrono::Utc>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
-    Vec<u8>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
-    Option<String>: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
+    Value: sqlx::Type<DB> + sqlx::Encode<'static, DB>,
 {
     /// Composes the query (see [`compose`](Self::compose)) and binds it
     /// into an executable `sqlx` query.
@@ -429,20 +469,12 @@ where
     ///
     /// Whatever [`compose`](Self::compose) returns — this only binds what
     /// that produced.
-    pub fn build(&self) -> Result<sqlx::query::Query<'static, DB, DB::Arguments>, Error> {
-        let QueryStatement { sql, values } = self.compose()?;
+    pub fn build(self) -> Result<sqlx::query::Query<'static, DB, DB::Arguments>, Error> {
+        let QueryStatement { sql, arguments } = self.compose()?;
 
         let mut query = sqlx::query::<DB>(sqlx::AssertSqlSafe(sql));
-        for value in values {
-            query = match value {
-                Value::Null => query.bind(None::<String>),
-                Value::Bool(v) => query.bind(v),
-                Value::Int(v) => query.bind(v),
-                Value::Float(v) => query.bind(v),
-                Value::String(v) => query.bind(v),
-                Value::Timestamp(v) => query.bind(v),
-                Value::Bytes(v) => query.bind(v),
-            };
+        for argument in arguments {
+            query = argument.bind_to(query);
         }
         Ok(query)
     }

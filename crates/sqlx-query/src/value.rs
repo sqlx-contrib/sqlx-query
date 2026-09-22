@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, ColumnIndex, Decode, Row, Type, ValueRef};
+use sqlx::{Column, ColumnIndex, Decode, Encode, Row, Type, ValueRef};
 
 use crate::CursorError;
 
@@ -109,6 +109,75 @@ where
             Some(value) => value.into(),
             None => Value::Null,
         }
+    }
+}
+
+/// `Value` is a union of types sqlx already knows how to encode, so
+/// [`QueryComposer::build`](crate::QueryComposer::build) binds a `Value`
+/// directly rather than matching the variant and binding each separately.
+///
+/// [`type_info`](Type::type_info) has no value to look at, so it can't
+/// answer honestly — it names one variant's type arbitrarily and
+/// [`compatible`](Type::compatible) accepts everything. The honest answer
+/// comes from [`Encode::produces`], which *does* see the value, and which
+/// is what a driver consults when it needs a parameter's type (PostgreSQL
+/// sends one per bind). That split is sqlx's own escape hatch for a type
+/// whose SQL type depends on the value.
+impl<DB> Type<DB> for Value
+where
+    DB: sqlx::Database,
+    bool: Type<DB>,
+    i64: Type<DB>,
+    f64: Type<DB>,
+    String: Type<DB>,
+    DateTime<Utc>: Type<DB>,
+    Vec<u8>: Type<DB>,
+{
+    fn type_info() -> DB::TypeInfo {
+        <String as Type<DB>>::type_info()
+    }
+
+    fn compatible(_: &DB::TypeInfo) -> bool {
+        true
+    }
+}
+
+impl<'q, DB> Encode<'q, DB> for Value
+where
+    DB: sqlx::Database,
+    bool: Encode<'q, DB> + Type<DB>,
+    i64: Encode<'q, DB> + Type<DB>,
+    f64: Encode<'q, DB> + Type<DB>,
+    String: Encode<'q, DB> + Type<DB>,
+    DateTime<Utc>: Encode<'q, DB> + Type<DB>,
+    Vec<u8>: Encode<'q, DB> + Type<DB>,
+    Option<String>: Encode<'q, DB> + Type<DB>,
+{
+    fn encode_by_ref(
+        &self,
+        buf: &mut <DB as sqlx::Database>::ArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        match self {
+            Value::Null => <Option<String> as Encode<'q, DB>>::encode_by_ref(&None, buf),
+            Value::Bool(v) => <bool as Encode<'q, DB>>::encode_by_ref(v, buf),
+            Value::Int(v) => <i64 as Encode<'q, DB>>::encode_by_ref(v, buf),
+            Value::Float(v) => <f64 as Encode<'q, DB>>::encode_by_ref(v, buf),
+            Value::String(v) => <String as Encode<'q, DB>>::encode_by_ref(v, buf),
+            Value::Timestamp(v) => <DateTime<Utc> as Encode<'q, DB>>::encode_by_ref(v, buf),
+            Value::Bytes(v) => <Vec<u8> as Encode<'q, DB>>::encode_by_ref(v, buf),
+        }
+    }
+
+    fn produces(&self) -> Option<DB::TypeInfo> {
+        Some(match self {
+            Value::Null => <Option<String> as Type<DB>>::type_info(),
+            Value::Bool(_) => <bool as Type<DB>>::type_info(),
+            Value::Int(_) => <i64 as Type<DB>>::type_info(),
+            Value::Float(_) => <f64 as Type<DB>>::type_info(),
+            Value::String(_) => <String as Type<DB>>::type_info(),
+            Value::Timestamp(_) => <DateTime<Utc> as Type<DB>>::type_info(),
+            Value::Bytes(_) => <Vec<u8> as Type<DB>>::type_info(),
+        })
     }
 }
 
