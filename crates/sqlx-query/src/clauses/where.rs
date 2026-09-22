@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use sqlx::{AssertSqlSafe, SqlSafeStr, SqlStr};
 
-use crate::lexer::Placeholder;
-use crate::{Quoting, Value};
+use crate::lexer::QueryLexer;
+use crate::Value;
 
 /// A `WHERE`-clause contribution: SQL text (no leading/trailing
 /// connective, no `WHERE` keyword) plus the bind values its placeholders
@@ -85,8 +85,9 @@ impl WhereClause {
     /// land `other` on top of a number `self` is still using.
     #[must_use]
     pub fn and(self, other: WhereClause) -> WhereClause {
-        let offset = self.max_placeholder();
-        let other_sql = Placeholder::shift(other.sql().as_str(), offset, Quoting::STANDARD);
+        let lexer = QueryLexer::standard();
+        let offset = lexer.max_placeholder_number(self.sql().as_str());
+        let other_sql = lexer.shift_placeholder_numbers(other.sql().as_str(), offset);
         let sql = format!("({}) AND ({})", self.sql().as_str(), other_sql);
 
         self.values
@@ -109,17 +110,10 @@ impl WhereClause {
     /// fragments together — there's no reason for code outside this crate
     /// to reach for it directly.
     pub(crate) fn shift(self, offset: usize) -> WhereClause {
-        let sql = Placeholder::shift(self.sql().as_str(), offset, Quoting::STANDARD);
+        let sql = QueryLexer::standard().shift_placeholder_numbers(self.sql().as_str(), offset);
         self.values
             .into_iter()
             .fold(WhereClause::new(sql), WhereClause::bind)
-    }
-
-    /// The highest `$N` this clause references, or 0 if it references
-    /// none — what [`and`](Self::and) and
-    /// [`shift`](Self::shift) count from.
-    pub(crate) fn max_placeholder(&self) -> usize {
-        Placeholder::max_number(self.sql().as_str(), Quoting::STANDARD)
     }
 }
 

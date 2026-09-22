@@ -28,6 +28,37 @@ pub struct QuerySyntax {
     pub quoting: Quoting,
 }
 
+impl QuerySyntax {
+    /// How to read text whose dialect isn't known — a [`WhereClause`]'s
+    /// own fragment, as opposed to a base query.
+    ///
+    /// A clause carries no `DB` parameter (that one-way split is the point
+    /// of the crate), but its text still has to be lexed: a hand-written
+    /// `WhereClause::new("note = 'costs $1 or so'")` has a `$1` that must
+    /// not be shifted. With no dialect to ask, the safe choice is the SQL
+    /// standard's own set — `'...'` with `''` escaping, `"..."`
+    /// identifiers, `--` and non-nesting `/* ... */` — which every dialect
+    /// here is a superset of.
+    ///
+    /// The cost is at the edges of the supersets: a hand-written fragment
+    /// that dollar-quotes a `$1`, or nests a block comment around one,
+    /// gets it shifted. Both are PostgreSQL-only spellings in text this
+    /// crate asks you to write with plain `$N`.
+    ///
+    /// [`WhereClause`]: crate::WhereClause
+    pub(crate) const STANDARD: Self = Self {
+        placeholder: PlaceholderStyle::Number,
+        quoting: Quoting {
+            dollar: false,
+            nested_block_comments: false,
+            hash_line_comments: false,
+            backtick_identifiers: false,
+            bracket_identifiers: false,
+            backslash_escapes: false,
+        },
+    };
+}
+
 /// How a placeholder names its value — the same two spellings the scanner
 /// reports, seen from the dialect's side rather than the text's.
 ///
@@ -84,34 +115,6 @@ pub struct Quoting {
     /// `NO_BACKSLASH_ESCAPES`). Doubling the quote works everywhere and is
     /// always handled.
     pub backslash_escapes: bool,
-}
-
-impl Quoting {
-    /// The rules for reading text whose dialect isn't known — a
-    /// [`WhereClause`]'s own fragment, as opposed to a base query.
-    ///
-    /// A clause carries no `DB` parameter (that one-way split is the point
-    /// of the crate), but its text still has to be lexed: a hand-written
-    /// `WhereClause::new("note = 'costs $1 or so'")` has a `$1` that must
-    /// not be shifted. With no dialect to ask, the safe choice is the SQL
-    /// standard's own set — `'...'` with `''` escaping, `"..."`
-    /// identifiers, `--` and non-nesting `/* ... */` — which every dialect
-    /// here is a superset of.
-    ///
-    /// The cost is at the edges of the supersets: a hand-written fragment
-    /// that dollar-quotes a `$1`, or nests a block comment around one,
-    /// gets it shifted. Both are PostgreSQL-only spellings in text this
-    /// crate asks you to write with plain `$N`.
-    ///
-    /// [`WhereClause`]: crate::WhereClause
-    pub(crate) const STANDARD: Self = Self {
-        dollar: false,
-        nested_block_comments: false,
-        hash_line_comments: false,
-        backtick_identifiers: false,
-        bracket_identifiers: false,
-        backslash_escapes: false,
-    };
 }
 
 impl QueryDialect for sqlx::Postgres {

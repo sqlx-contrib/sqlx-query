@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::{PlaceholderStyle, Quoting};
+use crate::QuerySyntax;
 
 /// Matches a slot of the form `/* query.<name> <suffix> */`,
 /// capturing the name and the trailing connective/separator text
@@ -118,6 +118,36 @@ impl Token {
     pub(crate) fn is_placeholder_question(&self) -> bool {
         matches!(self, Token::Placeholder(Placeholder::Question { .. }))
     }
+}
+
+/// Reads SQL text by a dialect's rules: what counts as a placeholder or
+/// a slot, and which stretches of text hold neither.
+///
+/// Holds the [`QuerySyntax`] so the rules are set once, where the dialect
+/// is known, rather than threaded through every call.
+pub(crate) struct QueryLexer {
+    syntax: QuerySyntax,
+}
+
+impl QueryLexer {
+    /// A lexer for `syntax`'s dialect.
+    pub(crate) fn new(syntax: QuerySyntax) -> Self {
+        QueryLexer { syntax }
+    }
+
+    /// A lexer for text whose dialect isn't known — a
+    /// [`WhereClause`](crate::WhereClause)'s own fragment, as opposed to a
+    /// base query.
+    ///
+    /// A clause carries no `DB` parameter (that one-way split is the point
+    /// of the crate), but its text still has to be read: a hand-written
+    /// `WhereClause::new("note = 'costs $1 or so'")` has a `$1` that must
+    /// not be shifted. With no dialect to ask, the safe rules are the SQL
+    /// standard's, which every dialect here is a superset of — and a
+    /// fragment is always numbered, whatever it ends up spliced into.
+    pub(crate) fn standard() -> Self {
+        QueryLexer::new(QuerySyntax::STANDARD)
+    }
 
     /// How many values these tokens' placeholders call for: the highest
     /// `$N` for a numbered dialect, the number of `?`s for one that isn't.
@@ -131,11 +161,8 @@ impl Token {
     ///
     /// [`PlaceholderError::Unsupported`] for a `$N` found where the
     /// dialect spells placeholders `?`.
-    pub(crate) fn count_placeholders(
-        tokens: &[Token],
-        placeholder: PlaceholderStyle,
-    ) -> Result<usize, PlaceholderError> {
-        if placeholder.is_number() {
+    pub(crate) fn count_placeholders(&self, tokens: &[Token]) -> Result<usize, PlaceholderError> {
+        if self.syntax.placeholder.is_number() {
             return Ok(tokens
                 .iter()
                 .filter_map(Token::placeholder_number)
@@ -152,7 +179,8 @@ impl Token {
     }
 
     /// Finds every placeholder and slot in `sql`, in textual order.
-    pub(crate) fn scan(sql: &str, quoting: Quoting) -> Vec<Token> {
+    pub(crate) fn scan(&self, sql: &str) -> Vec<Token> {
+        let quoting = self.syntax.quoting;
         let bytes = sql.as_bytes();
         let mut tokens = Vec::new();
         let mut i = 0;
@@ -221,13 +249,11 @@ impl Token {
 
         tokens
     }
-}
 
-impl Placeholder {
     /// Rewrites every active `$N` in `sql` to `$(N+offset)`, so a fragment
     /// authored with local `$1`, `$2`, ... numbering can be spliced past
     /// placeholders that already exist ahead of it.
-    pub(crate) fn shift(sql: &str, offset: usize, quoting: Quoting) -> String {
+    pub(crate) fn shift_placeholder_numbers(&self, sql: &str, offset: usize) -> String {
         if offset == 0 {
             return sql.to_owned();
         }
@@ -235,7 +261,7 @@ impl Placeholder {
         let mut out = String::with_capacity(sql.len());
         let mut last = 0;
 
-        for token in Token::scan(sql, quoting) {
+        for token in self.scan(sql) {
             if let Token::Placeholder(Placeholder::Number { start, end, number }) = token {
                 out.push_str(&sql[last..start]);
                 out.push('$');
@@ -255,8 +281,8 @@ impl Placeholder {
     /// value, and numbering that skips is numbering the caller got wrong,
     /// which [`QueryComposer::compose`](crate::QueryComposer::compose)
     /// reports rather than silently absorbing.
-    pub(crate) fn max_number(sql: &str, quoting: Quoting) -> usize {
-        Token::scan(sql, quoting)
+    pub(crate) fn max_placeholder_number(&self, sql: &str) -> usize {
+        self.scan(sql)
             .iter()
             .filter_map(Token::placeholder_number)
             .max()
@@ -369,19 +395,20 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Placeholder, Token};
-    use crate::{QueryDialect, Quoting};
+    use super::{QueryLexer, Token};
+    use crate::QueryDialect;
 
-    fn quoting<DB: QueryDialect>() -> Quoting {
-        DB::syntax().quoting
+    fn lexer<DB: QueryDialect>() -> QueryLexer {
+        QueryLexer::new(DB::syntax())
     }
 
     fn shift(sql: &str, offset: usize) -> String {
-        Placeholder::shift(sql, offset, quoting::<sqlx::Postgres>())
+        lexer::<sqlx::Postgres>().shift_placeholder_numbers(sql, offset)
     }
 
-    fn markers(sql: &str, quoting: Quoting) -> usize {
-        Token::scan(sql, quoting)
+    fn markers<DB: QueryDialect>(sql: &str) -> usize {
+        lexer::<DB>()
+            .scan(sql)
             .iter()
             .filter(|token| token.is_placeholder_question())
             .count()
@@ -490,14 +517,12 @@ mod tests {
     fn max_placeholder_reads_the_highest_number_not_the_count() {
         // The cursor's shape: two values, three references.
         assert_eq!(
-            Placeholder::max_number(
-                "(rank < $1) OR (rank = $1 AND id > $2)",
-                quoting::<sqlx::Postgres>()
-            ),
+            lexer::<sqlx::Postgres>()
+                .max_placeholder_number("(rank < $1) OR (rank = $1 AND id > $2)"),
             2
         );
         assert_eq!(
-            Placeholder::max_number("role = 'admin'", quoting::<sqlx::Postgres>()),
+            lexer::<sqlx::Postgres>().max_placeholder_number("role = 'admin'"),
             0
         );
     }
@@ -505,26 +530,27 @@ mod tests {
     #[test]
     fn markers_are_found_outside_literals_and_comments() {
         let sql = "tenant = ? AND note = 'why? really' -- ? here\n AND id = ?";
-        assert_eq!(markers(sql, quoting::<sqlx::Sqlite>()), 2);
+        assert_eq!(markers::<sqlx::Sqlite>(sql), 2);
     }
 
     #[test]
     fn mysql_skips_backtick_identifiers_hash_comments_and_backslash_escapes() {
         let sql = "`weird?col` = ? AND note = 'it\\'s ? inside' # trailing ?\n AND x = ?";
-        assert_eq!(markers(sql, quoting::<sqlx::MySql>()), 2);
+        assert_eq!(markers::<sqlx::MySql>(sql), 2);
     }
 
     #[test]
     fn sqlite_skips_bracket_identifiers_and_does_not_nest_block_comments() {
-        assert_eq!(markers("[weird?col] = ?", quoting::<sqlx::Sqlite>()), 1);
+        assert_eq!(markers::<sqlx::Sqlite>("[weird?col] = ?"), 1);
         // Non-nesting: the first `*/` closes, so the trailing `?` is live.
-        assert_eq!(markers("/* a /* b */ x = ?", quoting::<sqlx::Sqlite>()), 1);
+        assert_eq!(markers::<sqlx::Sqlite>("/* a /* b */ x = ?"), 1);
     }
 
     #[test]
     fn a_slot_inside_a_string_literal_is_not_a_slot() {
         let sql = "note = '/* query.where AND */' AND /* query.where AND */ TRUE";
-        let slots = Token::scan(sql, quoting::<sqlx::Postgres>())
+        let slots = lexer::<sqlx::Postgres>()
+            .scan(sql)
             .into_iter()
             .filter(|token| matches!(token, Token::Slot { .. }))
             .count();
@@ -533,7 +559,7 @@ mod tests {
 
     #[test]
     fn a_slot_carries_its_name_and_suffix() {
-        let tokens = Token::scan("/* query.where AND */", quoting::<sqlx::Postgres>());
+        let tokens = lexer::<sqlx::Postgres>().scan("/* query.where AND */");
         assert_eq!(
             tokens,
             vec![Token::Slot {

@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
-use crate::lexer::{Placeholder, Token};
-use crate::{Cursor, CursorError, Error, OrderByClause, QueryDialect, Quoting, Value, WhereClause};
+use crate::lexer::{Placeholder, QueryLexer, Token};
+use crate::{Cursor, CursorError, Error, OrderByClause, QueryDialect, Value, WhereClause};
 
 /// What can go wrong while splicing, as opposed to what can go wrong with
 /// a clause the composer was handed — those keep their own errors and
@@ -194,9 +194,10 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// [`QueryComposerError::MissingSlot`] for a clause with nowhere to go.
     pub fn compose(&self) -> Result<QueryStatement, Error> {
         let syntax = DB::syntax();
-        let tokens = Token::scan(self.sql, syntax.quoting);
+        let lexer = QueryLexer::new(syntax);
+        let tokens = lexer.scan(self.sql);
 
-        let placeholders = Token::count_placeholders(&tokens, syntax.placeholder)?;
+        let placeholders = lexer.count_placeholders(&tokens)?;
         if placeholders != self.values.len() {
             return Err(QueryComposerError::BindMismatch {
                 placeholders,
@@ -277,7 +278,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         // was verified before the fragments were shifted past it, and this
         // catches a hand-written fragment whose own numbering doesn't
         // match the values it carries.
-        let placeholders = Placeholder::max_number(&sql, syntax.quoting);
+        let placeholders = lexer.max_placeholder_number(&sql);
         if placeholders != values.len() {
             return Err(QueryComposerError::BindMismatch {
                 placeholders,
@@ -289,7 +290,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         if syntax.placeholder.is_number() {
             return Ok(QueryStatement { sql, values });
         }
-        Self::render_markers(&sql, &values, syntax.quoting)
+        Self::render_markers(&sql, &values, &lexer)
     }
 
     /// Converts a fully numbered statement back to the bare `?` markers a
@@ -299,13 +300,13 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     fn render_markers(
         sql: &str,
         values: &[Value],
-        quoting: Quoting,
+        lexer: &QueryLexer,
     ) -> Result<QueryStatement, Error> {
         let mut out = String::with_capacity(sql.len());
         let mut rendered = Vec::with_capacity(values.len());
         let mut last = 0;
 
-        for token in Token::scan(sql, quoting) {
+        for token in lexer.scan(sql) {
             if let Token::Placeholder(Placeholder::Number { start, end, number }) = token {
                 let value = number
                     .checked_sub(1)
