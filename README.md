@@ -7,17 +7,10 @@
 [![Nix Flake](https://img.shields.io/badge/Nix-Flake-5277C3?logo=nixos&logoColor=white)](https://nixos.wiki/wiki/Flakes)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> [!WARNING]
-> **Work in progress — a spike, not a release.** Neither crate is published to
-> crates.io and the API is unstable and unannounced. It is here so the shape of
-> the thing can be looked at and argued with.
->
-> There are two ways to supply a parameter. `bind_value` takes one of
-> `Value`'s seven scalars — null, bool, int, float, string, timestamp, bytes —
-> and stays visible in `compose()`'s output. `bind` takes anything sqlx can
-> encode, including a `Uuid`, a `serde_json::Value` or your own
-> `#[derive(sqlx::Type)]`, at the cost of the composer no longer being able to
-> show you the value.
+> [!NOTE]
+> **Pre-1.0.** Neither crate is on crates.io yet and the API may still move.
+> What is here works and is tested against real PostgreSQL, MySQL and SQLite
+> servers — see [Limitations](#limitations) for what it doesn't do.
 
 ## Why
 
@@ -46,7 +39,8 @@ builder:
 - A filter is parsed, not concatenated. Every literal becomes a bind value; no
   request text ever reaches the SQL.
 - Fields are resolved against a fail-closed allow-list, so a request can only
-  filter and sort on columns you offered by name.
+  filter and sort on columns you offered by name — provided you call
+  `resolve()`, which nothing yet forces (see [Limitations](#limitations)).
 - The placement of the clause is your decision, not the library's. A slot
   inside a CTE, a sub-select, or one of two `UNION` arms goes exactly where you
   put it.
@@ -65,7 +59,9 @@ it.
 - [Filtering](#filtering)
 - [Ordering](#ordering)
 - [Keyset pagination](#keyset-pagination)
+- [Binding](#binding)
 - [Dialects](#dialects)
+- [Limitations](#limitations)
 - [Development](#development)
 - [Dependencies](#dependencies)
 - [License](#license)
@@ -223,6 +219,28 @@ rejected if hand-edited. A cursor carries the `order_by` it was built against,
 so it doesn't have to be repeated; if it *is* set and disagrees, `compose()`
 fails rather than paging through a different sort than the token was cut for.
 
+## Binding
+
+Two ways to supply a value for one of the base query's own placeholders.
+
+```rust
+query.bind_value(50i64);              // a scalar the composer can show back
+query.bind(uuid::Uuid::new_v4());     // anything sqlx can encode
+```
+
+`bind_value` takes one of `Value`'s seven kinds — null, bool, int, float,
+string, timestamp, bytes — and stays visible in `compose()`'s output, so a
+test or a log line can read it back.
+
+`bind` takes anything satisfying `sqlx::Encode + Type`: a `Uuid`, a
+`serde_json::Value`, a `BigDecimal`, your own `#[derive(sqlx::Type)]` newtype.
+The composer never sees the value, so `QueryArgument::value()` answers `None`
+for it and `compose()` can only report that an argument is there.
+
+Clause literals are always the visible kind. They come from a parsed filter,
+so they're scalars by construction — and a [`Cursor`](#keyset-pagination)
+serializes them into its page token, which a boxed encoder could not be.
+
 ## Dialects
 
 `QueryComposer<DB>` is generic over a `QueryDialect`, implemented for
@@ -247,6 +265,33 @@ bind-declaration order.
 Each dialect is also lexed by its own rules — backtick and bracket identifiers,
 `#` comments, backslash escapes, nested block comments — so a `?` inside a
 string literal or a quoted identifier is text, not a placeholder.
+
+## Limitations
+
+**`resolve()` is enforced by convention, not by the type.** `parse` and
+`resolve` return the same type, so a clause that was never resolved can still
+be spliced — and `OrderByClause::parse` does not validate identifiers, so a
+whitespace-free expression reaches the SQL:
+
+```rust
+// Do not do this: `resolve` is what applies the allow-list.
+query.push_order_by(OrderByClause::parse(&request.order_by)?);
+//        ORDER BY (select(1)) ASC , id
+```
+
+Always `parse(...)?.resolve(&columns)?` for anything a client supplied. A
+resolved/unresolved distinction in the type system is the fix, and is the
+next thing planned.
+
+**A cursor cannot page on a `uuid` key.** Cursor keys are read back off the
+row into a `Value`, whose kinds are bool, int, float, string, timestamp and
+bytes; a PostgreSQL `uuid` is none of them, so `Cursor::after_row` fails with
+`RowValueUndecodable`. Keyset pagination therefore needs an integer, text or
+timestamp sort key today. Parameters are unaffected — `bind` takes a `Uuid`
+fine; it's only sorting on one that doesn't work.
+
+**No `SELECT` generation.** By design, and worth repeating: this splices into
+a query you wrote. It does not write one.
 
 ## Development
 
@@ -285,7 +330,8 @@ The Dev Container sets both URLs, so `make test` covers everything inside it.
 - [`chrono`](https://crates.io/crates/chrono) for timestamp bind values
 - [`thiserror`](https://crates.io/crates/thiserror) for the error types
 
-Tooling: Nix for the dev shell, and a Dev Container that reuses the same flake.
+Tooling: Nix for the dev shell, and a Dev Container that reuses the same
+flake and stands up both servers.
 
 ## License
 

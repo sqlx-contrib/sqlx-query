@@ -1,10 +1,13 @@
 [package]
 name = "sqlx-query-cel"
-description = "CEL filter -> WhereClause for sqlx-query"
+description = "Reads an AIP-160 filter written in CEL into a sqlx-query WhereClause"
 version = "0.1.0" # literal, not inherited -- see [workspace.package]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["sql", "sqlx", "cel", "filter", "aip-160"]
+categories = ["database"]
 
 [lints]
 workspace = true
