@@ -9,9 +9,8 @@
 
 > [!WARNING]
 > **Work in progress — a spike, not a release.** Neither crate is published to
-> crates.io, the API is unstable and unannounced, and the end-to-end tests run
-> against rendered SQL text rather than a live server. It is here so the shape
-> of the thing can be looked at and argued with.
+> crates.io and the API is unstable and unannounced. It is here so the shape of
+> the thing can be looked at and argued with.
 >
 > There are two ways to supply a parameter. `bind_value` takes one of
 > `Value`'s seven scalars — null, bool, int, float, string, timestamp, bytes —
@@ -262,10 +261,17 @@ make doc-check               # cargo doc with warnings as errors, no browser
 make doc                     # the same, opened in a browser
 ```
 
-No database server is needed for any of it: the tests compare the SQL these
-crates render. The Dev Container does stand up PostgreSQL and MySQL for the
-end-to-end tests that will need a real server to confirm a `$N`/`?` run
-actually binds — which is the one thing comparing strings cannot tell you.
+`make test` needs no server. Most of the suite compares rendered SQL, and the
+SQLite half of the live-driver tests runs in memory — which matters, because
+comparing strings cannot tell you whether a `?` bound the value you meant. The
+PostgreSQL and MySQL halves skip themselves unless their URLs are set:
+
+```bash
+make test-servers       # starts both in Docker, runs everything
+make test-servers-down  # and stops them
+```
+
+The Dev Container sets both URLs, so `make test` covers everything inside it.
 
 ## Dependencies
 

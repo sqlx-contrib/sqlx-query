@@ -4,8 +4,9 @@
 # costs a couple of seconds per target and nests a second shell inside the one
 # you are probably already in.
 #
-# Nothing here needs a database server: the tests compare the SQL these crates
-# render, so `make test` is the same on a laptop as it is in CI.
+# `make test` needs no server. SQLite runs in memory, so the live-driver tests
+# for it run everywhere; the PostgreSQL and MySQL ones skip themselves unless
+# their URL is set. `make test-servers` starts both and runs them.
 
 .PHONY: test
 test:
@@ -15,6 +16,20 @@ test:
 # going unrun. Unindented, so make eats the comment instead of the shell
 # echoing it.
 	cargo test --workspace --doc
+
+# The same suite with PostgreSQL and MySQL actually running. Inside the Dev
+# Container the URLs are already set, so `make test` covers everything and this
+# is only needed from a host.
+.PHONY: test-servers
+test-servers:
+	docker compose -f .devcontainer/docker-compose.yml -p sqlx-query-test up -d --wait postgres mysql
+	SQLX_QUERY_POSTGRES_URL="postgres://vscode@localhost:$$(docker compose -f .devcontainer/docker-compose.yml -p sqlx-query-test port postgres 5432 | cut -d: -f2)/sqlx_query" \
+	SQLX_QUERY_MYSQL_URL="mysql://root@localhost:$$(docker compose -f .devcontainer/docker-compose.yml -p sqlx-query-test port mysql 3306 | cut -d: -f2)/sqlx_query" \
+	cargo test --workspace --all-targets
+
+.PHONY: test-servers-down
+test-servers-down:
+	docker compose -f .devcontainer/docker-compose.yml -p sqlx-query-test down -v
 
 .PHONY: lint
 lint:

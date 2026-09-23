@@ -548,7 +548,7 @@ fn a_base_query_with_more_placeholders_than_values_is_rejected() {
         query.compose(),
         Err(Error::BindMismatch {
             placeholders: 2,
-            values: 1
+            arguments: 1
         })
     ));
 }

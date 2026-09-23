@@ -17,3 +17,16 @@ thiserror = { workspace = true }
 base64 = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
+
+[dev-dependencies]
+# A runtime, and the drivers, only for the tests: the library itself never
+# opens a connection. `runtime-tokio` is additive, so enabling it here does
+# not change what a consumer of the library gets.
+sqlx = { workspace = true, features = [
+  "runtime-tokio",
+  "postgres",
+  "mysql",
+  "sqlite",
+  "chrono",
+] }
+tokio = { workspace = true }

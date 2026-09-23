@@ -4,9 +4,9 @@
   "service": "workspace",
   "dockerComposeFile": "docker-compose.yml",
   "workspaceFolder": "/home/vscode/workspace",
-  // Nothing under `make test` reads these yet -- the current tests compare
-  // rendered SQL. They are here for the end-to-end checks that need a server to
-  // say whether a `$N`/`?` placeholder run actually binds.
+  // `tests/execute_postgres.rs` and `tests/execute_mysql.rs` read these, and
+  // skip themselves when they are unset -- so `make test` stays offline on a
+  // host and covers both servers in here.
   //
   // Both carry an explicit port even though it is the default:
   // devcontainer-env rewrites a URL by looking up the port it names, and

@@ -31,8 +31,13 @@ pub enum Error {
     /// that reaches for `$3` with two values bound would otherwise splice
     /// its fragment on top of a number already in use, and bind the wrong
     /// value to it rather than failing.
-    #[error("query references {placeholders} placeholder(s), but {values} value(s) are bound")]
-    BindMismatch { placeholders: usize, values: usize },
+    #[error(
+        "query references {placeholders} placeholder(s), but {arguments} argument(s) are bound"
+    )]
+    BindMismatch {
+        placeholders: usize,
+        arguments: usize,
+    },
 
     /// A clause was set, but the base query has no slot to splice it
     /// into.
@@ -251,7 +256,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         if placeholders != self.arguments.len() {
             return Err(Error::BindMismatch {
                 placeholders,
-                values: self.arguments.len(),
+                arguments: self.arguments.len(),
             });
         }
 
@@ -331,7 +336,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         if placeholders != arguments.len() {
             return Err(Error::BindMismatch {
                 placeholders,
-                values: arguments.len(),
+                arguments: arguments.len(),
             });
         }
 
@@ -363,7 +368,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
                     .and_then(|index| pool.get_mut(index))
                     .ok_or(Error::BindMismatch {
                         placeholders: number,
-                        values: count,
+                        arguments: count,
                     })?;
 
                 let argument = match slot.take() {
@@ -380,7 +385,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
                     None => {
                         return Err(Error::BindMismatch {
                             placeholders: number,
-                            values: count,
+                            arguments: count,
                         })
                     }
                 };
