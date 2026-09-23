@@ -14,9 +14,24 @@
 use sqlx::{MySqlPool, Row};
 use sqlx_query::{Cursor, OrderByClause, QueryComposer, WhereClause};
 
+/// `None` when there is no server to talk to, which is not the same as
+/// the variable being unset: the Nix dev shell exports the Dev Container's
+/// `containerEnv` verbatim when the compose stack is down, so the URL can
+/// be present and name a host that only resolves inside that network.
+/// Reachability is the only thing worth testing here.
 async fn pool() -> Option<MySqlPool> {
-    let url = std::env::var("SQLX_QUERY_MYSQL_URL").ok()?;
-    Some(MySqlPool::connect(&url).await.expect("mysql connects"))
+    let Ok(url) = std::env::var("SQLX_QUERY_MYSQL_URL") else {
+        eprintln!("skipped: SQLX_QUERY_MYSQL_URL is unset");
+        return None;
+    };
+    match MySqlPool::connect(&url).await {
+        Ok(pool) => Some(pool),
+        Err(error) => {
+            // Deliberately without the URL, which carries credentials.
+            eprintln!("skipped: no reachable mysql -- {error}");
+            None
+        }
+    }
 }
 
 async fn table(pool: &MySqlPool, name: &str, columns: &str) {
@@ -37,10 +52,8 @@ macro_rules! pool_or_skip {
     () => {
         match pool().await {
             Some(pool) => pool,
-            None => {
-                eprintln!("skipped: SQLX_QUERY_MYSQL_URL is unset");
-                return;
-            }
+            // `pool` already said why.
+            None => return,
         }
     };
 }

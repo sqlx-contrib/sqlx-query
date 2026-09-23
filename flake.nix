@@ -48,9 +48,11 @@
           # `mysql` services on their default ports, which only resolve inside
           # the compose network.
           #
-          # Silent when the stack is down, which is the point -- nothing under
-          # `make test` reads these, so `nix develop` works with no Docker
-          # running.
+          # With the stack down this exports the container values verbatim,
+          # naming hosts that only resolve inside the compose network. The
+          # live-driver tests therefore skip on *unreachable* rather than on
+          # unset -- a URL being present says nothing about there being a
+          # server behind it, which is exactly the case in CI.
           shellHook = ''
             eval "$(devcontainer-env export)"
           '';
