@@ -122,9 +122,7 @@ impl From<chrono::DateTime<chrono::Utc>> for Value {
 #[cfg(feature = "time")]
 impl From<time::OffsetDateTime> for Value {
     fn from(value: time::OffsetDateTime) -> Self {
-        Value::Timestamp(
-            i64::try_from(value.unix_timestamp_nanos() / 1_000).unwrap_or(i64::MAX),
-        )
+        Value::Timestamp(i64::try_from(value.unix_timestamp_nanos() / 1_000).unwrap_or(i64::MAX))
     }
 }
 
