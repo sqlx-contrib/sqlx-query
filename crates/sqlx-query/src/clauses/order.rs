@@ -66,6 +66,33 @@ pub enum OrderByClauseError {
     InvalidDirection { field: String, direction: String },
     #[error("unknown order_by field `{0}`")]
     UnknownField(String),
+    #[error("order_by field `{0}` is not an identifier")]
+    InvalidField(String),
+}
+
+/// Whether `field` is an identifier this crate will put in an `ORDER BY`:
+/// `[A-Za-z_][A-Za-z0-9_]*`, with `.` allowed between segments for a
+/// table-qualified column like `v.created_at`.
+///
+/// Checked in [`OrderByClause::parse`] rather than at render time, because
+/// [`resolve`](QueryResolver::resolve) is the caller's decision and this
+/// is not: a field is spliced into the statement as *text*, so without
+/// this a whitespace-free expression like `(select(1))` -- which
+/// `parse`'s direction check happily accepts as a field name -- would
+/// reach the SQL for anyone who skipped the allow-list.
+///
+/// `asc`/`desc` deliberately do not go through this. They take a column
+/// the program chose, so `clause.asc("lower(name)")` stays possible; only
+/// text that came from outside is constrained.
+fn is_identifier(field: &str) -> bool {
+    !field.is_empty()
+        && field.split('.').all(|segment| {
+            let mut chars = segment.chars();
+            chars
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
 }
 
 impl OrderByClause {
@@ -97,6 +124,9 @@ impl OrderByClause {
             let field = words.next().unwrap_or_default().to_owned();
             if field.is_empty() {
                 return Err(OrderByClauseError::EmptyTerm(order_by.to_owned()));
+            }
+            if !is_identifier(&field) {
+                return Err(OrderByClauseError::InvalidField(field));
             }
 
             let direction = match words.next() {
@@ -280,6 +310,42 @@ mod tests {
             .resolve(&columns)
             .unwrap();
         assert_eq!(order_by.sql(), "created_at DESC, rank ASC");
+    }
+
+    #[test]
+    fn parse_refuses_a_field_that_is_not_an_identifier() {
+        // The shape that matters: no whitespace, so the direction check
+        // never sees it, and it renders as an expression rather than a
+        // column. Without this it reached the SQL whenever `resolve` was
+        // skipped.
+        assert_eq!(
+            OrderByClause::parse("(select(1))"),
+            Err(OrderByClauseError::InvalidField("(select(1))".to_owned()))
+        );
+        assert_eq!(
+            OrderByClause::parse("rank;drop"),
+            Err(OrderByClauseError::InvalidField("rank;drop".to_owned()))
+        );
+        assert_eq!(
+            OrderByClause::parse("1rank"),
+            Err(OrderByClauseError::InvalidField("1rank".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_accepts_a_plain_or_qualified_identifier() {
+        assert!(OrderByClause::parse("rank desc").is_ok());
+        assert!(OrderByClause::parse("_rank").is_ok());
+        assert!(OrderByClause::parse("v.created_at asc").is_ok());
+        assert!(OrderByClause::parse("a.b.c").is_ok());
+    }
+
+    /// `asc`/`desc` take a column the program chose, so they are not
+    /// constrained -- a computed sort key stays expressible.
+    #[test]
+    fn the_builders_are_not_identifier_checked() {
+        let order_by = OrderByClause::default().asc("lower(name)");
+        assert_eq!(order_by.sql().as_str(), "lower(name) ASC");
     }
 
     #[test]

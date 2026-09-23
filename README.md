@@ -39,8 +39,7 @@ builder:
 - A filter is parsed, not concatenated. Every literal becomes a bind value; no
   request text ever reaches the SQL.
 - Fields are resolved against a fail-closed allow-list, so a request can only
-  filter and sort on columns you offered by name — provided you call
-  `resolve()`, which nothing yet forces (see [Limitations](#limitations)).
+  filter and sort on columns you offered by name.
 - The placement of the clause is your decision, not the library's. A slot
   inside a CTE, a sub-select, or one of two `UNION` arms goes exactly where you
   put it.
@@ -268,20 +267,24 @@ string literal or a quoted identifier is text, not a placeholder.
 
 ## Limitations
 
-**`resolve()` is enforced by convention, not by the type.** `parse` and
-`resolve` return the same type, so a clause that was never resolved can still
-be spliced — and `OrderByClause::parse` does not validate identifiers, so a
-whitespace-free expression reaches the SQL:
+**`resolve()` is optional, and skipping it widens what a client may name.**
+`parse` and `resolve` return the same type, so an unresolved clause still
+splices. `parse` guarantees the field is an identifier — `(select(1))` and
+`rank;drop` are refused — so no expression reaches the SQL either way. What
+you lose by skipping `resolve` is the *restriction*: any column that exists
+becomes sortable, including ones you never meant to offer.
 
 ```rust
-// Do not do this: `resolve` is what applies the allow-list.
+// Fine when the client's names are your column names and every column is
+// fair game.
 query.push_order_by(OrderByClause::parse(&request.order_by)?);
-//        ORDER BY (select(1)) ASC , id
+
+// Fail-closed: only the fields you listed, renamed to the columns you chose.
+query.push_order_by(OrderByClause::parse(&request.order_by)?.resolve(&columns)?);
 ```
 
-Always `parse(...)?.resolve(&columns)?` for anything a client supplied. A
-resolved/unresolved distinction in the type system is the fix, and is the
-next thing planned.
+`FilterClause` is the same, minus the identifier question — CEL's own lexer
+only yields identifier-shaped tokens.
 
 **A cursor cannot page on a `uuid` key.** Cursor keys are read back off the
 row into a `Value`, whose kinds are bool, int, float, string, timestamp and
