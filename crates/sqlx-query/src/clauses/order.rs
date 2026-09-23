@@ -148,6 +148,40 @@ impl OrderByClause {
         &self.keys
     }
 
+    /// Appends `column` as the next key, ascending.
+    ///
+    /// Takes a *column*, not a field: nothing here goes through
+    /// [`resolve`](QueryResolver::resolve), so this is for sorts the
+    /// program decides — a tie-breaker, a fixed secondary sort — not for
+    /// anything a client named. Client input goes through
+    /// [`parse`](Self::parse) and `resolve`, which is where the
+    /// fail-closed allow-list is applied.
+    ///
+    /// ```
+    /// # use sqlx_query::OrderByClause;
+    /// let order_by = OrderByClause::default().desc("placed_at").asc("id");
+    /// assert_eq!(order_by.sql().as_str(), "placed_at DESC, id ASC");
+    /// ```
+    #[must_use]
+    pub fn asc(self, column: impl Into<String>) -> Self {
+        self.push(column, OrderDirection::Asc)
+    }
+
+    /// Appends `column` as the next key, descending. See
+    /// [`asc`](Self::asc).
+    #[must_use]
+    pub fn desc(self, column: impl Into<String>) -> Self {
+        self.push(column, OrderDirection::Desc)
+    }
+
+    fn push(mut self, column: impl Into<String>, direction: OrderDirection) -> Self {
+        self.keys.push(OrderKey {
+            column: column.into(),
+            direction,
+        });
+        self
+    }
+
     /// Appends `other`'s keys after this clause's own, as tie-breakers —
     /// "sort by `self`, **then** by `other`". Unlike
     /// [`WhereClause::and`](crate::WhereClause::and), this isn't
@@ -259,6 +293,20 @@ mod tests {
             err,
             OrderByClauseError::UnknownField("internal_notes".into())
         );
+    }
+
+    #[test]
+    fn asc_and_desc_build_a_clause_without_parsing() {
+        let order_by = OrderByClause::default().desc("placed_at").asc("id");
+        assert_eq!(order_by.sql().as_str(), "placed_at DESC, id ASC");
+    }
+
+    #[test]
+    fn asc_and_desc_take_columns_not_fields_so_they_skip_the_allow_list() {
+        // `parse` + `resolve` would refuse a field that isn't offered; this
+        // path is for sorts the program decides, so it doesn't consult one.
+        let order_by = OrderByClause::default().asc("internal_rank");
+        assert_eq!(order_by.sql().as_str(), "internal_rank ASC");
     }
 
     #[test]

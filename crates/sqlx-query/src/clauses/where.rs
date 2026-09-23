@@ -85,10 +85,25 @@ impl WhereClause {
     /// land `other` on top of a number `self` is still using.
     #[must_use]
     pub fn and(self, other: WhereClause) -> WhereClause {
+        self.combine(other, "AND")
+    }
+
+    /// Combines two `WHERE`-shaped fragments with SQL `OR`, shifting
+    /// `other`'s placeholders past `self`'s own exactly as
+    /// [`and`](Self::and) does.
+    ///
+    /// Both sides are parenthesised, so there's no precedence to reason
+    /// about when mixing this with `and`.
+    #[must_use]
+    pub fn or(self, other: WhereClause) -> WhereClause {
+        self.combine(other, "OR")
+    }
+
+    fn combine(self, other: WhereClause, connective: &str) -> WhereClause {
         let lexer = QueryLexer::standard();
         let offset = lexer.max_placeholder_number(self.sql().as_str());
         let other_sql = lexer.shift_placeholder_numbers(other.sql().as_str(), offset);
-        let sql = format!("({}) AND ({})", self.sql().as_str(), other_sql);
+        let sql = format!("({}) {connective} ({})", self.sql().as_str(), other_sql);
 
         self.values
             .into_iter()
@@ -156,6 +171,20 @@ mod tests {
             "(deleted_at IS NULL) AND (archived = FALSE)"
         );
         assert!(combined.values().is_empty());
+    }
+
+    #[test]
+    fn or_combines_like_and_but_with_or() {
+        let a = WhereClause::new("status = $1").bind_value("ACTIVE");
+        let b = WhereClause::new("rank > $1").bind_value(42i64);
+
+        let combined = a.or(b);
+
+        assert_eq!(combined.sql().as_str(), "(status = $1) OR (rank > $2)");
+        assert_eq!(
+            combined.values(),
+            &[Value::String("ACTIVE".into()), Value::Int(42)]
+        );
     }
 
     #[test]
