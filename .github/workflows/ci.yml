@@ -35,6 +35,12 @@ jobs:
       - name: Run Lint
         run: nix develop --command make lint
 
+      # A driver and a date library are independent choices, and each
+      # combination compiles different code -- `make lint` only ever sees the
+      # all-features build.
+      - name: Check Feature Combinations
+        run: nix develop --command make lint-features
+
       - name: Run Tests
         run: nix develop --command make test
 

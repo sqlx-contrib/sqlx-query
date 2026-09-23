@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, ColumnIndex, Decode, Encode, Row, Type, ValueRef};
 
@@ -11,10 +10,19 @@ use crate::CursorError;
 /// into a `WhereClause`) can be spliced into a query for any dialect
 /// [`QueryComposer`](crate::QueryComposer) supports.
 ///
-/// `Serialize`/`Deserialize` (via chrono's `serde` feature for
-/// `Timestamp`) are what let [`Cursor`](crate::Cursor) derive them too,
-/// for [`Cursor::encode`](crate::Cursor::encode)/[`Cursor::parse`](crate::Cursor::parse)'s
+/// `Serialize`/`Deserialize` are what let [`Cursor`](crate::Cursor) derive
+/// them too, for
+/// [`Cursor::encode`](crate::Cursor::encode)/[`Cursor::parse`](crate::Cursor::parse)'s
 /// token format — see that method's docs.
+///
+/// Every variant exists in every build, whatever features are on. Postcard
+/// writes an enum variant by *index*, so compiling one out would shift the
+/// ones after it and make a token minted by one build decode as the wrong
+/// variant in another — silently, not as an error. That is why
+/// [`Timestamp`](Self::Timestamp) holds an integer rather than a date
+/// type: the token format cannot depend on which date library a consumer
+/// picked, because the service that mints a token need not be the one that
+/// redeems it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Null,
@@ -22,7 +30,17 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
-    Timestamp(DateTime<Utc>),
+    /// Microseconds since the Unix epoch.
+    ///
+    /// Microseconds rather than nanoseconds because that is what the
+    /// databases store — PostgreSQL `timestamptz` and MySQL `DATETIME(6)`
+    /// are both microsecond-resolution, so nanoseconds would be precision
+    /// this can only lose on the way back.
+    ///
+    /// Construct one with `From<chrono::DateTime<Utc>>` or
+    /// `From<time::OffsetDateTime>`, behind the `chrono` and `time`
+    /// features.
+    Timestamp(i64),
     /// A `BLOB`/`bytea`, which completes SQLite's storage classes:
     /// null, integer, real, text, blob.
     ///
@@ -94,9 +112,60 @@ impl From<&[u8]> for Value {
     }
 }
 
-impl From<DateTime<Utc>> for Value {
-    fn from(value: DateTime<Utc>) -> Self {
-        Value::Timestamp(value)
+#[cfg(feature = "chrono")]
+impl From<chrono::DateTime<chrono::Utc>> for Value {
+    fn from(value: chrono::DateTime<chrono::Utc>) -> Self {
+        Value::Timestamp(value.timestamp_micros())
+    }
+}
+
+#[cfg(feature = "time")]
+impl From<time::OffsetDateTime> for Value {
+    fn from(value: time::OffsetDateTime) -> Self {
+        Value::Timestamp(
+            i64::try_from(value.unix_timestamp_nanos() / 1_000).unwrap_or(i64::MAX),
+        )
+    }
+}
+
+/// What a [`Value::Timestamp`] is bound and decoded *as*.
+///
+/// The stored form is a plain integer so the token format stays stable
+/// across builds, but a database wants a real timestamp, so this names
+/// whichever date type the enabled features provide. `chrono` wins when
+/// both are on — arbitrary, but it has to be one of them, and a build with
+/// both can read either.
+///
+/// With neither feature there is no timestamp type to name, so this falls
+/// back to the integer itself. Nothing can construct a
+/// [`Value::Timestamp`] in that build — both `From` impls and the row
+/// decode are behind the same features — so the fallback is never
+/// reached; it exists so every bound in this file can be written once
+/// rather than once per feature combination.
+#[cfg(feature = "chrono")]
+pub(crate) type TimestampRepr = chrono::DateTime<chrono::Utc>;
+#[cfg(all(feature = "time", not(feature = "chrono")))]
+pub(crate) type TimestampRepr = time::OffsetDateTime;
+#[cfg(not(any(feature = "chrono", feature = "time")))]
+pub(crate) type TimestampRepr = i64;
+
+/// The stored microseconds as the type a driver will take.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the no-date-library arm cannot fail, the others can"
+)]
+pub(crate) fn timestamp_repr(micros: i64) -> Option<TimestampRepr> {
+    #[cfg(feature = "chrono")]
+    {
+        chrono::DateTime::from_timestamp_micros(micros)
+    }
+    #[cfg(all(feature = "time", not(feature = "chrono")))]
+    {
+        time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(micros) * 1_000).ok()
+    }
+    #[cfg(not(any(feature = "chrono", feature = "time")))]
+    {
+        Some(micros)
     }
 }
 
@@ -130,7 +199,7 @@ where
     i64: Type<DB>,
     f64: Type<DB>,
     String: Type<DB>,
-    DateTime<Utc>: Type<DB>,
+    TimestampRepr: Type<DB>,
     Vec<u8>: Type<DB>,
 {
     fn type_info() -> DB::TypeInfo {
@@ -149,7 +218,7 @@ where
     i64: Encode<'q, DB> + Type<DB>,
     f64: Encode<'q, DB> + Type<DB>,
     String: Encode<'q, DB> + Type<DB>,
-    DateTime<Utc>: Encode<'q, DB> + Type<DB>,
+    TimestampRepr: Encode<'q, DB> + Type<DB>,
     Vec<u8>: Encode<'q, DB> + Type<DB>,
     Option<String>: Encode<'q, DB> + Type<DB>,
 {
@@ -163,7 +232,15 @@ where
             Value::Int(v) => <i64 as Encode<'q, DB>>::encode_by_ref(v, buf),
             Value::Float(v) => <f64 as Encode<'q, DB>>::encode_by_ref(v, buf),
             Value::String(v) => <String as Encode<'q, DB>>::encode_by_ref(v, buf),
-            Value::Timestamp(v) => <DateTime<Utc> as Encode<'q, DB>>::encode_by_ref(v, buf),
+            // `None` only when the stored microseconds are outside what
+            // the date type can hold, which a value decoded from a row
+            // never is.
+            Value::Timestamp(v) => match timestamp_repr(*v) {
+                Some(timestamp) => {
+                    <TimestampRepr as Encode<'q, DB>>::encode_by_ref(&timestamp, buf)
+                }
+                None => Err(format!("timestamp {v} is out of range").into()),
+            },
             Value::Bytes(v) => <Vec<u8> as Encode<'q, DB>>::encode_by_ref(v, buf),
         }
     }
@@ -175,7 +252,7 @@ where
             Value::Int(_) => <i64 as Type<DB>>::type_info(),
             Value::Float(_) => <f64 as Type<DB>>::type_info(),
             Value::String(_) => <String as Type<DB>>::type_info(),
-            Value::Timestamp(_) => <DateTime<Utc> as Type<DB>>::type_info(),
+            Value::Timestamp(_) => <TimestampRepr as Type<DB>>::type_info(),
             Value::Bytes(_) => <Vec<u8> as Type<DB>>::type_info(),
         })
     }
@@ -209,7 +286,7 @@ pub(crate) trait RowExtension: Row {
         f32: Decode<'r, Self::Database> + Type<Self::Database>,
         f64: Decode<'r, Self::Database> + Type<Self::Database>,
         String: Decode<'r, Self::Database> + Type<Self::Database>,
-        DateTime<Utc>: Decode<'r, Self::Database> + Type<Self::Database>,
+        TimestampRepr: Decode<'r, Self::Database> + Type<Self::Database>,
         Vec<u8>: Decode<'r, Self::Database> + Type<Self::Database>;
 }
 
@@ -224,7 +301,7 @@ impl<R: Row> RowExtension for R {
         f32: Decode<'r, Self::Database> + Type<Self::Database>,
         f64: Decode<'r, Self::Database> + Type<Self::Database>,
         String: Decode<'r, Self::Database> + Type<Self::Database>,
-        DateTime<Utc>: Decode<'r, Self::Database> + Type<Self::Database>,
+        TimestampRepr: Decode<'r, Self::Database> + Type<Self::Database>,
         Vec<u8>: Decode<'r, Self::Database> + Type<Self::Database>,
     {
         let label = column.rsplit('.').next().unwrap_or(column);
@@ -261,8 +338,15 @@ impl<R: Row> RowExtension for R {
         if let Ok(v) = self.try_get::<bool, _>(ordinal) {
             return Ok(Value::Bool(v));
         }
-        if let Ok(v) = self.try_get::<DateTime<Utc>, _>(ordinal) {
-            return Ok(Value::Timestamp(v));
+        #[cfg(feature = "chrono")]
+        if let Ok(v) = self.try_get::<chrono::DateTime<chrono::Utc>, _>(ordinal) {
+            return Ok(Value::Timestamp(v.timestamp_micros()));
+        }
+        #[cfg(all(feature = "time", not(feature = "chrono")))]
+        if let Ok(v) = self.try_get::<time::OffsetDateTime, _>(ordinal) {
+            return Ok(Value::Timestamp(
+                i64::try_from(v.unix_timestamp_nanos() / 1_000).unwrap_or(i64::MAX),
+            ));
         }
         if let Ok(v) = self.try_get::<String, _>(ordinal) {
             return Ok(Value::String(v));

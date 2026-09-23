@@ -9,6 +9,8 @@
 //! exact opposite of the `?` path, and the reason the composer renders the
 //! two dialects differently.
 
+#![cfg(feature = "postgres")]
+
 use sqlx::{PgPool, Row};
 use sqlx_query::{Cursor, CursorError, OrderByClause, QueryComposer, WhereClause};
 

@@ -10,6 +10,8 @@
 //! PostgreSQL and MySQL live in `postgres.rs`/`mysql.rs`, behind the URLs
 //! the Dev Container sets.
 
+#![cfg(feature = "sqlite")]
+
 use sqlx::{Row, SqlitePool};
 use sqlx_query::{Cursor, OrderByClause, QueryComposer, Value, WhereClause};
 

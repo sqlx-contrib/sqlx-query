@@ -12,9 +12,22 @@ categories = ["database"]
 [lints]
 workspace = true
 
+[features]
+# Nothing by default. A consumer names the driver they use and the date
+# library they already have, and compiles neither of the others.
+default = []
+postgres = ["sqlx/postgres"]
+mysql = ["sqlx/mysql"]
+sqlite = ["sqlx/sqlite"]
+# A date library, for reading a timestamp out of a row and binding one back.
+# `Value::Timestamp` exists either way -- see its docs for why it has to.
+chrono = ["dep:chrono", "sqlx/chrono"]
+time = ["dep:time", "sqlx/time"]
+
 [dependencies]
-sqlx = { workspace = true, features = ["postgres", "mysql", "sqlite", "chrono"] }
-chrono = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 base64 = { workspace = true }
@@ -25,11 +38,10 @@ postcard = { workspace = true }
 # A runtime, and the drivers, only for the tests: the library itself never
 # opens a connection. `runtime-tokio` is additive, so enabling it here does
 # not change what a consumer of the library gets.
-sqlx = { workspace = true, features = [
-  "runtime-tokio",
-  "postgres",
-  "mysql",
-  "sqlite",
-  "chrono",
-] }
+sqlx = { workspace = true, features = ["runtime-tokio"] }
 tokio = { workspace = true }
+
+# The full matrix, so `cargo test` covers every dialect and both date
+# libraries without anyone having to remember a `--features` flag.
+[package.metadata.docs.rs]
+all-features = true

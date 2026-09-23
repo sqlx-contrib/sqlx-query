@@ -60,6 +60,7 @@ it.
 - [Keyset pagination](#keyset-pagination)
 - [Binding](#binding)
 - [Dialects](#dialects)
+- [Features](#features)
 - [Limitations](#limitations)
 - [Development](#development)
 - [Dependencies](#dependencies)
@@ -265,6 +266,33 @@ Each dialect is also lexed by its own rules — backtick and bracket identifiers
 `#` comments, backslash escapes, nested block comments — so a `?` inside a
 string literal or a quoted identifier is text, not a placeholder.
 
+## Features
+
+Nothing is on by default. Name the driver you use and the date library you
+already have, and the others are never compiled:
+
+```toml
+sqlx-query = { version = "0.1", features = ["postgres", "chrono"] }
+```
+
+| Feature                        | What it turns on                                         |
+| ------------------------------ | -------------------------------------------------------- |
+| `postgres`, `mysql`, `sqlite`  | `QueryDialect` for that driver — at least one is needed  |
+| `chrono`                       | `From<DateTime<Utc>>`, and timestamps read out of a row  |
+| `time`                         | the same for `time::OffsetDateTime`                      |
+
+`Value::Timestamp` holds microseconds since the epoch rather than a date
+type, and exists in every build regardless of features. A page token is a
+serialized `Value`, and postcard writes an enum variant by *index* — so a
+variant that compiled out in one build would shift the ones after it and
+decode as the wrong thing in another. The token format can't depend on which
+date library a consumer picked, because the service that mints a token needn't
+be the one that redeems it.
+
+With both `chrono` and `time` on, `chrono` is what a timestamp is bound and
+decoded as. Arbitrary, but it has to be one of them, and such a build reads
+either.
+
 ## Limitations
 
 **`resolve()` is optional, and skipping it widens what a client may name.**
@@ -330,7 +358,9 @@ The Dev Container sets both URLs, so `make test` covers everything inside it.
 - [`regex`](https://crates.io/crates/regex) to find the slots
 - [`postcard`](https://crates.io/crates/postcard) +
   [`base64`](https://crates.io/crates/base64) for the page token
-- [`chrono`](https://crates.io/crates/chrono) for timestamp bind values
+- [`chrono`](https://crates.io/crates/chrono) or
+  [`time`](https://crates.io/crates/time) for timestamp values — optional,
+  and only for converting to and from `Value::Timestamp`'s integer
 - [`thiserror`](https://crates.io/crates/thiserror) for the error types
 
 Tooling: Nix for the dev shell, and a Dev Container that reuses the same

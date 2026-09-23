@@ -8,6 +8,8 @@
 //! These exercise [`QueryComposer::compose`] directly: SQL text + bind
 //! values, without needing a live database connection.
 
+#![cfg(all(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+
 use sqlx::Execute;
 use sqlx_query::{Cursor, Error, OrderByClause, QueryComposer, QueryStatement, Value, WhereClause};
 

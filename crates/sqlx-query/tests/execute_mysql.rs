@@ -9,6 +9,8 @@
 //! statement binds one value too many and the driver rejects it. That's
 //! the per-dialect lexing this crate added, and only MySQL can prove it.
 
+#![cfg(feature = "mysql")]
+
 use sqlx::{MySqlPool, Row};
 use sqlx_query::{Cursor, OrderByClause, QueryComposer, WhereClause};
 

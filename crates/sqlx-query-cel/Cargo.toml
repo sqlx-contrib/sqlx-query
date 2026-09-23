@@ -17,6 +17,6 @@ workspace = true
 # dependency without one -- the published crate has no sibling directory to
 # resolve, only a registry. release-please's cargo-workspace plugin keeps this
 # in step with sqlx-query's own version.
-sqlx-query = { path = "../sqlx-query", version = "0.1.0" }
+sqlx-query = { path = "../sqlx-query", version = "0.1.0", default-features = false }
 cel = { workspace = true }
 thiserror = { workspace = true }

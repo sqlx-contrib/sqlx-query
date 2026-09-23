@@ -32,7 +32,6 @@
 //! rather than this crate re-deriving the same table from OIDs or type
 //! codes.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{ColumnIndex, Decode, Row, Type};
 
@@ -203,7 +202,7 @@ impl Cursor {
         f32: Decode<'r, R::Database> + Type<R::Database>,
         f64: Decode<'r, R::Database> + Type<R::Database>,
         String: Decode<'r, R::Database> + Type<R::Database>,
-        DateTime<Utc>: Decode<'r, R::Database> + Type<R::Database>,
+        crate::value::TimestampRepr: Decode<'r, R::Database> + Type<R::Database>,
         Vec<u8>: Decode<'r, R::Database> + Type<R::Database>,
     {
         for key in &mut self.keys {
@@ -376,7 +375,7 @@ mod tests {
     #[test]
     fn encode_parse_round_trips_every_value_variant() {
         let order_by = OrderByClause::parse("a asc, b asc, c asc, d asc, e asc, f asc").unwrap();
-        let timestamp = DateTime::from_timestamp(1_700_000_000, 123_000_000).unwrap();
+        let timestamp = 1_700_000_000_123_000i64;
         let cursor = Cursor::new(order_by)
             .after(vec![
                 Value::Null,

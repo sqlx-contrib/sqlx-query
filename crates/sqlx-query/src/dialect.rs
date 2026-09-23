@@ -117,6 +117,7 @@ pub struct Quoting {
     pub backslash_escapes: bool,
 }
 
+#[cfg(feature = "postgres")]
 impl QueryDialect for sqlx::Postgres {
     fn syntax() -> QuerySyntax {
         QuerySyntax {
@@ -133,6 +134,7 @@ impl QueryDialect for sqlx::Postgres {
     }
 }
 
+#[cfg(feature = "mysql")]
 impl QueryDialect for sqlx::MySql {
     fn syntax() -> QuerySyntax {
         QuerySyntax {
@@ -149,6 +151,7 @@ impl QueryDialect for sqlx::MySql {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl QueryDialect for sqlx::Sqlite {
     fn syntax() -> QuerySyntax {
         QuerySyntax {
