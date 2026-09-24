@@ -12,6 +12,14 @@ categories = ["database"]
 [lints]
 workspace = true
 
+[features]
+# Nothing by default, as in sqlx-query. A date library, for reading
+# `timestamp("...")` into a timestamp bind value; each turns on sqlx-query's
+# own feature of the same name, which is what binds one.
+default = []
+chrono = ["dep:chrono", "sqlx-query/chrono"]
+time = ["dep:time", "sqlx-query/time"]
+
 [dependencies]
 # `version` alongside `path` because `cargo publish` refuses a path
 # dependency without one -- the published crate has no sibling directory to
@@ -20,6 +28,8 @@ workspace = true
 sqlx-query = { path = "../sqlx-query", version = "0.1.0", default-features = false }
 cel = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true, optional = true }
+time = { workspace = true, optional = true, features = ["parsing"] }
 
 [dev-dependencies]
 # A runtime and two drivers, only for the tests that run a filter against a

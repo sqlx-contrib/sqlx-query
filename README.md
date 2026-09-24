@@ -165,7 +165,8 @@ let (sql, arguments) = (statement.sql(), statement.arguments());
 
 `FilterClause::parse` accepts the comparison-and-boolean part of [CEL]: `&&`,
 `||`, `!`, the six comparisons, `in` over a list, arithmetic, and literals —
-plus the string methods `startsWith`, `endsWith` and `contains`.
+plus the string methods `startsWith`, `endsWith` and `contains`, and
+`timestamp("...")`.
 
 | Filter                                  | Becomes                                     |
 | --------------------------------------- | ------------------------------------------- |
@@ -175,6 +176,7 @@ plus the string methods `startsWith`, `endsWith` and `contains`.
 | `deleted_at == null`                    | `deleted_at IS NULL`                        |
 | `name.startsWith('Gro')`                | `(name) LIKE $1 ESCAPE '!'`, bound `Gro%`   |
 | `name.contains('50%')`                  | `(name) LIKE $1 ESCAPE '!'`, bound `%50!%%` |
+| `created > timestamp('2026-01-01T00:00:00Z')` | `(created) > ($1)`, bound as a timestamp |
 
 Two deliberate choices: `== null` renders as `IS NULL`, because `= NULL` is
 never true and so never what was meant; and both sides of a binary operator are
@@ -186,6 +188,14 @@ itself. The escape is `!` rather than `\`, because a backslash inside a string
 literal is itself an escape in MySQL's default mode. Case sensitivity is the
 engine's: PostgreSQL's `LIKE` is case-sensitive, SQLite's ignores ASCII case, and
 MySQL's follows the column's collation.
+
+`timestamp("...")` reads an RFC 3339 string, offset and all, into a timestamp
+bind value, so it compares with a timestamp column where a plain string
+wouldn't: PostgreSQL has no `timestamptz > text`. It is read when the filter is
+parsed, so its argument has to be a literal, and a malformed one is an
+`InvalidLiteral` error rather than a query the database refuses. It needs one
+of `sqlx-query-cel`'s date-library features, `chrono` or `time`, which turn on
+`sqlx-query`'s of the same name; without either it is refused.
 
 Macros, comprehensions, other function calls, maps and structs are refused. They
 have no reading as a `WHERE` clause, and guessing one would be inventing SQL the

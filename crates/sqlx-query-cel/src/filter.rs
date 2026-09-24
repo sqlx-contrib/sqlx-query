@@ -2,9 +2,10 @@
 //! the comparison-and-boolean part of CEL: `&&`, `||`, `!`, the six
 //! comparisons, `in` over a list, arithmetic, and literals — plus the
 //! string methods `startsWith`, `endsWith` and `contains`, which read as
-//! `LIKE`. Macros, comprehensions, other function calls, maps and structs
-//! are refused: they have no reading as a `WHERE` clause, and guessing one
-//! would be inventing SQL the caller did not ask for.
+//! `LIKE`, and `timestamp("...")`, which reads an RFC 3339 string as a
+//! timestamp literal. Macros, comprehensions, other function calls, maps
+//! and structs are refused: they have no reading as a `WHERE` clause, and
+//! guessing one would be inventing SQL the caller did not ask for.
 //!
 //! [`FilterClause`] holds the parsed CEL tree itself — no separate
 //! condition-tree type mirroring it, since that would just be this
@@ -43,6 +44,11 @@ pub enum FilterClauseError {
 
     #[error("`{0}` has no reading as a condition")]
     Unsupported(String),
+
+    /// A literal that does not read as the type a function asks for:
+    /// `timestamp("yesterday")`.
+    #[error("{0}")]
+    InvalidLiteral(String),
 
     #[error("unknown filter field `{0}`")]
     UnknownField(String),
@@ -159,6 +165,10 @@ impl FilterClause {
             )),
             cel_ops::NEGATE => Ok(format!("-({})", Self::render(Self::only(call)?, values)?)),
             "startsWith" | "endsWith" | "contains" => Self::render_like(call, values),
+            "timestamp" => {
+                values.push(Self::timestamp(Self::constant(call)?)?);
+                Ok(format!("${}", values.len()))
+            }
             name => Err(FilterClauseError::Unsupported(format!(
                 "`{name}` has no reading as a condition"
             ))),
@@ -253,6 +263,57 @@ impl FilterClause {
 
         values.push(Value::String(pattern));
         Ok(format!("({field}) LIKE ${} ESCAPE '!'", values.len()))
+    }
+
+    /// The string literal a constructor -- `timestamp("...")` -- is called
+    /// with. A global call, not a method, and on a literal only: the value
+    /// is read here, at parse time, so it has to be one.
+    fn constant(call: &CallExpr) -> Result<&str, FilterClauseError> {
+        let name = &call.func_name;
+        let (None, [argument]) = (&call.target, call.args.as_slice()) else {
+            return Err(FilterClauseError::Unsupported(format!(
+                "`{name}` is called as `{name}(\"...\")`"
+            )));
+        };
+        match &argument.expr {
+            Expr::Literal(LiteralValue::String(text)) => Ok(&**text),
+            _ => Err(FilterClauseError::Unsupported(format!(
+                "`{name}` reads a string literal"
+            ))),
+        }
+    }
+
+    /// `text`, an RFC 3339 timestamp, as the timestamp it names.
+    #[cfg(feature = "chrono")]
+    fn timestamp(text: &str) -> Result<Value, FilterClauseError> {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .map(|timestamp| Value::from(timestamp.to_utc()))
+            .map_err(|error| {
+                FilterClauseError::InvalidLiteral(format!(
+                    "`timestamp(\"{text}\")` is not an RFC 3339 timestamp: {error}"
+                ))
+            })
+    }
+
+    #[cfg(all(feature = "time", not(feature = "chrono")))]
+    fn timestamp(text: &str) -> Result<Value, FilterClauseError> {
+        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+            .map(Value::from)
+            .map_err(|error| {
+                FilterClauseError::InvalidLiteral(format!(
+                    "`timestamp(\"{text}\")` is not an RFC 3339 timestamp: {error}"
+                ))
+            })
+    }
+
+    /// Without a date library there is nothing to read the string with, so
+    /// the function is refused rather than bound as text a timestamp column
+    /// would reject.
+    #[cfg(not(any(feature = "chrono", feature = "time")))]
+    fn timestamp(_: &str) -> Result<Value, FilterClauseError> {
+        Err(FilterClauseError::Unsupported(
+            "`timestamp` needs the `chrono` or `time` feature".to_owned(),
+        ))
     }
 
     fn render_in_list(
@@ -618,5 +679,57 @@ mod tests {
             refused,
             Err(FilterClauseError::UnknownField(field)) if field == "secret"
         ));
+    }
+
+    /// 2026-01-01T00:00:00Z, in microseconds since the epoch.
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    const NEW_YEAR: i64 = 1_767_225_600_000_000;
+
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[test]
+    fn timestamp_reads_as_a_timestamp_literal() {
+        let where_by = FilterClause::parse("created_at > timestamp('2026-01-01T00:00:00Z')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.sql().as_str(), "(created_at) > ($1)");
+        assert_eq!(where_by.values(), &[Value::Timestamp(NEW_YEAR)]);
+    }
+
+    /// The offset is read, not dropped: the same instant in two zones binds
+    /// the same value.
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[test]
+    fn a_timestamp_is_read_in_its_own_offset() {
+        let where_by = FilterClause::parse("created_at == timestamp('2026-01-01T02:00:00+02:00')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.values(), &[Value::Timestamp(NEW_YEAR)]);
+    }
+
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[test]
+    fn a_malformed_timestamp_is_an_invalid_literal() {
+        assert!(matches!(
+            FilterClause::parse("created_at > timestamp('yesterday')"),
+            Err(FilterClauseError::InvalidLiteral(_))
+        ));
+    }
+
+    #[test]
+    fn timestamp_reads_one_string_literal() {
+        assert!(refuses("created_at > timestamp(other)"));
+        assert!(refuses("created_at > timestamp(3)"));
+        assert!(refuses("created_at > timestamp('a', 'b')"));
+        assert!(refuses(
+            "created_at > name.timestamp('2026-01-01T00:00:00Z')"
+        ));
+    }
+
+    #[cfg(not(any(feature = "chrono", feature = "time")))]
+    #[test]
+    fn timestamp_is_refused_without_a_date_library() {
+        assert!(refuses("created_at > timestamp('2026-01-01T00:00:00Z')"));
     }
 }

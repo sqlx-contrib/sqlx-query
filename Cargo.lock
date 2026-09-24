@@ -1351,9 +1351,11 @@ name = "sqlx-query-cel"
 version = "0.1.0"
 dependencies = [
  "cel",
+ "chrono",
  "sqlx",
  "sqlx-query",
  "thiserror",
+ "time",
  "tokio",
 ]
 

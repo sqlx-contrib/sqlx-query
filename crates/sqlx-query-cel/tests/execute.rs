@@ -121,3 +121,40 @@ async fn a_pattern_reads_the_same_on_postgres() {
 
     assert_eq!(names, ["50%_off!", "Groceries", "groceries"]);
 }
+
+/// A `timestamp("...")` literal binds as a timestamp, so it compares with a
+/// `timestamptz` column -- where a string would not: PostgreSQL has no
+/// `timestamptz > text`.
+#[cfg(any(feature = "chrono", feature = "time"))]
+#[tokio::test]
+async fn a_timestamp_literal_compares_with_a_timestamp_column() {
+    let Some(pool) = postgres().await else {
+        return;
+    };
+
+    let filter = FilterClause::parse("created_at >= timestamp('2026-01-01T00:00:00Z')")
+        .and_then(|filter| filter.resolve(&HashMap::from([("created_at", "created_at")])))
+        .expect("the filter resolves");
+    let mut query = QueryComposer::<sqlx::Postgres>::new(
+        "SELECT name FROM (VALUES \
+             ('before', '2025-12-31T23:59:59Z'::timestamptz), \
+             ('on',     '2026-01-01T00:00:00Z'::timestamptz), \
+             ('after',  '2026-01-02T00:00:00+02:00'::timestamptz) \
+         ) AS items(name, created_at) \
+         WHERE /* query.where AND */ TRUE",
+    );
+    query.push_where(filter);
+
+    let mut names: Vec<String> = query
+        .build()
+        .expect("composes")
+        .fetch_all(&pool)
+        .await
+        .expect("runs")
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect();
+    names.sort();
+
+    assert_eq!(names, ["after", "on"]);
+}

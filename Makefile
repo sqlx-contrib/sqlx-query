@@ -51,6 +51,10 @@ lint-features:
 	cargo check -p sqlx-query --no-default-features --features postgres,chrono
 	cargo check -p sqlx-query --no-default-features --features sqlite,time
 	cargo check -p sqlx-query --all-features
+	cargo check -p sqlx-query-cel --no-default-features
+	cargo check -p sqlx-query-cel --no-default-features --features chrono
+	cargo check -p sqlx-query-cel --no-default-features --features time
+	cargo check -p sqlx-query-cel --all-features
 
 .PHONY: lint
 lint:
