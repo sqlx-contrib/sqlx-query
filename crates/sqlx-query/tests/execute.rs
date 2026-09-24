@@ -13,7 +13,7 @@
 #![cfg(feature = "sqlite")]
 
 use sqlx::{Row, SqlitePool};
-use sqlx_query::{Cursor, OrderByClause, QueryComposer, Value, WhereClause};
+use sqlx_query::{Cursor, OrderByClause, Pager, QueryComposer, Value, WhereClause};
 
 const SCHEMA: &str = "
     CREATE TABLE orders (
@@ -331,4 +331,58 @@ async fn a_cursor_page_stays_inside_the_base_condition() {
         [3],
         "the page after acme's rank 20"
     );
+}
+
+/// Page through acme's orders `size` at a time by rank, carrying each
+/// page's cursor to the next as a token -- the way it travels between
+/// requests -- and return the ids of every page.
+async fn pages(pool: &SqlitePool, size: usize) -> Vec<Vec<i64>> {
+    let order_by = OrderByClause::default().asc("rank").asc("id");
+    let pager = Pager::new(Cursor::new(order_by.clone()), size);
+    let (mut seen, mut token) = (Vec::new(), None::<String>);
+
+    // Bounded, so a cursor that never runs out fails instead of hanging.
+    for _ in 0..10 {
+        let mut query = QueryComposer::<sqlx::Sqlite>::new(LIST_ORDERS);
+        query
+            .bind_value("acme")
+            .bind_value(pager.limit())
+            .push_order_by(order_by.clone());
+        if let Some(token) = &token {
+            query.with_cursor(Cursor::parse(token).expect("the token parses"));
+        }
+
+        let rows = query
+            .build()
+            .expect("composes")
+            .fetch_all(pool)
+            .await
+            .expect("runs");
+        let page = pager.next_page(rows).expect("the row carries every key");
+
+        seen.push(page.rows.iter().map(|row| row.get("id")).collect());
+        match page.cursor {
+            Some(cursor) => token = Some(cursor.encode()),
+            None => return seen,
+        }
+    }
+    panic!("still paging after ten pages: {seen:?}");
+}
+
+/// Every row once, in order, and the last page is the one with no cursor.
+#[tokio::test]
+async fn a_pager_pages_through_every_row_once() {
+    let pool = seed().await;
+
+    assert_eq!(pages(&pool, 2).await, [vec![1, 2], vec![3]]);
+    assert_eq!(pages(&pool, 1).await, [vec![1], vec![2], vec![3]]);
+}
+
+/// A page that exactly fills the size is the last: the extra row the pager
+/// asks for is what says there is another, and it did not come back.
+#[tokio::test]
+async fn a_page_that_fills_exactly_has_no_cursor() {
+    let pool = seed().await;
+
+    assert_eq!(pages(&pool, 3).await, [vec![1, 2, 3]]);
 }

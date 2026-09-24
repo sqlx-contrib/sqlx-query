@@ -15,7 +15,8 @@ mod value;
 
 pub use argument::{Bindable, QueryArgument};
 pub use clauses::{
-    Cursor, CursorError, OrderByClause, OrderByClauseError, OrderDirection, WhereClause,
+    Cursor, CursorError, OrderByClause, OrderByClauseError, OrderDirection, Page, Pager,
+    WhereClause,
 };
 pub use composer::{Error, QueryComposer, QueryStatement};
 pub use dialect::{PlaceholderStyle, QueryDialect, QuerySyntax, Quoting};

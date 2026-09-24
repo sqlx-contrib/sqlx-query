@@ -224,17 +224,37 @@ A `Cursor` is a resolved `OrderByClause` plus one boundary value per key,
 rendered as the OR-of-ANDs tuple comparison the seek method wants — not
 `OFFSET`, which re-reads every row it skips.
 
+A `Pager` runs the page loop around it. It knows the page size and the
+ordering, asks the query for one row past the page, and cuts what comes back
+into a `Page` — the rows, and the cursor to the next page if that extra row
+came back:
+
 ```rust
-// The page just fetched, turned into the cursor for the next one. Values come
-// off the last row, so no one has to know each key's Rust type.
-let cursor = Cursor::new(order_by.clone()).after_row(users.last().unwrap())?;
-let page_token = cursor.encode();
+let pager = Pager::new(Cursor::new(order_by.clone()), 50);
+
+let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
+query
+    .bind_value(tenant_id)
+    .bind_value(pager.limit()) // 51: one past the page
+    .push_order_by(order_by);
+if let Some(cursor) = cursor {
+    query.with_cursor(cursor); // where the previous page left off
+}
+
+let rows = query.build()?.fetch_all(&pool).await?;
+let page = pager.next_page(rows)?; // Page { rows: at most 50, cursor }
+
+// The cursor's values come off the page's last row, so no one has to know
+// each key's Rust type. `None` on the last page.
+let next_page_token = page.cursor.map(|cursor| cursor.encode());
 
 // ... and on the next request:
-let cursor = Cursor::parse(&page_token)?;
-let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
-query.bind_value(tenant_id).bind_value(50i64).with_cursor(cursor);
+let cursor = Some(Cursor::parse(&page_token)?);
 ```
+
+A page that exactly fills the size is the last one: the extra row is what says
+there is another. `Cursor::after_row` builds the same cursor by hand, from
+whichever row a caller picks.
 
 A key can be any column a `Value` holds, a UUID primary key included behind
 the `uuid` feature — it is read back off the row as a `Value::Uuid` and bound
