@@ -427,6 +427,45 @@ fn cursor_and_filter_are_combined_with_and() {
     );
 }
 
+/// The empty cursor -- the first page's, what an empty token parses to -- is
+/// no cursor: nothing is AND-ed in, and an explicit `order_by` has no
+/// cursor ordering to disagree with, so the first page composes exactly as
+/// it would with no cursor set.
+#[test]
+fn an_empty_cursor_is_no_cursor() {
+    let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE ORDER BY /* query.order_by , */ id";
+
+    let mut first = QueryComposer::<sqlx::Postgres>::new(sql);
+    first
+        .push_order_by(OrderByClause::parse("rank desc").unwrap())
+        .with_cursor(Cursor::parse("").unwrap());
+    let mut untouched = QueryComposer::<sqlx::Postgres>::new(sql);
+    untouched.push_order_by(OrderByClause::parse("rank desc").unwrap());
+
+    let first = first.compose().expect("no ordering to mismatch");
+    assert_eq!(first.sql(), untouched.compose().unwrap().sql());
+    assert!(values(&first).is_empty());
+}
+
+/// An empty cursor after a real one clears it, as a second `with_cursor`
+/// replaces the first.
+#[test]
+fn an_empty_cursor_replaces_a_real_one() {
+    let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
+    let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+    query
+        .with_cursor(rank_cursor())
+        .with_cursor(Cursor::default());
+
+    assert_eq!(
+        query.compose().unwrap().sql(),
+        QueryComposer::<sqlx::Postgres>::new(sql)
+            .compose()
+            .unwrap()
+            .sql()
+    );
+}
+
 /// An empty filter -- what a blank one parses to -- is no filter: the slot
 /// drops exactly as if nothing had been pushed.
 #[test]

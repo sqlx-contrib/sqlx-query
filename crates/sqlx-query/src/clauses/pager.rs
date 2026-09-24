@@ -68,7 +68,14 @@ struct CursorKey {
 
 /// A keyset pagination cursor. See the module docs for what's built and
 /// what's deliberately not here yet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The default is the empty cursor: no keys and no position, the start of a
+/// traversal. It is what an empty `page_token` parses to and what
+/// [`encode`](Self::encode)s back to one — AIP-158's empty token, the first
+/// page on the way in and the last on the way out — and
+/// [`QueryComposer::with_cursor`](crate::QueryComposer::with_cursor) takes it
+/// as no cursor at all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cursor {
     keys: Vec<CursorKey>,
 }
@@ -113,10 +120,20 @@ impl Cursor {
         Cursor { keys }
     }
 
+    /// Whether this is the empty cursor: no keys, so no position — the start
+    /// of a traversal, or, on a [`Page`], the end of one.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     /// Decodes a `page_token` string produced by [`encode`](Self::encode)
     /// back into a `Cursor` carrying both its `order_by` and its boundary
     /// values — no separate [`new`](Self::new)/[`after`](Self::after) call
     /// needed, unlike building one from scratch.
+    ///
+    /// An empty or all-whitespace token is the [empty](Self::is_empty)
+    /// cursor, the first page, as AIP-158 reads it.
     ///
     /// # Errors
     ///
@@ -126,6 +143,10 @@ impl Cursor {
     /// corrupted or hand-edited after it was issued.
     pub fn parse(token: &str) -> Result<Self, CursorError> {
         use base64::Engine as _;
+
+        if token.trim().is_empty() {
+            return Ok(Cursor::default());
+        }
 
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(token)
@@ -145,6 +166,9 @@ impl Cursor {
     /// back to the client as-is. See the module docs for the wire format
     /// and what the checksum does and doesn't guard against.
     ///
+    /// The [empty](Self::is_empty) cursor encodes as the empty string, the
+    /// token that says there is no next page.
+    ///
     /// # Panics
     ///
     /// If any key's value is unset — unreachable through this type's public
@@ -152,6 +176,10 @@ impl Cursor {
     #[must_use]
     pub fn encode(&self) -> String {
         use base64::Engine as _;
+
+        if self.is_empty() {
+            return String::new();
+        }
 
         let token = CursorToken {
             checksum: checksum_of(self),
@@ -297,6 +325,10 @@ impl Pager {
     /// sorted by. A position `cursor` already carries is replaced on each
     /// page, so the cursor a request came in with works too.
     ///
+    /// The ordering is what a cursor positions by, so it cannot be empty
+    /// for a traversal to go past its first page: over an
+    /// [empty](Cursor::is_empty) cursor every page is the last.
+    ///
     /// A `size` of 0 is taken as 1: a page with no rows could never say
     /// where the next one starts.
     #[must_use]
@@ -321,7 +353,7 @@ impl Pager {
     /// Keeps the page's `size` rows. If the extra row came back there is a
     /// next page, and [`Page::cursor`] is positioned after the last row kept
     /// (see [`Cursor::after_row`]); otherwise this is the last page and it is
-    /// `None`.
+    /// the [empty](Cursor::is_empty) cursor.
     ///
     /// # Errors
     ///
@@ -344,15 +376,18 @@ impl Pager {
         for<'r> crate::value::UuidRepr: Decode<'r, R::Database> + Type<R::Database>,
     {
         if rows.len() <= self.size {
-            return Ok(Page { rows, cursor: None });
+            return Ok(Page {
+                rows,
+                cursor: Cursor::default(),
+            });
         }
 
         // At least one row is left: `size` is never 0, and there were more.
         rows.truncate(self.size);
-        let cursor = rows
-            .last()
-            .map(|last| self.cursor.clone().after_row(last))
-            .transpose()?;
+        let cursor = match rows.last() {
+            Some(last) => self.cursor.clone().after_row(last)?,
+            None => Cursor::default(),
+        };
 
         Ok(Page { rows, cursor })
     }
@@ -365,8 +400,9 @@ pub struct Page<R> {
     /// The page's rows, at most the pager's size.
     pub rows: Vec<R>,
     /// The cursor to the next page — [`encode`](Cursor::encode) it as the
-    /// `next_page_token` — or `None` on the last page.
-    pub cursor: Option<Cursor>,
+    /// `next_page_token` — or the [empty](Cursor::is_empty) cursor on the
+    /// last page, which encodes as the empty token.
+    pub cursor: Cursor,
 }
 
 /// `key`'s 1-based position in `keys` — its placeholder number, since
@@ -531,6 +567,25 @@ mod tests {
             err,
             CursorError::TokenChecksumMismatch | CursorError::TokenMalformed
         ));
+    }
+
+    /// The empty token and the empty cursor are each other's image: the
+    /// first page on the way in, the last on the way out.
+    #[test]
+    fn the_empty_token_is_the_empty_cursor() {
+        for token in ["", "  "] {
+            assert!(Cursor::parse(token).unwrap().is_empty(), "{token:?}");
+        }
+        assert!(Cursor::default().is_empty());
+        assert_eq!(Cursor::default().encode(), "");
+        assert!(Cursor::default().to_where_clause().is_empty());
+        assert!(Cursor::default().to_order_by_clause().keys().is_empty());
+
+        let positioned = Cursor::new(OrderByClause::parse("rank desc").unwrap())
+            .after(vec![Value::Int(42)])
+            .unwrap();
+        assert!(!positioned.is_empty());
+        assert!(!positioned.encode().is_empty());
     }
 
     #[test]

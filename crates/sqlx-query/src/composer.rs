@@ -174,8 +174,12 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// Only one cursor makes sense per query, so unlike `push_where`/
     /// `push_order_by` this doesn't accumulate — a second call replaces the
     /// first.
+    ///
+    /// The [empty](Cursor::is_empty) cursor — the first page's — is no
+    /// cursor: nothing is AND-ed in, and there is no ordering to check an
+    /// explicit one against.
     pub fn with_cursor(&mut self, cursor: Cursor) -> &mut Self {
-        self.cursor = Some(cursor);
+        self.cursor = (!cursor.is_empty()).then_some(cursor);
         self
     }
 

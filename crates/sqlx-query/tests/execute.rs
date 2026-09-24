@@ -335,11 +335,12 @@ async fn a_cursor_page_stays_inside_the_base_condition() {
 
 /// Page through acme's orders `size` at a time by rank, carrying each
 /// page's cursor to the next as a token -- the way it travels between
-/// requests -- and return the ids of every page.
+/// requests, from the empty token to the empty token -- and return the ids
+/// of every page.
 async fn pages(pool: &SqlitePool, size: usize) -> Vec<Vec<i64>> {
     let order_by = OrderByClause::default().asc("rank").asc("id");
     let pager = Pager::new(Cursor::new(order_by.clone()), size);
-    let (mut seen, mut token) = (Vec::new(), None::<String>);
+    let (mut seen, mut token) = (Vec::new(), String::new());
 
     // Bounded, so a cursor that never runs out fails instead of hanging.
     for _ in 0..10 {
@@ -347,10 +348,8 @@ async fn pages(pool: &SqlitePool, size: usize) -> Vec<Vec<i64>> {
         query
             .bind_value("acme")
             .bind_value(pager.limit())
-            .push_order_by(order_by.clone());
-        if let Some(token) = &token {
-            query.with_cursor(Cursor::parse(token).expect("the token parses"));
-        }
+            .push_order_by(order_by.clone())
+            .with_cursor(Cursor::parse(&token).expect("the token parses"));
 
         let rows = query
             .build()
@@ -361,9 +360,9 @@ async fn pages(pool: &SqlitePool, size: usize) -> Vec<Vec<i64>> {
         let page = pager.next_page(rows).expect("the row carries every key");
 
         seen.push(page.rows.iter().map(|row| row.get("id")).collect());
-        match page.cursor {
-            Some(cursor) => token = Some(cursor.encode()),
-            None => return seen,
+        token = page.cursor.encode();
+        if token.is_empty() {
+            return seen;
         }
     }
     panic!("still paging after ten pages: {seen:?}");

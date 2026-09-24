@@ -237,27 +237,30 @@ into a `Page` — the rows, and the cursor to the next page if that extra row
 came back:
 
 ```rust
+// The request's token; the empty one -- the first page -- is the empty cursor.
+let cursor = Cursor::parse(&page_token)?;
 let pager = Pager::new(Cursor::new(order_by.clone()), 50);
 
 let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
 query
     .bind_value(tenant_id)
     .bind_value(pager.limit()) // 51: one past the page
-    .push_order_by(order_by);
-if let Some(cursor) = cursor {
-    query.with_cursor(cursor); // where the previous page left off
-}
+    .push_order_by(order_by)
+    .with_cursor(cursor); // where the previous page left off, if anywhere
 
 let rows = query.build()?.fetch_all(&pool).await?;
 let page = pager.next_page(rows)?; // Page { rows: at most 50, cursor }
 
 // The cursor's values come off the page's last row, so no one has to know
-// each key's Rust type. `None` on the last page.
-let next_page_token = page.cursor.map(|cursor| cursor.encode());
-
-// ... and on the next request:
-let cursor = Some(Cursor::parse(&page_token)?);
+// each key's Rust type. On the last page it is the empty cursor, which
+// encodes as the empty token.
+let next_page_token = page.cursor.encode();
 ```
+
+The empty token and the empty cursor are each other's image, as AIP-158 reads
+the empty `page_token`: the first page on the way in, the last on the way out.
+`with_cursor` takes the empty cursor as no cursor at all, so the first page
+needs no branch.
 
 A page that exactly fills the size is the last one: the extra row is what says
 there is another. `Cursor::after_row` builds the same cursor by hand, from

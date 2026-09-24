@@ -347,16 +347,14 @@ async fn a_pager_pages_through_every_row_once() {
                LIMIT $1";
     let order_by = OrderByClause::default().asc("rank").asc("id");
     let pager = Pager::new(Cursor::new(order_by.clone()), 2);
-    let (mut seen, mut cursor) = (Vec::<Vec<i64>>::new(), None);
+    let (mut seen, mut cursor) = (Vec::<Vec<i64>>::new(), Cursor::default());
 
     for _ in 0..10 {
         let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
         query
             .bind_value(pager.limit())
-            .push_order_by(order_by.clone());
-        if let Some(cursor) = cursor.take() {
-            query.with_cursor(cursor);
-        }
+            .push_order_by(order_by.clone())
+            .with_cursor(std::mem::take(&mut cursor));
 
         let rows = query
             .build()
@@ -367,10 +365,10 @@ async fn a_pager_pages_through_every_row_once() {
         let page = pager.next_page(rows).expect("the row carries every key");
 
         seen.push(page.rows.iter().map(|row| row.get("id")).collect());
-        match page.cursor {
-            Some(next) => cursor = Some(next),
-            None => break,
+        if page.cursor.is_empty() {
+            break;
         }
+        cursor = page.cursor;
     }
 
     assert_eq!(seen, [vec![2, 3], vec![4, 1], vec![5]]);
