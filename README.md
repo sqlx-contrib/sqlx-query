@@ -94,7 +94,7 @@ syntax is a new crate rather than a fork.
                    ▼
 ┌───────────────────────────────────────────────────────────┐
 │ SELECT id, name FROM users                                │  what executes
-│  WHERE (rank) > ($3) AND tenant_id = $1                   │
+│  WHERE ((rank) > ($3)) AND tenant_id = $1                 │
 │  ORDER BY rank DESC , id                                  │
 └───────────────────────────────────────────────────────────┘
   binds: [tenant_id, 50, 10]
