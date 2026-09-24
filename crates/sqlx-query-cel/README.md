@@ -18,9 +18,13 @@ are renamed through an allow-list, so a request can only filter on columns you
 offered by name.
 
 Accepts the comparison-and-boolean part of CEL: `&&`, `||`, `!`, the six
-comparisons, `in` over a list, arithmetic and literals. Macros,
-comprehensions, function calls, maps and structs are refused — they have no
-reading as a `WHERE` clause, and guessing one would invent SQL the caller
+comparisons, `in` over a list, arithmetic and literals, plus the string methods
+`startsWith`, `endsWith` and `contains`, which read as `LIKE`, and the
+constructors `timestamp("...")` — an RFC 3339 string as a timestamp, behind the
+`chrono` or `time` feature — and `uuid("...")`, behind the `uuid` feature.
+Macros,
+comprehensions, other function calls, maps and structs are refused — they have
+no reading as a `WHERE` clause, and guessing one would invent SQL the caller
 didn't ask for.
 
 The dependency runs one way: `sqlx-query` never knows about CEL, so a

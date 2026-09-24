@@ -1,9 +1,11 @@
 //! Reads a `filter` value, written in [CEL], into a [`FilterClause`] —
 //! the comparison-and-boolean part of CEL: `&&`, `||`, `!`, the six
-//! comparisons, `in` over a list, arithmetic, and literals. Macros,
-//! comprehensions, function calls, maps and structs are refused: they
-//! have no reading as a `WHERE` clause, and guessing one would be
-//! inventing SQL the caller did not ask for.
+//! comparisons, `in` over a list, arithmetic, and literals — plus the
+//! string methods `startsWith`, `endsWith` and `contains`, which read as
+//! `LIKE`, and `timestamp("...")` and `uuid("...")`, which read a string
+//! as a timestamp or a UUID literal. Macros, comprehensions, other function calls, maps
+//! and structs are refused: they have no reading as a `WHERE` clause, and
+//! guessing one would be inventing SQL the caller did not ask for.
 //!
 //! [`FilterClause`] holds the parsed CEL tree itself — no separate
 //! condition-tree type mirroring it, since that would just be this
@@ -42,6 +44,11 @@ pub enum FilterClauseError {
 
     #[error("`{0}` has no reading as a condition")]
     Unsupported(String),
+
+    /// A literal that does not read as the type a function asks for:
+    /// `timestamp("yesterday")`, `uuid("x")`.
+    #[error("{0}")]
+    InvalidLiteral(String),
 
     #[error("unknown filter field `{0}`")]
     UnknownField(String),
@@ -157,6 +164,15 @@ impl FilterClause {
                 Self::render(Self::only(call)?, values)?
             )),
             cel_ops::NEGATE => Ok(format!("-({})", Self::render(Self::only(call)?, values)?)),
+            "startsWith" | "endsWith" | "contains" => Self::render_like(call, values),
+            "timestamp" => {
+                values.push(Self::timestamp(Self::constant(call)?)?);
+                Ok(format!("${}", values.len()))
+            }
+            "uuid" => {
+                values.push(Self::uuid(Self::constant(call)?)?);
+                Ok(format!("${}", values.len()))
+            }
             name => Err(FilterClauseError::Unsupported(format!(
                 "`{name}` has no reading as a condition"
             ))),
@@ -205,6 +221,125 @@ impl FilterClause {
                 ))
             }
         }
+    }
+
+    /// `field.startsWith("x")`, `endsWith` and `contains` as `LIKE`, the
+    /// argument bound as the pattern with its own `%`, `_` and `!` escaped so
+    /// they match themselves.
+    ///
+    /// Only on a field, and only with a string literal: that is what has a
+    /// reading as a `LIKE`, and it keeps the pattern a bound value rather
+    /// than anything rendered into the text.
+    ///
+    /// `!` is the escape rather than `\`. A backslash inside a string literal
+    /// is itself an escape in MySQL's default mode, so `ESCAPE '\'` would not
+    /// read the same in every dialect; `!` means nothing in any of them.
+    fn render_like(call: &CallExpr, values: &mut Vec<Value>) -> Result<String, FilterClauseError> {
+        let name = &call.func_name;
+        let target = call
+            .target
+            .as_deref()
+            .filter(|target| matches!(target.expr, Expr::Ident(_) | Expr::Select(_)))
+            .ok_or_else(|| {
+                FilterClauseError::Unsupported(format!(
+                    "`{name}` is called on a field, as `field.{name}(\"...\")`"
+                ))
+            })?;
+        let Expr::Literal(LiteralValue::String(text)) = &Self::only(call)?.expr else {
+            return Err(FilterClauseError::Unsupported(format!(
+                "`{name}` reads a string literal"
+            )));
+        };
+
+        let field = Self::render(target, values)?;
+        let mut escaped = String::with_capacity(text.len());
+        for character in text.chars() {
+            if matches!(character, '!' | '%' | '_') {
+                escaped.push('!');
+            }
+            escaped.push(character);
+        }
+        let pattern = match name.as_str() {
+            "startsWith" => format!("{escaped}%"),
+            "endsWith" => format!("%{escaped}"),
+            _ => format!("%{escaped}%"),
+        };
+
+        values.push(Value::String(pattern));
+        Ok(format!("({field}) LIKE ${} ESCAPE '!'", values.len()))
+    }
+
+    /// The string literal a constructor -- `timestamp("...")`, `uuid("...")` -- is called
+    /// with. A global call, not a method, and on a literal only: the value
+    /// is read here, at parse time, so it has to be one.
+    fn constant(call: &CallExpr) -> Result<&str, FilterClauseError> {
+        let name = &call.func_name;
+        let (None, [argument]) = (&call.target, call.args.as_slice()) else {
+            return Err(FilterClauseError::Unsupported(format!(
+                "`{name}` is called as `{name}(\"...\")`"
+            )));
+        };
+        match &argument.expr {
+            Expr::Literal(LiteralValue::String(text)) => Ok(&**text),
+            _ => Err(FilterClauseError::Unsupported(format!(
+                "`{name}` reads a string literal"
+            ))),
+        }
+    }
+
+    /// `text`, an RFC 3339 timestamp, as the timestamp it names.
+    #[cfg(feature = "chrono")]
+    fn timestamp(text: &str) -> Result<Value, FilterClauseError> {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .map(|timestamp| Value::from(timestamp.to_utc()))
+            .map_err(|error| {
+                FilterClauseError::InvalidLiteral(format!(
+                    "`timestamp(\"{text}\")` is not an RFC 3339 timestamp: {error}"
+                ))
+            })
+    }
+
+    #[cfg(all(feature = "time", not(feature = "chrono")))]
+    fn timestamp(text: &str) -> Result<Value, FilterClauseError> {
+        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+            .map(Value::from)
+            .map_err(|error| {
+                FilterClauseError::InvalidLiteral(format!(
+                    "`timestamp(\"{text}\")` is not an RFC 3339 timestamp: {error}"
+                ))
+            })
+    }
+
+    /// Without a date library there is nothing to read the string with, so
+    /// the function is refused rather than bound as text a timestamp column
+    /// would reject.
+    #[cfg(not(any(feature = "chrono", feature = "time")))]
+    fn timestamp(_: &str) -> Result<Value, FilterClauseError> {
+        Err(FilterClauseError::Unsupported(
+            "`timestamp` needs the `chrono` or `time` feature".to_owned(),
+        ))
+    }
+
+    /// `text` as the UUID it spells, in any of the forms `uuid::Uuid` reads:
+    /// hyphenated, simple, braced or URN.
+    #[cfg(feature = "uuid")]
+    fn uuid(text: &str) -> Result<Value, FilterClauseError> {
+        uuid::Uuid::parse_str(text)
+            .map(Value::from)
+            .map_err(|error| {
+                FilterClauseError::InvalidLiteral(format!(
+                    "`uuid(\"{text}\")` is not a UUID: {error}"
+                ))
+            })
+    }
+
+    /// Without the `uuid` feature there is no UUID to bind, so the function
+    /// is refused rather than bound as text a `uuid` column would reject.
+    #[cfg(not(feature = "uuid"))]
+    fn uuid(_: &str) -> Result<Value, FilterClauseError> {
+        Err(FilterClauseError::Unsupported(
+            "`uuid` needs the `uuid` feature".to_owned(),
+        ))
     }
 
     fn render_in_list(
@@ -323,6 +458,11 @@ impl FilterClause {
 
         match &mut node.expr {
             Expr::Call(call) => {
+                // A method's receiver is a field too -- `name.startsWith(..)`
+                // -- and has to clear the allow-list like any other.
+                if let Some(target) = call.target.as_deref_mut() {
+                    Self::rename(target, columns)?;
+                }
                 for arg in &mut call.args {
                     Self::rename(arg, columns)?;
                 }
@@ -439,6 +579,7 @@ mod tests {
             Err(FilterClauseError::Blank)
         ));
         assert!(refuses("size(name) > 3"));
+        assert!(refuses("name.size() > 3"));
         assert!(refuses("[1, 2].all(x, x > 0)"));
         assert!(refuses("{'a': 1}"));
         assert!(refuses("status =="));
@@ -484,5 +625,180 @@ mod tests {
             where_by.values(),
             &[Value::String("live".into()), Value::Int(3)]
         );
+    }
+
+    #[test]
+    fn string_methods_read_as_like() {
+        let pattern = |filter: &str| {
+            let where_by = FilterClause::parse(filter)
+                .expect("condition parses")
+                .to_where_clause();
+            (
+                where_by.sql().as_str().to_owned(),
+                where_by.values().to_vec(),
+            )
+        };
+
+        assert_eq!(
+            pattern("name.startsWith('Gro')"),
+            (
+                "(name) LIKE $1 ESCAPE '!'".to_owned(),
+                vec![Value::String("Gro%".into())]
+            )
+        );
+        assert_eq!(
+            pattern("name.endsWith('ies')").1,
+            vec![Value::String("%ies".into())]
+        );
+        assert_eq!(
+            pattern("name.contains('cer')").1,
+            vec![Value::String("%cer%".into())]
+        );
+    }
+
+    #[test]
+    fn a_like_pattern_matches_its_wildcards_literally() {
+        let where_by = FilterClause::parse("code.startsWith('50%_off!')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.values(), &[Value::String("50!%!_off!!%".into())]);
+    }
+
+    #[test]
+    fn a_string_method_combines_like_any_condition() {
+        assert_eq!(
+            parsed("name.startsWith('a') && rank > 3"),
+            "((name) LIKE $1 ESCAPE '!') AND ((rank) > ($2))"
+        );
+    }
+
+    #[test]
+    fn a_string_method_is_only_called_on_a_field_with_a_literal() {
+        assert!(refuses("'abc'.startsWith('a')"));
+        assert!(refuses("name.startsWith(other)"));
+        assert!(refuses("name.startsWith(3)"));
+        assert!(refuses("name.startsWith('a', 'b')"));
+        assert!(refuses("startsWith(name, 'a')"));
+    }
+
+    #[test]
+    fn resolve_renames_the_field_a_method_is_called_on() {
+        let filter = FilterClause::parse("title.startsWith('Gro')")
+            .expect("condition parses")
+            .resolve(&columns(&[("title", "display_name")]))
+            .expect("the field is named");
+
+        assert_eq!(
+            filter.to_where_clause().sql().as_str(),
+            "(display_name) LIKE $1 ESCAPE '!'"
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_a_method_on_an_unoffered_field() {
+        let refused = FilterClause::parse("secret.startsWith('a')")
+            .expect("condition parses")
+            .resolve(&columns(&[("title", "display_name")]));
+
+        assert!(matches!(
+            refused,
+            Err(FilterClauseError::UnknownField(field)) if field == "secret"
+        ));
+    }
+
+    /// 2026-01-01T00:00:00Z, in microseconds since the epoch.
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    const NEW_YEAR: i64 = 1_767_225_600_000_000;
+
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[test]
+    fn timestamp_reads_as_a_timestamp_literal() {
+        let where_by = FilterClause::parse("created_at > timestamp('2026-01-01T00:00:00Z')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.sql().as_str(), "(created_at) > ($1)");
+        assert_eq!(where_by.values(), &[Value::Timestamp(NEW_YEAR)]);
+    }
+
+    /// The offset is read, not dropped: the same instant in two zones binds
+    /// the same value.
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[test]
+    fn a_timestamp_is_read_in_its_own_offset() {
+        let where_by = FilterClause::parse("created_at == timestamp('2026-01-01T02:00:00+02:00')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.values(), &[Value::Timestamp(NEW_YEAR)]);
+    }
+
+    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[test]
+    fn a_malformed_timestamp_is_an_invalid_literal() {
+        assert!(matches!(
+            FilterClause::parse("created_at > timestamp('yesterday')"),
+            Err(FilterClauseError::InvalidLiteral(_))
+        ));
+    }
+
+    #[test]
+    fn timestamp_reads_one_string_literal() {
+        assert!(refuses("created_at > timestamp(other)"));
+        assert!(refuses("created_at > timestamp(3)"));
+        assert!(refuses("created_at > timestamp('a', 'b')"));
+        assert!(refuses(
+            "created_at > name.timestamp('2026-01-01T00:00:00Z')"
+        ));
+    }
+
+    #[cfg(not(any(feature = "chrono", feature = "time")))]
+    #[test]
+    fn timestamp_is_refused_without_a_date_library() {
+        assert!(refuses("created_at > timestamp('2026-01-01T00:00:00Z')"));
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn uuid_reads_as_a_uuid_literal() {
+        let where_by = FilterClause::parse("id == uuid('01234567-89ab-cdef-0123-456789abcdef')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.sql().as_str(), "(id) = ($1)");
+        assert_eq!(
+            where_by.values(),
+            &[Value::Uuid([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ])]
+        );
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn a_malformed_uuid_is_an_invalid_literal() {
+        assert!(matches!(
+            FilterClause::parse("id == uuid('not-a-uuid')"),
+            Err(FilterClauseError::InvalidLiteral(_))
+        ));
+    }
+
+    #[test]
+    fn uuid_reads_one_string_literal() {
+        assert!(refuses("id == uuid(other)"));
+        assert!(refuses("id == uuid(3)"));
+        assert!(refuses(
+            "id == name.uuid('01234567-89ab-cdef-0123-456789abcdef')"
+        ));
+    }
+
+    #[cfg(not(feature = "uuid"))]
+    #[test]
+    fn uuid_is_refused_without_the_feature() {
+        assert!(refuses(
+            "id == uuid('01234567-89ab-cdef-0123-456789abcdef')"
+        ));
     }
 }

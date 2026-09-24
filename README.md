@@ -164,7 +164,9 @@ let (sql, arguments) = (statement.sql(), statement.arguments());
 ## Filtering
 
 `FilterClause::parse` accepts the comparison-and-boolean part of [CEL]: `&&`,
-`||`, `!`, the six comparisons, `in` over a list, arithmetic, and literals.
+`||`, `!`, the six comparisons, `in` over a list, arithmetic, and literals —
+plus the string methods `startsWith`, `endsWith` and `contains`, and the
+constructors `timestamp("...")` and `uuid("...")`.
 
 | Filter                                  | Becomes                                     |
 | --------------------------------------- | ------------------------------------------- |
@@ -172,13 +174,34 @@ let (sql, arguments) = (statement.sql(), statement.arguments());
 | `name == 'alice' \|\| rank >= 50`       | `((name) = ($1)) OR ((rank) >= ($2))`       |
 | `status in ['ACTIVE', 'PENDING']`       | `status IN ($1, $2)`                        |
 | `deleted_at == null`                    | `deleted_at IS NULL`                        |
+| `name.startsWith('Gro')`                | `(name) LIKE $1 ESCAPE '!'`, bound `Gro%`   |
+| `name.contains('50%')`                  | `(name) LIKE $1 ESCAPE '!'`, bound `%50!%%` |
+| `created > timestamp('2026-01-01T00:00:00Z')` | `(created) > ($1)`, bound as a timestamp |
+| `id == uuid('0123…cdef')`               | `(id) = ($1)`, bound as a UUID              |
 
 Two deliberate choices: `== null` renders as `IS NULL`, because `= NULL` is
 never true and so never what was meant; and both sides of a binary operator are
 always parenthesized, so there is no precedence table to get wrong.
 
-Macros, comprehensions, function calls, maps and structs are refused. They have
-no reading as a `WHERE` clause, and guessing one would be inventing SQL the
+The string methods are called on a field with a string literal, and the literal
+is bound as the pattern with its own `%`, `_` and `!` escaped, so it matches
+itself. The escape is `!` rather than `\`, because a backslash inside a string
+literal is itself an escape in MySQL's default mode. Case sensitivity is the
+engine's: PostgreSQL's `LIKE` is case-sensitive, SQLite's ignores ASCII case, and
+MySQL's follows the column's collation.
+
+`timestamp("...")` reads an RFC 3339 string, offset and all, into a timestamp
+bind value, so it compares with a timestamp column where a plain string
+wouldn't: PostgreSQL has no `timestamptz > text`. It is read when the filter is
+parsed, so its argument has to be a literal, and a malformed one is an
+`InvalidLiteral` error rather than a query the database refuses. It needs one
+of `sqlx-query-cel`'s date-library features, `chrono` or `time`, which turn on
+`sqlx-query`'s of the same name; without either it is refused. `uuid("...")` is
+the same for a `uuid` column — PostgreSQL has no `uuid = text` either — behind
+the `uuid` feature.
+
+Macros, comprehensions, other function calls, maps and structs are refused. They
+have no reading as a `WHERE` clause, and guessing one would be inventing SQL the
 caller didn't ask for.
 
 ## Ordering
@@ -213,6 +236,10 @@ let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
 query.bind_value(tenant_id).bind_value(50i64).with_cursor(cursor);
 ```
 
+A key can be any column a `Value` holds, a UUID primary key included behind
+the `uuid` feature — it is read back off the row as a `Value::Uuid` and bound
+against the column on the next page.
+
 The token is the cursor `postcard`-serialized, checksummed and base64'd,
 following `einride/aip-go`'s `pagination.PageToken` shape — opaque, and cleanly
 rejected if hand-edited. A cursor carries the `order_by` it was built against,
@@ -228,8 +255,8 @@ query.bind_value(50i64);              // a scalar the composer can show back
 query.bind(uuid::Uuid::new_v4());     // anything sqlx can encode
 ```
 
-`bind_value` takes one of `Value`'s seven kinds — null, bool, int, float,
-string, timestamp, bytes — and stays visible in `compose()`'s output, so a
+`bind_value` takes one of `Value`'s eight kinds — null, bool, int, float,
+string, timestamp, bytes, UUID — and stays visible in `compose()`'s output, so a
 test or a log line can read it back.
 
 `bind` takes anything satisfying `sqlx::Encode + Type`: a `Uuid`, a
@@ -280,6 +307,7 @@ sqlx-query = { version = "0.1", features = ["postgres", "chrono"] }
 | `postgres`, `mysql`, `sqlite`  | `QueryDialect` for that driver — at least one is needed  |
 | `chrono`                       | `From<DateTime<Utc>>`, and timestamps read out of a row  |
 | `time`                         | the same for `time::OffsetDateTime`                      |
+| `uuid`                         | `From<uuid::Uuid>`, UUIDs bound as `uuid` and read out of a row |
 
 `Value::Timestamp` holds microseconds since the epoch rather than a date
 type, and exists in every build regardless of features. A page token is a
@@ -292,6 +320,15 @@ be the one that redeems it.
 With both `chrono` and `time` on, `chrono` is what a timestamp is bound and
 decoded as. Arbitrary, but it has to be one of them, and such a build reads
 either.
+
+`Value::Uuid` is the same arrangement: sixteen bytes in every build, bound and
+decoded as a `uuid::Uuid` behind the `uuid` feature. It is also why a new
+variant only ever goes last — every other one keeps its index, so a token
+minted before it still reads.
+
+`sqlx-query-cel` has features of its own for the filter constructors: `chrono`
+or `time` for `timestamp("...")` and `uuid` for `uuid("...")`, each turning on
+`sqlx-query`'s of the same name.
 
 ## Limitations
 
@@ -314,12 +351,9 @@ query.push_order_by(OrderByClause::parse(&request.order_by)?.resolve(&columns)?)
 `FilterClause` is the same, minus the identifier question — CEL's own lexer
 only yields identifier-shaped tokens.
 
-**A cursor cannot page on a `uuid` key.** Cursor keys are read back off the
-row into a `Value`, whose kinds are bool, int, float, string, timestamp and
-bytes; a PostgreSQL `uuid` is none of them, so `Cursor::after_row` fails with
-`RowValueUndecodable`. Keyset pagination therefore needs an integer, text or
-timestamp sort key today. Parameters are unaffected — `bind` takes a `Uuid`
-fine; it's only sorting on one that doesn't work.
+**A cursor pages on a `uuid` key only with the `uuid` feature.** Without it
+a PostgreSQL `uuid` is none of the kinds `Cursor::after_row` can read, so it
+fails with `RowValueUndecodable`.
 
 **No `SELECT` generation.** By design, and worth repeating: this splices into
 a query you wrote. It does not write one.

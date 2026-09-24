@@ -1226,6 +1226,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1292,6 +1293,7 @@ dependencies = [
  "thiserror",
  "time",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1328,6 +1330,7 @@ dependencies = [
  "thiserror",
  "time",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -1344,6 +1347,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1351,8 +1355,13 @@ name = "sqlx-query-cel"
 version = "0.1.0"
 dependencies = [
  "cel",
+ "chrono",
+ "sqlx",
  "sqlx-query",
  "thiserror",
+ "time",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1379,6 +1388,7 @@ dependencies = [
  "time",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

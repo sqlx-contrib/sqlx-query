@@ -20,9 +20,11 @@ use crate::CursorError;
 /// ones after it and make a token minted by one build decode as the wrong
 /// variant in another — silently, not as an error. That is why
 /// [`Timestamp`](Self::Timestamp) holds an integer rather than a date
-/// type: the token format cannot depend on which date library a consumer
-/// picked, because the service that mints a token need not be the one that
-/// redeems it.
+/// type, and [`Uuid`](Self::Uuid) sixteen bytes rather than a
+/// `uuid::Uuid`: the token format cannot depend on which libraries a
+/// consumer picked, because the service that mints a token need not be the
+/// one that redeems it. For the same reason a new variant only ever goes
+/// last.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Null,
@@ -46,12 +48,18 @@ pub enum Value {
     ///
     /// On the other dialects it's one binary type among many. `Value` is
     /// closed and can't be extended from outside this crate, so a
-    /// parameter it can't hold — a `Uuid`, a `serde_json::Value`, a
-    /// decimal — has to be converted by the caller. On PostgreSQL that
-    /// only works where the server accepts the converted form: bytes
-    /// bound to a `uuid` column are rejected, bytes bound to a `bytea`
-    /// are not.
+    /// parameter it can't hold — a `serde_json::Value`, a decimal — has to
+    /// be converted by the caller. On PostgreSQL that only works where the
+    /// server accepts the converted form: bytes bound to a `uuid` column are
+    /// rejected, bytes bound to a `bytea` are not — which is what
+    /// [`Uuid`](Self::Uuid) is for.
     Bytes(Vec<u8>),
+    /// A UUID, as its sixteen bytes.
+    ///
+    /// Bound and decoded as a `uuid::Uuid` behind the `uuid` feature, so it
+    /// compares with a `uuid` column and a cursor can page on a UUID key.
+    /// Construct one with `From<uuid::Uuid>`, behind the same feature.
+    Uuid([u8; 16]),
 }
 
 impl From<bool> for Value {
@@ -126,6 +134,13 @@ impl From<time::OffsetDateTime> for Value {
     }
 }
 
+#[cfg(feature = "uuid")]
+impl From<uuid::Uuid> for Value {
+    fn from(value: uuid::Uuid) -> Self {
+        Value::Uuid(value.into_bytes())
+    }
+}
+
 /// What a [`Value::Timestamp`] is bound and decoded *as*.
 ///
 /// The stored form is a plain integer so the token format stays stable
@@ -167,6 +182,31 @@ pub(crate) fn timestamp_repr(micros: i64) -> Option<TimestampRepr> {
     }
 }
 
+/// What a [`Value::Uuid`] is bound and decoded *as*: a `uuid::Uuid` behind
+/// the `uuid` feature.
+///
+/// Without it this falls back to the bytes, for the same reason
+/// [`TimestampRepr`] falls back to its integer: nothing can construct a
+/// [`Value::Uuid`] in that build except a page token minted by another, and
+/// a bound has to be writable once rather than once per feature
+/// combination.
+#[cfg(feature = "uuid")]
+pub(crate) type UuidRepr = uuid::Uuid;
+#[cfg(not(feature = "uuid"))]
+pub(crate) type UuidRepr = Vec<u8>;
+
+/// The stored bytes as the type a driver will take.
+pub(crate) fn uuid_repr(bytes: [u8; 16]) -> UuidRepr {
+    #[cfg(feature = "uuid")]
+    {
+        uuid::Uuid::from_bytes(bytes)
+    }
+    #[cfg(not(feature = "uuid"))]
+    {
+        bytes.to_vec()
+    }
+}
+
 impl<T> From<Option<T>> for Value
 where
     T: Into<Value>,
@@ -199,6 +239,7 @@ where
     String: Type<DB>,
     TimestampRepr: Type<DB>,
     Vec<u8>: Type<DB>,
+    UuidRepr: Type<DB>,
 {
     fn type_info() -> DB::TypeInfo {
         <String as Type<DB>>::type_info()
@@ -218,6 +259,7 @@ where
     String: Encode<'q, DB> + Type<DB>,
     TimestampRepr: Encode<'q, DB> + Type<DB>,
     Vec<u8>: Encode<'q, DB> + Type<DB>,
+    UuidRepr: Encode<'q, DB> + Type<DB>,
     Option<String>: Encode<'q, DB> + Type<DB>,
 {
     fn encode_by_ref(
@@ -240,6 +282,7 @@ where
                 None => Err(format!("timestamp {v} is out of range").into()),
             },
             Value::Bytes(v) => <Vec<u8> as Encode<'q, DB>>::encode_by_ref(v, buf),
+            Value::Uuid(v) => <UuidRepr as Encode<'q, DB>>::encode_by_ref(&uuid_repr(*v), buf),
         }
     }
 
@@ -252,6 +295,7 @@ where
             Value::String(_) => <String as Type<DB>>::type_info(),
             Value::Timestamp(_) => <TimestampRepr as Type<DB>>::type_info(),
             Value::Bytes(_) => <Vec<u8> as Type<DB>>::type_info(),
+            Value::Uuid(_) => <UuidRepr as Type<DB>>::type_info(),
         })
     }
 }
@@ -285,7 +329,8 @@ pub(crate) trait RowExtension: Row {
         f64: Decode<'r, Self::Database> + Type<Self::Database>,
         String: Decode<'r, Self::Database> + Type<Self::Database>,
         TimestampRepr: Decode<'r, Self::Database> + Type<Self::Database>,
-        Vec<u8>: Decode<'r, Self::Database> + Type<Self::Database>;
+        Vec<u8>: Decode<'r, Self::Database> + Type<Self::Database>,
+        UuidRepr: Decode<'r, Self::Database> + Type<Self::Database>;
 }
 
 impl<R: Row> RowExtension for R {
@@ -301,6 +346,7 @@ impl<R: Row> RowExtension for R {
         String: Decode<'r, Self::Database> + Type<Self::Database>,
         TimestampRepr: Decode<'r, Self::Database> + Type<Self::Database>,
         Vec<u8>: Decode<'r, Self::Database> + Type<Self::Database>,
+        UuidRepr: Decode<'r, Self::Database> + Type<Self::Database>,
     {
         let label = column.rsplit('.').next().unwrap_or(column);
         let ordinal = self
@@ -346,6 +392,13 @@ impl<R: Row> RowExtension for R {
                 i64::try_from(v.unix_timestamp_nanos() / 1_000).unwrap_or(i64::MAX),
             ));
         }
+        // Ahead of the text and bytes candidates: a driver that stores a UUID
+        // as text or as sixteen bytes accepts it as either, and it has to come
+        // back as a UUID to be bound against the column again.
+        #[cfg(feature = "uuid")]
+        if let Ok(v) = self.try_get::<uuid::Uuid, _>(ordinal) {
+            return Ok(Value::Uuid(v.into_bytes()));
+        }
         if let Ok(v) = self.try_get::<String, _>(ordinal) {
             return Ok(Value::String(v));
         }
@@ -356,5 +409,37 @@ impl<R: Row> RowExtension for R {
         }
 
         Err(CursorError::RowValueUndecodable(label.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Postcard writes a variant by index, and a page token is a serialized
+    /// `Value`, so the indices are the token format: a variant inserted
+    /// anywhere but last would make every token already issued decode as the
+    /// wrong thing. This pins them.
+    #[test]
+    fn every_variant_keeps_its_index_in_the_token_format() {
+        let index = |value: Value| postcard::to_allocvec(&value).unwrap()[0];
+
+        assert_eq!(index(Value::Null), 0);
+        assert_eq!(index(Value::Bool(true)), 1);
+        assert_eq!(index(Value::Int(1)), 2);
+        assert_eq!(index(Value::Float(1.0)), 3);
+        assert_eq!(index(Value::String(String::new())), 4);
+        assert_eq!(index(Value::Timestamp(1)), 5);
+        assert_eq!(index(Value::Bytes(Vec::new())), 6);
+        assert_eq!(index(Value::Uuid([0; 16])), 7);
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn a_uuid_converts_to_its_bytes_and_back() {
+        let id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+
+        assert_eq!(Value::from(id), Value::Uuid(id.into_bytes()));
+        assert_eq!(uuid_repr(id.into_bytes()), id);
     }
 }
