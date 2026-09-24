@@ -19,9 +19,10 @@ offered by name.
 
 Accepts the comparison-and-boolean part of CEL: `&&`, `||`, `!`, the six
 comparisons, `in` over a list, arithmetic and literals, plus the string methods
-`startsWith`, `endsWith` and `contains`, which read as `LIKE`, and
-`timestamp("...")`, which reads an RFC 3339 string as a timestamp — behind the
-`chrono` or `time` feature. Macros,
+`startsWith`, `endsWith` and `contains`, which read as `LIKE`, and the
+constructors `timestamp("...")` — an RFC 3339 string as a timestamp, behind the
+`chrono` or `time` feature — and `uuid("...")`, behind the `uuid` feature.
+Macros,
 comprehensions, other function calls, maps and structs are refused — they have
 no reading as a `WHERE` clause, and guessing one would invent SQL the caller
 didn't ask for.

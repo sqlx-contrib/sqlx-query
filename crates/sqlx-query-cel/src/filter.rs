@@ -2,8 +2,8 @@
 //! the comparison-and-boolean part of CEL: `&&`, `||`, `!`, the six
 //! comparisons, `in` over a list, arithmetic, and literals — plus the
 //! string methods `startsWith`, `endsWith` and `contains`, which read as
-//! `LIKE`, and `timestamp("...")`, which reads an RFC 3339 string as a
-//! timestamp literal. Macros, comprehensions, other function calls, maps
+//! `LIKE`, and `timestamp("...")` and `uuid("...")`, which read a string
+//! as a timestamp or a UUID literal. Macros, comprehensions, other function calls, maps
 //! and structs are refused: they have no reading as a `WHERE` clause, and
 //! guessing one would be inventing SQL the caller did not ask for.
 //!
@@ -46,7 +46,7 @@ pub enum FilterClauseError {
     Unsupported(String),
 
     /// A literal that does not read as the type a function asks for:
-    /// `timestamp("yesterday")`.
+    /// `timestamp("yesterday")`, `uuid("x")`.
     #[error("{0}")]
     InvalidLiteral(String),
 
@@ -169,6 +169,10 @@ impl FilterClause {
                 values.push(Self::timestamp(Self::constant(call)?)?);
                 Ok(format!("${}", values.len()))
             }
+            "uuid" => {
+                values.push(Self::uuid(Self::constant(call)?)?);
+                Ok(format!("${}", values.len()))
+            }
             name => Err(FilterClauseError::Unsupported(format!(
                 "`{name}` has no reading as a condition"
             ))),
@@ -265,7 +269,7 @@ impl FilterClause {
         Ok(format!("({field}) LIKE ${} ESCAPE '!'", values.len()))
     }
 
-    /// The string literal a constructor -- `timestamp("...")` -- is called
+    /// The string literal a constructor -- `timestamp("...")`, `uuid("...")` -- is called
     /// with. A global call, not a method, and on a literal only: the value
     /// is read here, at parse time, so it has to be one.
     fn constant(call: &CallExpr) -> Result<&str, FilterClauseError> {
@@ -313,6 +317,28 @@ impl FilterClause {
     fn timestamp(_: &str) -> Result<Value, FilterClauseError> {
         Err(FilterClauseError::Unsupported(
             "`timestamp` needs the `chrono` or `time` feature".to_owned(),
+        ))
+    }
+
+    /// `text` as the UUID it spells, in any of the forms `uuid::Uuid` reads:
+    /// hyphenated, simple, braced or URN.
+    #[cfg(feature = "uuid")]
+    fn uuid(text: &str) -> Result<Value, FilterClauseError> {
+        uuid::Uuid::parse_str(text)
+            .map(Value::from)
+            .map_err(|error| {
+                FilterClauseError::InvalidLiteral(format!(
+                    "`uuid(\"{text}\")` is not a UUID: {error}"
+                ))
+            })
+    }
+
+    /// Without the `uuid` feature there is no UUID to bind, so the function
+    /// is refused rather than bound as text a `uuid` column would reject.
+    #[cfg(not(feature = "uuid"))]
+    fn uuid(_: &str) -> Result<Value, FilterClauseError> {
+        Err(FilterClauseError::Unsupported(
+            "`uuid` needs the `uuid` feature".to_owned(),
         ))
     }
 
@@ -731,5 +757,48 @@ mod tests {
     #[test]
     fn timestamp_is_refused_without_a_date_library() {
         assert!(refuses("created_at > timestamp('2026-01-01T00:00:00Z')"));
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn uuid_reads_as_a_uuid_literal() {
+        let where_by = FilterClause::parse("id == uuid('01234567-89ab-cdef-0123-456789abcdef')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.sql().as_str(), "(id) = ($1)");
+        assert_eq!(
+            where_by.values(),
+            &[Value::Uuid([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ])]
+        );
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn a_malformed_uuid_is_an_invalid_literal() {
+        assert!(matches!(
+            FilterClause::parse("id == uuid('not-a-uuid')"),
+            Err(FilterClauseError::InvalidLiteral(_))
+        ));
+    }
+
+    #[test]
+    fn uuid_reads_one_string_literal() {
+        assert!(refuses("id == uuid(other)"));
+        assert!(refuses("id == uuid(3)"));
+        assert!(refuses(
+            "id == name.uuid('01234567-89ab-cdef-0123-456789abcdef')"
+        ));
+    }
+
+    #[cfg(not(feature = "uuid"))]
+    #[test]
+    fn uuid_is_refused_without_the_feature() {
+        assert!(refuses(
+            "id == uuid('01234567-89ab-cdef-0123-456789abcdef')"
+        ));
     }
 }

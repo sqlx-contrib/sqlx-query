@@ -158,3 +158,42 @@ async fn a_timestamp_literal_compares_with_a_timestamp_column() {
 
     assert_eq!(names, ["after", "on"]);
 }
+
+/// A `uuid("...")` literal binds as a UUID, so it compares with a `uuid`
+/// column -- where a string would not: PostgreSQL has no `uuid = text`.
+#[cfg(feature = "uuid")]
+#[tokio::test]
+async fn a_uuid_literal_compares_with_a_uuid_column() {
+    let Some(pool) = postgres().await else {
+        return;
+    };
+
+    let filter = FilterClause::parse(
+        "id in [uuid('11111111-1111-1111-1111-111111111111'), \
+                uuid('33333333-3333-3333-3333-333333333333')]",
+    )
+    .and_then(|filter| filter.resolve(&HashMap::from([("id", "id")])))
+    .expect("the filter resolves");
+    let mut query = QueryComposer::<sqlx::Postgres>::new(
+        "SELECT name FROM (VALUES \
+             ('one',   '11111111-1111-1111-1111-111111111111'::uuid), \
+             ('two',   '22222222-2222-2222-2222-222222222222'::uuid), \
+             ('three', '33333333-3333-3333-3333-333333333333'::uuid) \
+         ) AS items(name, id) \
+         WHERE /* query.where AND */ TRUE",
+    );
+    query.push_where(filter);
+
+    let mut names: Vec<String> = query
+        .build()
+        .expect("composes")
+        .fetch_all(&pool)
+        .await
+        .expect("runs")
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect();
+    names.sort();
+
+    assert_eq!(names, ["one", "three"]);
+}

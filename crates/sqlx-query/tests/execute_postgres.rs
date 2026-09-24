@@ -12,7 +12,7 @@
 #![cfg(feature = "postgres")]
 
 use sqlx::{PgPool, Row};
-use sqlx_query::{Cursor, CursorError, OrderByClause, QueryComposer, WhereClause};
+use sqlx_query::{Cursor, OrderByClause, QueryComposer, WhereClause};
 
 /// `None` when there is no server to talk to, which is not the same as
 /// the variable being unset: the Nix dev shell exports the Dev Container's
@@ -199,22 +199,18 @@ async fn an_erased_uuid_binds_against_a_uuid_column() {
     assert_eq!(rows[0].get::<String, _>("id"), id);
 }
 
-/// A cursor cannot page on a `uuid` key. **This pins a gap, not a
-/// feature.**
+/// Without the `uuid` feature a cursor cannot page on a `uuid` key.
 ///
 /// `RowExtension::get_value` tries `i64, i32, i16, f64, f32, bool,
 /// DateTime<Utc>, String, Vec<u8>` in turn, and a PostgreSQL `uuid`
 /// matches none of them — `String: Type<Postgres>` covers text and
-/// varchar, not uuid. So keyset pagination on a UUID primary key is
-/// impossible, and a UUID primary key is the commonest there is.
-///
-/// Decoding it as text wouldn't help on its own: the value has to be
-/// *bound back* on the next request, and `uuid = text` has no operator.
-/// Closing this means a `Value::Uuid` behind an optional feature, the way
-/// sqlx gates its own. When that lands, this test fails — which is the
-/// point of asserting the current behaviour rather than printing it.
+/// varchar, not uuid. Decoding it as text wouldn't help on its own: the
+/// value has to be *bound back* on the next request, and `uuid = text` has
+/// no operator. The `uuid` feature is what closes it; see
+/// [`a_cursor_pages_on_a_uuid_key`].
+#[cfg(not(feature = "uuid"))]
 #[tokio::test]
-async fn a_cursor_cannot_page_on_a_uuid_key_yet() {
+async fn a_cursor_cannot_page_on_a_uuid_key_without_the_feature() {
     let pool = pool_or_skip!();
     table(&pool, "pg_uuid_cursor_test", "id uuid primary key").await;
 
@@ -233,7 +229,93 @@ async fn a_cursor_cannot_page_on_a_uuid_key_yet() {
     let result = Cursor::new(OrderByClause::default().asc("id")).after_row(&rows[0]);
 
     assert!(
-        matches!(result, Err(CursorError::RowValueUndecodable(ref column)) if column == "id"),
-        "expected the known uuid gap, got {result:?}"
+        matches!(result, Err(sqlx_query::CursorError::RowValueUndecodable(ref column)) if column == "id"),
+        "expected the uuid gap without the feature, got {result:?}"
     );
+}
+
+/// A `Value::Uuid` binds as a `uuid`, so it compares with a `uuid` column
+/// without the `::uuid` cast [`an_erased_uuid_binds_against_a_uuid_column`]
+/// needs for text.
+#[cfg(feature = "uuid")]
+#[tokio::test]
+async fn a_uuid_value_binds_against_a_uuid_column() {
+    let pool = pool_or_skip!();
+    table(&pool, "pg_uuid_value_test", "id uuid primary key").await;
+
+    let id = uuid::Uuid::from_u128(0x3333_3333_3333_3333_3333_3333_3333_3333);
+    sqlx::query("INSERT INTO pg_uuid_value_test VALUES ($1)")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("insert");
+
+    let sql = "SELECT id FROM pg_uuid_value_test WHERE /* query.where AND */ TRUE";
+    let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+    query.push_where(WhereClause::new("id = $1").bind_value(id));
+
+    let rows = query
+        .build()
+        .expect("composes")
+        .fetch_all(&pool)
+        .await
+        .expect("runs");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<uuid::Uuid, _>("id"), id);
+}
+
+/// With the `uuid` feature a cursor reads a `uuid` key back as a
+/// `Value::Uuid` and binds it against the column on the next page — keyset
+/// pagination on the commonest primary key there is.
+#[cfg(feature = "uuid")]
+#[tokio::test]
+async fn a_cursor_pages_on_a_uuid_key() {
+    let pool = pool_or_skip!();
+    table(&pool, "pg_uuid_cursor_test", "id uuid primary key").await;
+
+    let ids: Vec<uuid::Uuid> = (1..=3u128)
+        .map(|n| uuid::Uuid::from_u128(n * 0x1111_1111_1111_1111_1111_1111_1111_1111))
+        .collect();
+    for id in &ids {
+        sqlx::query("INSERT INTO pg_uuid_cursor_test VALUES ($1)")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("insert");
+    }
+
+    let order_by = OrderByClause::default().asc("id");
+    let sql = "SELECT id FROM pg_uuid_cursor_test \
+               WHERE /* query.where AND */ TRUE ORDER BY /* query.order_by */ LIMIT $1";
+
+    let mut first = QueryComposer::<sqlx::Postgres>::new(sql);
+    first.bind_value(1i64).push_order_by(order_by.clone());
+    let rows = first
+        .build()
+        .expect("composes")
+        .fetch_all(&pool)
+        .await
+        .expect("runs");
+    assert_eq!(rows[0].get::<uuid::Uuid, _>("id"), ids[0]);
+
+    // Through a token, as it would travel between requests.
+    let token = Cursor::new(order_by)
+        .after_row(&rows[0])
+        .expect("a uuid key decodes")
+        .encode();
+
+    let mut second = QueryComposer::<sqlx::Postgres>::new(sql);
+    second
+        .bind_value(10i64)
+        .with_cursor(Cursor::parse(&token).expect("the token parses"));
+    let rows = second
+        .build()
+        .expect("composes")
+        .fetch_all(&pool)
+        .await
+        .expect("runs");
+
+    let rest: Vec<uuid::Uuid> = rows.iter().map(|row| row.get("id")).collect();
+    assert_eq!(rest, ids[1..]);
 }

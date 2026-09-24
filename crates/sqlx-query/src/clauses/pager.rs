@@ -204,6 +204,7 @@ impl Cursor {
         String: Decode<'r, R::Database> + Type<R::Database>,
         crate::value::TimestampRepr: Decode<'r, R::Database> + Type<R::Database>,
         Vec<u8>: Decode<'r, R::Database> + Type<R::Database>,
+        crate::value::UuidRepr: Decode<'r, R::Database> + Type<R::Database>,
     {
         for key in &mut self.keys {
             key.value = Some(row.get_value(key.order.column())?);
@@ -374,7 +375,8 @@ mod tests {
 
     #[test]
     fn encode_parse_round_trips_every_value_variant() {
-        let order_by = OrderByClause::parse("a asc, b asc, c asc, d asc, e asc, f asc").unwrap();
+        let order_by =
+            OrderByClause::parse("a asc, b asc, c asc, d asc, e asc, f asc, g asc, h asc").unwrap();
         let timestamp = 1_700_000_000_123_000i64;
         let cursor = Cursor::new(order_by)
             .after(vec![
@@ -384,6 +386,8 @@ mod tests {
                 Value::Float(3.5),
                 Value::String("hello".into()),
                 Value::Timestamp(timestamp),
+                Value::Bytes(vec![0, 1, 254, 255]),
+                Value::Uuid([0x5a; 16]),
             ])
             .unwrap();
 
