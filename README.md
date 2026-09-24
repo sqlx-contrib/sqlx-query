@@ -164,7 +164,8 @@ let (sql, arguments) = (statement.sql(), statement.arguments());
 ## Filtering
 
 `FilterClause::parse` accepts the comparison-and-boolean part of [CEL]: `&&`,
-`||`, `!`, the six comparisons, `in` over a list, arithmetic, and literals.
+`||`, `!`, the six comparisons, `in` over a list, arithmetic, and literals —
+plus the string methods `startsWith`, `endsWith` and `contains`.
 
 | Filter                                  | Becomes                                     |
 | --------------------------------------- | ------------------------------------------- |
@@ -172,13 +173,22 @@ let (sql, arguments) = (statement.sql(), statement.arguments());
 | `name == 'alice' \|\| rank >= 50`       | `((name) = ($1)) OR ((rank) >= ($2))`       |
 | `status in ['ACTIVE', 'PENDING']`       | `status IN ($1, $2)`                        |
 | `deleted_at == null`                    | `deleted_at IS NULL`                        |
+| `name.startsWith('Gro')`                | `(name) LIKE $1 ESCAPE '!'`, bound `Gro%`   |
+| `name.contains('50%')`                  | `(name) LIKE $1 ESCAPE '!'`, bound `%50!%%` |
 
 Two deliberate choices: `== null` renders as `IS NULL`, because `= NULL` is
 never true and so never what was meant; and both sides of a binary operator are
 always parenthesized, so there is no precedence table to get wrong.
 
-Macros, comprehensions, function calls, maps and structs are refused. They have
-no reading as a `WHERE` clause, and guessing one would be inventing SQL the
+The string methods are called on a field with a string literal, and the literal
+is bound as the pattern with its own `%`, `_` and `!` escaped, so it matches
+itself. The escape is `!` rather than `\`, because a backslash inside a string
+literal is itself an escape in MySQL's default mode. Case sensitivity is the
+engine's: PostgreSQL's `LIKE` is case-sensitive, SQLite's ignores ASCII case, and
+MySQL's follows the column's collation.
+
+Macros, comprehensions, other function calls, maps and structs are refused. They
+have no reading as a `WHERE` clause, and guessing one would be inventing SQL the
 caller didn't ask for.
 
 ## Ordering

@@ -20,3 +20,11 @@ workspace = true
 sqlx-query = { path = "../sqlx-query", version = "0.1.0", default-features = false }
 cel = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# A runtime and two drivers, only for the tests that run a filter against a
+# real engine: whether a pattern's escapes mean what the SQL text says is the
+# driver's call, which comparing rendered text cannot check.
+sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "postgres"] }
+sqlx-query = { path = "../sqlx-query", features = ["sqlite", "postgres"] }
+tokio = { workspace = true }

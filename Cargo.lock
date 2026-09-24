@@ -1351,8 +1351,10 @@ name = "sqlx-query-cel"
 version = "0.1.0"
 dependencies = [
  "cel",
+ "sqlx",
  "sqlx-query",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

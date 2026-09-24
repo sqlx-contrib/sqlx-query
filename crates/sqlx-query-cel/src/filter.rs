@@ -1,9 +1,10 @@
 //! Reads a `filter` value, written in [CEL], into a [`FilterClause`] —
 //! the comparison-and-boolean part of CEL: `&&`, `||`, `!`, the six
-//! comparisons, `in` over a list, arithmetic, and literals. Macros,
-//! comprehensions, function calls, maps and structs are refused: they
-//! have no reading as a `WHERE` clause, and guessing one would be
-//! inventing SQL the caller did not ask for.
+//! comparisons, `in` over a list, arithmetic, and literals — plus the
+//! string methods `startsWith`, `endsWith` and `contains`, which read as
+//! `LIKE`. Macros, comprehensions, other function calls, maps and structs
+//! are refused: they have no reading as a `WHERE` clause, and guessing one
+//! would be inventing SQL the caller did not ask for.
 //!
 //! [`FilterClause`] holds the parsed CEL tree itself — no separate
 //! condition-tree type mirroring it, since that would just be this
@@ -157,6 +158,7 @@ impl FilterClause {
                 Self::render(Self::only(call)?, values)?
             )),
             cel_ops::NEGATE => Ok(format!("-({})", Self::render(Self::only(call)?, values)?)),
+            "startsWith" | "endsWith" | "contains" => Self::render_like(call, values),
             name => Err(FilterClauseError::Unsupported(format!(
                 "`{name}` has no reading as a condition"
             ))),
@@ -205,6 +207,52 @@ impl FilterClause {
                 ))
             }
         }
+    }
+
+    /// `field.startsWith("x")`, `endsWith` and `contains` as `LIKE`, the
+    /// argument bound as the pattern with its own `%`, `_` and `!` escaped so
+    /// they match themselves.
+    ///
+    /// Only on a field, and only with a string literal: that is what has a
+    /// reading as a `LIKE`, and it keeps the pattern a bound value rather
+    /// than anything rendered into the text.
+    ///
+    /// `!` is the escape rather than `\`. A backslash inside a string literal
+    /// is itself an escape in MySQL's default mode, so `ESCAPE '\'` would not
+    /// read the same in every dialect; `!` means nothing in any of them.
+    fn render_like(call: &CallExpr, values: &mut Vec<Value>) -> Result<String, FilterClauseError> {
+        let name = &call.func_name;
+        let target = call
+            .target
+            .as_deref()
+            .filter(|target| matches!(target.expr, Expr::Ident(_) | Expr::Select(_)))
+            .ok_or_else(|| {
+                FilterClauseError::Unsupported(format!(
+                    "`{name}` is called on a field, as `field.{name}(\"...\")`"
+                ))
+            })?;
+        let Expr::Literal(LiteralValue::String(text)) = &Self::only(call)?.expr else {
+            return Err(FilterClauseError::Unsupported(format!(
+                "`{name}` reads a string literal"
+            )));
+        };
+
+        let field = Self::render(target, values)?;
+        let mut escaped = String::with_capacity(text.len());
+        for character in text.chars() {
+            if matches!(character, '!' | '%' | '_') {
+                escaped.push('!');
+            }
+            escaped.push(character);
+        }
+        let pattern = match name.as_str() {
+            "startsWith" => format!("{escaped}%"),
+            "endsWith" => format!("%{escaped}"),
+            _ => format!("%{escaped}%"),
+        };
+
+        values.push(Value::String(pattern));
+        Ok(format!("({field}) LIKE ${} ESCAPE '!'", values.len()))
     }
 
     fn render_in_list(
@@ -323,6 +371,11 @@ impl FilterClause {
 
         match &mut node.expr {
             Expr::Call(call) => {
+                // A method's receiver is a field too -- `name.startsWith(..)`
+                // -- and has to clear the allow-list like any other.
+                if let Some(target) = call.target.as_deref_mut() {
+                    Self::rename(target, columns)?;
+                }
                 for arg in &mut call.args {
                     Self::rename(arg, columns)?;
                 }
@@ -439,6 +492,7 @@ mod tests {
             Err(FilterClauseError::Blank)
         ));
         assert!(refuses("size(name) > 3"));
+        assert!(refuses("name.size() > 3"));
         assert!(refuses("[1, 2].all(x, x > 0)"));
         assert!(refuses("{'a': 1}"));
         assert!(refuses("status =="));
@@ -484,5 +538,85 @@ mod tests {
             where_by.values(),
             &[Value::String("live".into()), Value::Int(3)]
         );
+    }
+
+    #[test]
+    fn string_methods_read_as_like() {
+        let pattern = |filter: &str| {
+            let where_by = FilterClause::parse(filter)
+                .expect("condition parses")
+                .to_where_clause();
+            (
+                where_by.sql().as_str().to_owned(),
+                where_by.values().to_vec(),
+            )
+        };
+
+        assert_eq!(
+            pattern("name.startsWith('Gro')"),
+            (
+                "(name) LIKE $1 ESCAPE '!'".to_owned(),
+                vec![Value::String("Gro%".into())]
+            )
+        );
+        assert_eq!(
+            pattern("name.endsWith('ies')").1,
+            vec![Value::String("%ies".into())]
+        );
+        assert_eq!(
+            pattern("name.contains('cer')").1,
+            vec![Value::String("%cer%".into())]
+        );
+    }
+
+    #[test]
+    fn a_like_pattern_matches_its_wildcards_literally() {
+        let where_by = FilterClause::parse("code.startsWith('50%_off!')")
+            .expect("condition parses")
+            .to_where_clause();
+
+        assert_eq!(where_by.values(), &[Value::String("50!%!_off!!%".into())]);
+    }
+
+    #[test]
+    fn a_string_method_combines_like_any_condition() {
+        assert_eq!(
+            parsed("name.startsWith('a') && rank > 3"),
+            "((name) LIKE $1 ESCAPE '!') AND ((rank) > ($2))"
+        );
+    }
+
+    #[test]
+    fn a_string_method_is_only_called_on_a_field_with_a_literal() {
+        assert!(refuses("'abc'.startsWith('a')"));
+        assert!(refuses("name.startsWith(other)"));
+        assert!(refuses("name.startsWith(3)"));
+        assert!(refuses("name.startsWith('a', 'b')"));
+        assert!(refuses("startsWith(name, 'a')"));
+    }
+
+    #[test]
+    fn resolve_renames_the_field_a_method_is_called_on() {
+        let filter = FilterClause::parse("title.startsWith('Gro')")
+            .expect("condition parses")
+            .resolve(&columns(&[("title", "display_name")]))
+            .expect("the field is named");
+
+        assert_eq!(
+            filter.to_where_clause().sql().as_str(),
+            "(display_name) LIKE $1 ESCAPE '!'"
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_a_method_on_an_unoffered_field() {
+        let refused = FilterClause::parse("secret.startsWith('a')")
+            .expect("condition parses")
+            .resolve(&columns(&[("title", "display_name")]));
+
+        assert!(matches!(
+            refused,
+            Err(FilterClauseError::UnknownField(field)) if field == "secret"
+        ));
     }
 }
