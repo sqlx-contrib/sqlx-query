@@ -179,6 +179,13 @@ constructors `timestamp("...")` and `uuid("...")`.
 | `created > timestamp('2026-01-01T00:00:00Z')` | `(created) > ($1)`, bound as a timestamp |
 | `id == uuid('0123…cdef')`               | `(id) = ($1)`, bound as a UUID              |
 
+A blank filter parses to the empty filter, as a blank ordering does to the empty
+clause: it resolves against any mapping and renders as an empty `WhereClause`,
+which leaves its slot empty — so a request's `filter` goes through the same
+parse and resolve whether or not it says anything. An empty `WhereClause` is a
+valid value throughout: `and` and `or` return the other side, and a query with
+no `where` slot takes one without complaint.
+
 Two deliberate choices: `== null` renders as `IS NULL`, because `= NULL` is
 never true and so never what was meant; and both sides of a binary operator are
 always parenthesized, so there is no precedence table to get wrong.
