@@ -31,6 +31,11 @@
 //! decodes in turn and keeping whichever one `sqlx` itself accepts,
 //! rather than this crate re-deriving the same table from OIDs or type
 //! codes.
+//!
+//! [`Pager`] is the loop around it: a query fetches [`Pager::limit`] rows —
+//! one past the page — and [`Pager::next_page`] keeps the page and, when
+//! the extra row came back, calls [`Cursor::after_row`] on the last row
+//! kept. The result is a [`Page`]: the rows, and the cursor to the next.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{ColumnIndex, Decode, Row, Type};
@@ -268,6 +273,102 @@ impl Cursor {
     }
 }
 
+/// Cuts pages out of what a keyset-paged query returns, and positions the
+/// cursor to the page after each.
+///
+/// Whether there is a next page is only knowable by asking for one row more
+/// than the page holds: [`limit`](Self::limit) is that many, for the query's
+/// `LIMIT`, and [`next_page`](Self::next_page) takes what came back, keeps
+/// the page, and reads the cursor off its last row if the extra row came
+/// back too. Both read the same `size`, so the page size is the only number
+/// a caller handles — the extra row never leaves this type.
+///
+/// A pager holds no position, only the ordering and the size, so one pager
+/// serves every page of a traversal.
+#[derive(Debug, Clone)]
+pub struct Pager {
+    cursor: Cursor,
+    size: usize,
+}
+
+impl Pager {
+    /// A pager for pages of `size` rows, ordered by `cursor`'s `order_by` —
+    /// typically [`Cursor::new`] over the same `order_by` the query is
+    /// sorted by. A position `cursor` already carries is replaced on each
+    /// page, so the cursor a request came in with works too.
+    ///
+    /// A `size` of 0 is taken as 1: a page with no rows could never say
+    /// where the next one starts.
+    #[must_use]
+    pub fn new(cursor: Cursor, size: usize) -> Self {
+        Pager {
+            cursor,
+            size: size.max(1),
+        }
+    }
+
+    /// How many rows the query should fetch: one past the page, so
+    /// [`next_page`](Self::next_page) can tell whether there is another.
+    /// Bind it to the query's `LIMIT`.
+    #[must_use]
+    pub fn limit(&self) -> i64 {
+        i64::try_from(self.size).map_or(i64::MAX, |size| size.saturating_add(1))
+    }
+
+    /// The page out of `rows` — what a query fetched with
+    /// [`limit`](Self::limit) returned, in its order.
+    ///
+    /// Keeps the page's `size` rows. If the extra row came back there is a
+    /// next page, and [`Page::cursor`] is positioned after the last row kept
+    /// (see [`Cursor::after_row`]); otherwise this is the last page and it is
+    /// `None`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cursor::after_row`], for the last row kept:
+    /// [`CursorError::RowColumnMissing`] or
+    /// [`CursorError::RowValueUndecodable`] for a key the row cannot supply.
+    pub fn next_page<R>(&self, mut rows: Vec<R>) -> Result<Page<R>, CursorError>
+    where
+        R: Row,
+        usize: ColumnIndex<R>,
+        for<'r> bool: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> i16: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> i32: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> i64: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> f32: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> f64: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> String: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> crate::value::TimestampRepr: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> Vec<u8>: Decode<'r, R::Database> + Type<R::Database>,
+        for<'r> crate::value::UuidRepr: Decode<'r, R::Database> + Type<R::Database>,
+    {
+        if rows.len() <= self.size {
+            return Ok(Page { rows, cursor: None });
+        }
+
+        // At least one row is left: `size` is never 0, and there were more.
+        rows.truncate(self.size);
+        let cursor = rows
+            .last()
+            .map(|last| self.cursor.clone().after_row(last))
+            .transpose()?;
+
+        Ok(Page { rows, cursor })
+    }
+}
+
+/// One page of rows, and where the next one starts — what
+/// [`Pager::next_page`] cuts out of a query's rows.
+#[derive(Debug, Clone)]
+pub struct Page<R> {
+    /// The page's rows, at most the pager's size.
+    pub rows: Vec<R>,
+    /// The cursor to the next page — [`encode`](Cursor::encode) it as the
+    /// `next_page_token` — or `None` on the last page.
+    pub cursor: Option<Cursor>,
+}
+
 /// `key`'s 1-based position in `keys` — its placeholder number, since
 /// each key's value is bound once and referenced by number wherever it
 /// recurs across the OR branches.
@@ -430,6 +531,16 @@ mod tests {
             err,
             CursorError::TokenChecksumMismatch | CursorError::TokenMalformed
         ));
+    }
+
+    #[test]
+    fn a_pager_fetches_one_row_past_the_page() {
+        let cursor = Cursor::new(OrderByClause::default().asc("id"));
+
+        assert_eq!(Pager::new(cursor.clone(), 50).limit(), 51);
+        // An empty page could never say where the next one starts.
+        assert_eq!(Pager::new(cursor.clone(), 0).limit(), 2);
+        assert_eq!(Pager::new(cursor, usize::MAX).limit(), i64::MAX);
     }
 
     #[test]

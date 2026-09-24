@@ -12,7 +12,7 @@
 #![cfg(feature = "postgres")]
 
 use sqlx::{PgPool, Row};
-use sqlx_query::{Cursor, OrderByClause, QueryComposer, WhereClause};
+use sqlx_query::{Cursor, OrderByClause, Pager, QueryComposer, WhereClause};
 
 /// `None` when there is no server to talk to, which is not the same as
 /// the variable being unset: the Nix dev shell exports the Dev Container's
@@ -318,4 +318,60 @@ async fn a_cursor_pages_on_a_uuid_key() {
 
     let rest: Vec<uuid::Uuid> = rows.iter().map(|row| row.get("id")).collect();
     assert_eq!(rest, ids[1..]);
+}
+
+/// The `$N` counterpart of SQLite's pager test: the pager's limit binds by
+/// number behind the cursor's values, and each page picks up after the
+/// last, across a tie the primary key breaks.
+#[tokio::test]
+async fn a_pager_pages_through_every_row_once() {
+    let pool = pool_or_skip!();
+    table(
+        &pool,
+        "pg_pager_test",
+        "id bigint primary key, rank bigint not null",
+    )
+    .await;
+
+    for (id, rank) in [(1i64, 30i64), (2, 10), (3, 20), (4, 20), (5, 40)] {
+        sqlx::query("INSERT INTO pg_pager_test VALUES ($1, $2)")
+            .bind(id)
+            .bind(rank)
+            .execute(&pool)
+            .await
+            .expect("insert");
+    }
+
+    let sql = "SELECT id, rank FROM pg_pager_test \
+               WHERE /* query.where AND */ TRUE ORDER BY /* query.order_by , */ id \
+               LIMIT $1";
+    let order_by = OrderByClause::default().asc("rank").asc("id");
+    let pager = Pager::new(Cursor::new(order_by.clone()), 2);
+    let (mut seen, mut cursor) = (Vec::<Vec<i64>>::new(), None);
+
+    for _ in 0..10 {
+        let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+        query
+            .bind_value(pager.limit())
+            .push_order_by(order_by.clone());
+        if let Some(cursor) = cursor.take() {
+            query.with_cursor(cursor);
+        }
+
+        let rows = query
+            .build()
+            .expect("composes")
+            .fetch_all(&pool)
+            .await
+            .expect("runs");
+        let page = pager.next_page(rows).expect("the row carries every key");
+
+        seen.push(page.rows.iter().map(|row| row.get("id")).collect());
+        match page.cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    assert_eq!(seen, [vec![2, 3], vec![4, 1], vec![5]]);
 }
