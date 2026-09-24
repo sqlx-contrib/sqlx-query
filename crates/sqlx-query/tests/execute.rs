@@ -273,3 +273,62 @@ async fn reported_arguments_match_what_the_driver_receives() {
         "filter first: its slot precedes the base query's own markers"
     );
 }
+
+/// The ids `query` returns, in order.
+async fn ids(pool: &SqlitePool, query: QueryComposer<sqlx::Sqlite>) -> Vec<i64> {
+    query
+        .build()
+        .expect("composes")
+        .fetch_all(pool)
+        .await
+        .expect("runs")
+        .iter()
+        .map(|row| row.get::<i64, _>("id"))
+        .collect()
+}
+
+/// A fragment with a top-level `OR` is spliced in parenthesised, so the base
+/// query's own condition still applies to every row it matches. Bare, `AND`
+/// would bind tighter: `status = ? OR rank > ? AND tenant_id = ?` returns
+/// another tenant's shipped order.
+#[tokio::test]
+async fn a_top_level_or_stays_inside_the_base_condition() {
+    let pool = seed().await;
+
+    let mut query = QueryComposer::<sqlx::Sqlite>::new(LIST_ORDERS);
+    query.bind_value("acme").bind_value(10i64).push_where(
+        WhereClause::new("status = $1 OR rank > $2")
+            .bind_value("SHIPPED")
+            .bind_value(35i64),
+    );
+
+    assert_eq!(
+        ids(&pool, query).await,
+        [1, 3],
+        "acme's shipped orders only"
+    );
+}
+
+/// A cursor is an `OR` of `AND`s, so a page after the first is the same case:
+/// it has to stay inside the base condition, or paging walks into another
+/// tenant's rows.
+#[tokio::test]
+async fn a_cursor_page_stays_inside_the_base_condition() {
+    let pool = seed().await;
+    let order_by = OrderByClause::default().asc("rank").asc("id");
+    let cursor = Cursor::new(order_by)
+        .after(vec![Value::Int(20), Value::Int(2)])
+        .expect("two keys, two values");
+
+    let mut query = QueryComposer::<sqlx::Sqlite>::new(LIST_ORDERS);
+    query
+        .bind_value("acme")
+        .bind_value(10i64)
+        .with_cursor(cursor);
+
+    assert_eq!(
+        ids(&pool, query).await,
+        [3],
+        "the page after acme's rank 20"
+    );
+}

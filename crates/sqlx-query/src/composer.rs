@@ -421,9 +421,14 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .filter(|w| !w.sql().as_str().is_empty())
             .map(|w| w.shift(offset));
 
+        // Parenthesised whole, whatever it holds. The slot's connective joins
+        // it to the base query's own condition -- `/* query.where AND */
+        // tenant_id = $1` -- and `AND` binds tighter than `OR`, so a bare
+        // `a OR b` would become `a OR (b AND tenant_id = $1)`: every row `a`
+        // matches, the base restriction or not.
         let sql = where_by
             .as_ref()
-            .map_or_else(String::new, |w| w.sql().as_str().to_owned());
+            .map_or_else(String::new, |w| format!("({})", w.sql().as_str()));
         let values = where_by.map_or_else(Vec::new, |w| w.values().to_vec());
         (sql, values)
     }

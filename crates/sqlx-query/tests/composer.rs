@@ -53,7 +53,7 @@ fn substitutes_where_and_order_by_slots() {
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
 
-    assert!(sql.contains("role = 'admin' AND"));
+    assert!(sql.contains("(role = 'admin') AND"));
     assert!(sql.contains("name ASC , id"));
     assert!(!sql.contains("query.where"));
     assert!(!sql.contains("query.order_by"));
@@ -88,7 +88,7 @@ fn missing_order_by_drops_slot_and_keeps_where() {
 
     let sql = query.compose().unwrap().sql().to_owned();
 
-    assert!(sql.contains("role = 'admin' AND"));
+    assert!(sql.contains("(role = 'admin') AND"));
     assert!(!sql.contains("query.order_by"));
     assert!(!sql.contains("ASC"));
 }
@@ -117,7 +117,7 @@ fn preserves_or_connective() {
 
     let sql = query.compose().unwrap().sql().to_owned();
 
-    assert!(sql.contains("role = 'admin' OR"));
+    assert!(sql.contains("(role = 'admin') OR"));
     assert!(!sql.contains("query.where"));
 }
 
@@ -163,7 +163,7 @@ fn multiple_slots_of_the_same_kind_all_substituted() {
 
     let sql = query.compose().unwrap().sql().to_owned();
 
-    assert_eq!(sql.matches("role = 'admin' AND").count(), 2);
+    assert_eq!(sql.matches("(role = 'admin') AND").count(), 2);
     assert!(!sql.contains("query.where"));
 }
 
@@ -182,7 +182,7 @@ fn shifts_filter_placeholders_past_base_binds() {
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
 
-    assert!(sql.contains("name = $2 AND score > $3 AND"));
+    assert!(sql.contains("(name = $2 AND score > $3) AND"));
     assert_eq!(
         values,
         vec![
@@ -233,7 +233,7 @@ fn zero_offset_leaves_filter_placeholders_unchanged() {
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
 
-    assert!(sql.contains("name = $1 AND score > $2 AND"));
+    assert!(sql.contains("(name = $1 AND score > $2) AND"));
     assert_eq!(values, vec![Value::String("alice".into()), Value::Int(90)]);
 }
 
@@ -248,7 +248,7 @@ fn leaves_non_matching_comments_untouched() {
     let sql = query.compose().unwrap().sql().to_owned();
 
     assert!(sql.contains("/* regular comment */"));
-    assert!(sql.contains("role = 'admin' AND"));
+    assert!(sql.contains("(role = 'admin') AND"));
 }
 
 /// Ports pgxquery's "an unknown slot name is used: drops the slot
@@ -303,7 +303,7 @@ fn index_based_numbering_survives_placeholders_declared_after_the_marker_in_text
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
 
-    assert!(sql.contains("WHERE status = $3 AND TRUE"));
+    assert!(sql.contains("WHERE (status = $3) AND TRUE"));
     assert!(sql.contains("ORDER BY rank DESC , collection_id"));
     assert!(sql.contains("LIMIT $1 OFFSET $2"));
     assert_eq!(
@@ -344,7 +344,7 @@ fn build_produces_a_query_with_the_composed_sql() {
 
     let built = query.build().unwrap();
 
-    assert!(built.sql().as_str().contains("role = 'admin' AND TRUE"));
+    assert!(built.sql().as_str().contains("(role = 'admin') AND TRUE"));
 }
 
 fn rank_cursor() -> Cursor {
@@ -366,7 +366,7 @@ fn cursor_alone_supplies_its_own_order_by() {
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
 
-    assert!(sql.contains("WHERE (rank < $1) OR (rank = $1 AND id > $2) AND TRUE"));
+    assert!(sql.contains("WHERE ((rank < $1) OR (rank = $1 AND id > $2)) AND TRUE"));
     assert!(sql.contains("ORDER BY rank DESC, id ASC , id"));
     assert_eq!(values, vec![Value::Int(42), Value::Int(7)]);
 }
@@ -415,7 +415,7 @@ fn cursor_and_filter_are_combined_with_and() {
     let (sql, values) = (statement.sql(), values(&statement));
 
     assert!(
-        sql.contains("WHERE (status = $1) AND ((rank < $2) OR (rank = $2 AND id > $3)) AND TRUE")
+        sql.contains("WHERE ((status = $1) AND ((rank < $2) OR (rank = $2 AND id > $3))) AND TRUE")
     );
     assert_eq!(
         values,
@@ -450,7 +450,7 @@ fn non_positional_binds_in_textual_order_not_base_then_fragments() {
 
     assert_eq!(
         sql,
-        "SELECT id FROM users WHERE ((rank) > (?)) AND ((rank < ?) OR (rank = ? AND id > ?)) AND tenant_id = ? ORDER BY rank DESC, id ASC , id LIMIT ?"
+        "SELECT id FROM users WHERE (((rank) > (?)) AND ((rank < ?) OR (rank = ? AND id > ?))) AND tenant_id = ? ORDER BY rank DESC, id ASC , id LIMIT ?"
     );
     // Six placeholders, six values: the cursor's `rank` boundary is
     // referenced twice and so appears twice, which is the thing `$1` can
@@ -487,7 +487,7 @@ fn positional_keeps_numbering_and_declaration_order() {
 
     assert_eq!(
         sql,
-        "SELECT id FROM users WHERE ((rank) > ($3)) AND ((rank < $4) OR (rank = $4 AND id > $5)) AND tenant_id = $1 ORDER BY rank DESC, id ASC , id LIMIT $2"
+        "SELECT id FROM users WHERE (((rank) > ($3)) AND ((rank < $4) OR (rank = $4 AND id > $5))) AND tenant_id = $1 ORDER BY rank DESC, id ASC , id LIMIT $2"
     );
     assert_eq!(
         values,
@@ -518,7 +518,7 @@ fn mysql_markers_inside_quoting_and_comments_are_not_placeholders() {
 
     assert!(sql.contains("SELECT `why?` FROM t"));
     assert!(sql.contains("'it\\'s ? here'"));
-    assert!(sql.contains("AND rank > ? AND tenant = ?"));
+    assert!(sql.contains("AND (rank > ?) AND tenant = ?"));
     assert_eq!(values, vec![Value::Int(10), Value::String("acme".into())]);
 }
 
@@ -585,7 +585,7 @@ fn where_by_accumulates_across_multiple_calls() {
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
 
-    assert!(sql.contains("WHERE (tenant_id = $1) AND (status = $2) AND TRUE"));
+    assert!(sql.contains("WHERE ((tenant_id = $1) AND (status = $2)) AND TRUE"));
     assert_eq!(
         values,
         vec![Value::String("acme".into()), Value::String("ACTIVE".into())]
@@ -639,7 +639,7 @@ fn bytes_bind_as_a_value() {
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
 
-    assert_eq!(sql, "SELECT * FROM t WHERE rank > ? AND receipt = ?");
+    assert_eq!(sql, "SELECT * FROM t WHERE (rank > ?) AND receipt = ?");
     assert_eq!(
         values,
         vec![Value::Int(10), Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])]
@@ -663,7 +663,7 @@ fn bind_accepts_a_type_value_cannot_hold() {
 
     assert_eq!(
         statement.sql(),
-        "SELECT * FROM t WHERE rank > ? AND due = ?"
+        "SELECT * FROM t WHERE (rank > ?) AND due = ?"
     );
     // Textual order: the slot precedes the base query's own `?`.
     assert_eq!(statement.arguments()[0].value(), Some(&Value::Int(10)));
