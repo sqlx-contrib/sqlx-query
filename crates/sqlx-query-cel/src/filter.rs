@@ -36,9 +36,6 @@ use sqlx_query::{QueryResolver, Value, WhereClause};
 /// Errors [`FilterClause::parse`]/[`FilterClause::resolve`] can return.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FilterClauseError {
-    #[error("a filter cannot be blank")]
-    Blank,
-
     #[error("{0}")]
     Parse(String),
 
@@ -56,9 +53,14 @@ pub enum FilterClauseError {
 
 /// A parsed, not-yet-resolved CEL filter condition. See the module docs
 /// for the parse -> resolve -> render pipeline.
-#[derive(Debug, Clone)]
+///
+/// The default is the empty filter — what a blank string parses to — which
+/// has no condition: it resolves to itself and renders as an empty
+/// [`WhereClause`], so a composer leaves its slot empty.
+#[derive(Debug, Clone, Default)]
 pub struct FilterClause {
-    expr: cel::IdedExpr,
+    /// `None` for the empty filter.
+    expr: Option<cel::IdedExpr>,
 }
 
 impl FilterClause {
@@ -68,21 +70,19 @@ impl FilterClause {
     /// `status == null` is written as `IS NULL` rather than `= NULL`,
     /// which in SQL is never true and so never what was meant.
     ///
-    /// Unlike [`OrderByClause::parse`](sqlx_query::OrderByClause::parse),
-    /// blank is refused rather than read as "no condition": an ordering
-    /// is a list and can be empty, a condition is one expression and
-    /// cannot. Skip the call instead.
+    /// An empty or all-whitespace string is the empty filter, no condition
+    /// at all — as [`OrderByClause::parse`](sqlx_query::OrderByClause::parse)
+    /// reads a blank ordering, and as AIP-160 reads a blank `filter`.
     ///
     /// # Errors
     ///
-    /// [`FilterClauseError::Blank`] on an empty/all-whitespace string;
     /// [`FilterClauseError::Parse`] if it isn't valid CEL;
     /// [`FilterClauseError::Unsupported`] if it parses as CEL with no
     /// reading as a condition (a macro, a map literal, a function call
     /// other than the operators above, ...).
     pub fn parse(filter: &str) -> Result<Self, FilterClauseError> {
         if filter.trim().is_empty() {
-            return Err(FilterClauseError::Blank);
+            return Ok(FilterClause::default());
         }
 
         let parsed = cel::parser::Parser::new()
@@ -92,14 +92,14 @@ impl FilterClause {
         // Fails fast on anything with no reading as a condition.
         Self::validate(&parsed)?;
 
-        Ok(FilterClause { expr: parsed })
+        Ok(FilterClause { expr: Some(parsed) })
     }
 
     /// This condition as a [`WhereClause`], with every literal bound to
     /// a `$N` placeholder rather than spliced into the text — matches
     /// [`Cursor::to_where_clause`](sqlx_query::Cursor::to_where_clause)'s
     /// naming, since both types answer "what's your WHERE-clause form?"
-    /// the same way.
+    /// the same way. The empty filter is the empty clause.
     ///
     /// # Panics
     ///
@@ -108,9 +108,13 @@ impl FilterClause {
     /// `FilterClause` exists to call this on.
     #[must_use]
     pub fn to_where_clause(&self) -> WhereClause {
+        let Some(expr) = &self.expr else {
+            return WhereClause::default();
+        };
+
         let mut values = Vec::new();
-        let sql = Self::render(&self.expr, &mut values)
-            .expect("parse() already validated this tree renders");
+        let sql =
+            Self::render(expr, &mut values).expect("parse() already validated this tree renders");
         values
             .into_iter()
             .fold(WhereClause::new(sql), WhereClause::bind_value)
@@ -487,7 +491,9 @@ impl QueryResolver for FilterClause {
     /// offered. Same allow-list shape as
     /// [`OrderByClause::resolve`](sqlx_query::OrderByClause::resolve).
     fn resolve(mut self, columns: &HashMap<&str, &str>) -> Result<Self, Self::Error> {
-        Self::rename(&mut self.expr, columns)?;
+        if let Some(expr) = &mut self.expr {
+            Self::rename(expr, columns)?;
+        }
         Ok(self)
     }
 }
@@ -568,16 +574,22 @@ mod tests {
         );
     }
 
+    /// A blank filter is no condition: it resolves against any mapping, the
+    /// empty one included, and renders as the empty clause.
+    #[test]
+    fn a_blank_filter_is_the_empty_one() {
+        for blank in ["", "   ", "\n\t"] {
+            let filter = FilterClause::parse(blank)
+                .and_then(|filter| filter.resolve(&HashMap::new()))
+                .expect("a blank filter parses and resolves");
+
+            assert!(filter.to_where_clause().is_empty(), "{blank:?}");
+        }
+        assert!(FilterClause::default().to_where_clause().is_empty());
+    }
+
     #[test]
     fn what_has_no_reading_as_a_condition_is_refused() {
-        assert!(matches!(
-            FilterClause::parse(""),
-            Err(FilterClauseError::Blank)
-        ));
-        assert!(matches!(
-            FilterClause::parse("   "),
-            Err(FilterClauseError::Blank)
-        ));
         assert!(refuses("size(name) > 3"));
         assert!(refuses("name.size() > 3"));
         assert!(refuses("[1, 2].all(x, x > 0)"));

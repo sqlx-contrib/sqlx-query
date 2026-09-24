@@ -22,6 +22,13 @@ pub struct WhereClause {
     values: Vec<Value>,
 }
 
+/// The clause that says nothing: see [`WhereClause::is_empty`].
+impl Default for WhereClause {
+    fn default() -> Self {
+        WhereClause::new("")
+    }
+}
+
 impl WhereClause {
     /// A `WhereClause` with no bind values — most hand-written filters
     /// (e.g. `"deleted_at IS NULL"`) don't reference any. Attach values
@@ -59,6 +66,16 @@ impl WhereClause {
         &self.values
     }
 
+    /// Whether this clause says nothing — no SQL text, or only whitespace.
+    /// An empty clause is a valid value: [`and`](Self::and) and
+    /// [`or`](Self::or) return the other side unchanged, and
+    /// [`QueryComposer`](crate::QueryComposer) leaves its slot empty, the
+    /// way it does for an empty [`OrderByClause`](crate::OrderByClause).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sql.as_str().trim().is_empty()
+    }
+
     /// This clause's SQL text. Matches
     /// [`OrderByClause::sql`](crate::OrderByClause::sql)'s return type —
     /// both clause types answer "what's your SQL text?" as [`SqlStr`], the
@@ -83,6 +100,9 @@ impl WhereClause {
     /// reference one value twice (a [`Cursor`](crate::Cursor)'s tuple
     /// comparison does exactly that), and shifting by the count would then
     /// land `other` on top of a number `self` is still using.
+    ///
+    /// An [empty](Self::is_empty) side contributes nothing: the result is
+    /// the other side, as it was.
     #[must_use]
     pub fn and(self, other: WhereClause) -> WhereClause {
         self.combine(other, "AND")
@@ -93,13 +113,21 @@ impl WhereClause {
     /// [`and`](Self::and) does.
     ///
     /// Both sides are parenthesised, so there's no precedence to reason
-    /// about when mixing this with `and`.
+    /// about when mixing this with `and`. An [empty](Self::is_empty) side
+    /// contributes nothing, as for `and`.
     #[must_use]
     pub fn or(self, other: WhereClause) -> WhereClause {
         self.combine(other, "OR")
     }
 
     fn combine(self, other: WhereClause, connective: &str) -> WhereClause {
+        if other.is_empty() {
+            return self;
+        }
+        if self.is_empty() {
+            return other;
+        }
+
         let lexer = QueryLexer::standard();
         let offset = lexer.max_placeholder_number(self.sql().as_str());
         let other_sql = lexer.shift_placeholder_numbers(other.sql().as_str(), offset);
@@ -157,6 +185,20 @@ mod tests {
                 Value::Int(7),
             ]
         );
+    }
+
+    #[test]
+    fn an_empty_side_contributes_nothing() {
+        let status = WhereClause::new("status = $1").bind_value("ACTIVE");
+
+        assert!(WhereClause::default().is_empty());
+        assert!(WhereClause::new("  ").is_empty());
+        assert_eq!(WhereClause::default().and(status.clone()), status);
+        assert_eq!(status.clone().and(WhereClause::default()), status);
+        assert_eq!(status.clone().or(WhereClause::new(" ")), status);
+        assert!(WhereClause::default()
+            .and(WhereClause::default())
+            .is_empty());
     }
 
     #[test]

@@ -72,6 +72,14 @@ async fn a_pattern_matches_a_prefix_a_suffix_and_a_substring() {
     assert_eq!(sqlite("name.contains('cer')").await.len(), 2);
 }
 
+/// A blank filter is no filter: every row, straight through the composer
+/// that would otherwise have `AND`ed a condition in.
+#[tokio::test]
+async fn a_blank_filter_selects_every_row() {
+    assert_eq!(sqlite("").await.len(), NAMES.len());
+    assert_eq!(sqlite("  ").await.len(), NAMES.len());
+}
+
 /// `None` when there is no server to talk to -- see `sqlx-query`'s
 /// `execute_postgres.rs` for why reachability, not the variable, decides.
 async fn postgres() -> Option<PgPool> {

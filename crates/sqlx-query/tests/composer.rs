@@ -427,6 +427,50 @@ fn cursor_and_filter_are_combined_with_and() {
     );
 }
 
+/// An empty filter -- what a blank one parses to -- is no filter: the slot
+/// drops exactly as if nothing had been pushed.
+#[test]
+fn an_empty_filter_drops_the_where_slot() {
+    let sql = "SELECT id FROM users WHERE /* query.where AND */ id = $1";
+
+    let mut pushed = QueryComposer::<sqlx::Postgres>::new(sql);
+    pushed.bind_value("007").push_where(WhereClause::default());
+    let mut untouched = QueryComposer::<sqlx::Postgres>::new(sql);
+    untouched.bind_value("007");
+
+    assert_eq!(
+        pushed.compose().unwrap().sql(),
+        untouched.compose().unwrap().sql()
+    );
+}
+
+/// Nor does an empty filter need a slot to go in: there is nothing to
+/// splice, so a query without one is not an error.
+#[test]
+fn an_empty_filter_needs_no_where_slot() {
+    let mut query = QueryComposer::<sqlx::Postgres>::new("SELECT id FROM users");
+    query.push_where(WhereClause::default());
+
+    assert_eq!(query.compose().unwrap().sql(), "SELECT id FROM users");
+}
+
+/// Beside a cursor, an empty filter leaves the cursor's comparison as it
+/// is, rather than `AND`ing it with `()`.
+#[test]
+fn an_empty_filter_leaves_a_cursor_alone() {
+    let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
+    let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+    query
+        .push_where(WhereClause::default())
+        .with_cursor(rank_cursor());
+
+    let statement = query.compose().unwrap();
+    let (sql, values) = (statement.sql(), values(&statement));
+
+    assert!(sql.contains("WHERE ((rank < $1) OR (rank = $1 AND id > $2)) AND TRUE"));
+    assert_eq!(values, vec![Value::Int(42), Value::Int(7)]);
+}
+
 /// The reason everything is numbered internally: a `?` binds by where it
 /// sits in the text, so a slot *ahead* of the base query's own markers
 /// binds ahead of them too. A value list built as base-then-fragments —

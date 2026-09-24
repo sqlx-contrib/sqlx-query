@@ -418,7 +418,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .cloned()
             .chain(self.cursor.as_ref().map(Cursor::to_where_clause))
             .reduce(WhereClause::and)
-            .filter(|w| !w.sql().as_str().is_empty())
+            .filter(|w| !w.is_empty())
             .map(|w| w.shift(offset));
 
         // Parenthesised whole, whatever it holds. The slot's connective joins
