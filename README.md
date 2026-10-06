@@ -239,8 +239,8 @@ came back:
 ```rust
 // The request's token; the empty one -- the first page -- is the empty cursor.
 let cursor = Cursor::parse(&page_token)?;
-// The next page's cursor carries the filter, so that page can be checked
-// against it.
+// The next page's cursor carries a checksum of the filter, so that page can be
+// checked against it.
 let pager = Pager::new(Cursor::new(order_by.clone()).with_filter(filter.clone()), 50);
 
 let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
@@ -279,12 +279,13 @@ rejected if hand-edited. A cursor carries the `order_by` it was built against,
 so it doesn't have to be repeated; if it *is* set and disagrees, `compose()`
 fails rather than paging through a different sort than the token was cut for.
 
-It carries the filter too, given with `with_filter` — everything passed to
-`push_where`, in the same order. AIP-158 holds the filter fixed between pages,
-and a cursor is only a position within one filtered set, so `compose()` checks
-the next page's `push_where` clauses against it and fails with
+It carries a checksum of the filter too, given with `with_filter` — the same
+clauses passed to `push_where`, in the same order. AIP-158 holds the filter
+fixed between pages, and a cursor is only a position within one filtered set,
+so `compose()` checksums the next page's `push_where` clauses and fails with
 `Error::CursorMismatch` if the client changed, added or dropped a filter,
-rather than returning pages that match neither.
+rather than returning pages that match neither. Only the checksum travels: the
+filter's SQL never ends up in the token.
 
 ## Binding
 

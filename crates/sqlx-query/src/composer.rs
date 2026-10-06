@@ -59,9 +59,9 @@ pub enum Error {
     ///
     /// An explicit `order_by` must equal the cursor's
     /// [`to_order_by_clause`](Cursor::to_order_by_clause); the
-    /// [`push_where`](QueryComposer::push_where) clauses, AND-ed together,
-    /// must equal its [`filter`](Cursor::filter) — no clauses at all only
-    /// matches a cursor with no filter.
+    /// [`push_where`](QueryComposer::push_where) clauses must be the ones
+    /// given to its [`with_filter`](Cursor::with_filter), in the same order
+    /// — no clauses at all only matches a cursor with no filter.
     #[error("order_by or filter doesn't match the one the cursor was issued under")]
     CursorMismatch,
 
@@ -178,7 +178,8 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// two match, since a mismatch almost always means the client's sort
     /// changed between the request that issued this cursor and this one.
     /// The same goes for the filter, always: the `push_where` clauses must
-    /// match the cursor's [`filter`](Cursor::filter).
+    /// be the ones the cursor was given with
+    /// [`with_filter`](Cursor::with_filter).
     /// Only one cursor makes sense per query, so unlike `push_where`/
     /// `push_order_by` this doesn't accumulate — a second call replaces the
     /// first.
@@ -423,25 +424,19 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// is shifted past `offset`, the base query's own placeholders.
     ///
     /// The cursor's tuple comparison is only meaningful within the filtered
-    /// set it was positioned in, so the `where_by` values, AND-ed together,
-    /// must equal the filter the cursor was issued under. Combined the same
-    /// way [`Cursor::with_filter`] combines them, so the same sequence of
-    /// clauses produces the same clause on both sides.
+    /// set it was positioned in, so the `where_by` values must be the filter
+    /// the cursor was issued under — see [`Cursor::with_filter`].
     fn compose_where(&self, offset: usize) -> Result<(String, Vec<Value>), Error> {
-        let filter = self
-            .where_by
-            .iter()
-            .cloned()
-            .fold(WhereClause::default(), WhereClause::and);
-
         if let Some(cursor) = &self.cursor {
-            if *cursor.filter() != filter {
+            if !cursor.matches_filter(&self.where_by) {
                 return Err(Error::CursorMismatch);
             }
         }
 
-        let where_by = Some(filter)
-            .into_iter()
+        let where_by = self
+            .where_by
+            .iter()
+            .cloned()
             .chain(self.cursor.as_ref().map(Cursor::to_where_clause))
             .reduce(WhereClause::and)
             .filter(|w| !w.is_empty())
