@@ -14,22 +14,16 @@
 //! token's checksum will mismatch and be cleanly rejected rather than
 //! misread.
 //!
-//! The token also carries a digest of the request it was issued for — the
-//! caller's own list of fields, typically the raw `filter` and `order_by`
-//! strings and any scope such as the parent. AIP-158 requires every field
-//! but `page_token` and `page_size` to stay the same between pages, as
-//! `einride/aip-go`'s `CalculateRequestChecksum` does; without this, a
-//! client could change its `filter` and keep its token, and be paged on from
-//! that position under a predicate the token was never cut for.
-//! [`Cursor::parse`] recomputes the digest from the request in hand and
-//! rejects a token issued for a different one.
-//!
-//! Neither checksum stands in for
+//! That checksum only guards against a corrupted or hand-edited token; it
+//! is not a substitute for
 //! [`QueryComposer::compose`](crate::QueryComposer::compose)'s
-//! [`CursorMismatch`](crate::Error::CursorMismatch) check, which compares
-//! the actual decoded `OrderByClause` against an explicit one — a stronger
-//! guarantee than a hash could give, for the one field the cursor itself
-//! depends on.
+//! [`CursorMismatch`](crate::Error::CursorMismatch) check, which is what
+//! catches a client paging with one `order_by` or filter and then switching
+//! to another — that check compares the actual decoded `OrderByClause` and
+//! [`WhereClause`], a stronger guarantee than a hash could give. AIP-158
+//! requires both to stay the same between pages: a cursor positions within
+//! one ordering of one filtered set, and carried into another it would
+//! return pages that match neither.
 //!
 //! [`Cursor::after_row`] fills values straight from a `sqlx::Row` (the
 //! last row of a page, once it's been fetched) instead of requiring the
@@ -57,15 +51,9 @@ use crate::{OrderByClause, OrderDirection, Value, WhereClause};
 /// payload, mirroring `einride/aip-go`'s `PageToken { Offset, checksum
 /// RequestChecksum }`. Private: callers only ever see the base64 string
 /// [`Cursor::encode`] returns, never this type.
-///
-/// `request` is the digest of the request the token was issued for, kept
-/// apart from `checksum` so [`Cursor::parse`] can tell a token issued for
-/// another request from a corrupted one. `checksum` covers it too, so
-/// editing it is corruption like any other.
 #[derive(Serialize, Deserialize)]
 struct CursorToken {
     checksum: u32,
-    request: u32,
     cursor: Cursor,
 }
 
@@ -93,6 +81,8 @@ struct CursorKey {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cursor {
     keys: Vec<CursorKey>,
+    #[serde(with = "filter_wire")]
+    filter: WhereClause,
 }
 
 /// Errors [`Cursor`]'s methods can return: building one
@@ -111,9 +101,6 @@ pub enum CursorError {
 
     #[error("cursor token checksum mismatch — the token was corrupted or tampered with")]
     TokenChecksumMismatch,
-
-    #[error("cursor token was issued for a different request — only page_token and page_size may change between pages")]
-    RequestMismatch,
 
     #[error("row has no column named `{0}` for an order_by key")]
     RowColumnMissing(String),
@@ -135,7 +122,37 @@ impl Cursor {
             .cloned()
             .map(|order| CursorKey { order, value: None })
             .collect();
-        Cursor { keys }
+        Cursor {
+            keys,
+            filter: WhereClause::default(),
+        }
+    }
+
+    /// The filter the query this cursor pages through is filtered by —
+    /// everything passed to
+    /// [`QueryComposer::push_where`](crate::QueryComposer::push_where), in
+    /// the same order. Accumulates the same way: each call ANDs `filter`
+    /// onto what's already there, so a tenant scope and then a client
+    /// filter come out exactly as the composer combines them.
+    ///
+    /// The token carries it, and
+    /// [`QueryComposer::compose`](crate::QueryComposer::compose) checks it
+    /// against the next page's own `push_where` clauses, so a client that
+    /// changes its filter between pages gets
+    /// [`Error::CursorMismatch`](crate::Error::CursorMismatch) rather than a
+    /// page from a set the cursor was never positioned in.
+    #[must_use]
+    pub fn with_filter(mut self, filter: impl Into<WhereClause>) -> Self {
+        self.filter = self.filter.and(filter.into());
+        self
+    }
+
+    /// The filter this cursor was issued under — see
+    /// [`with_filter`](Self::with_filter). Empty for a query with no
+    /// `push_where` clauses.
+    #[must_use]
+    pub fn filter(&self) -> &WhereClause {
+        &self.filter
     }
 
     /// Whether this is the empty cursor: no keys, so no position — the start
@@ -146,26 +163,21 @@ impl Cursor {
     }
 
     /// Decodes a `page_token` string produced by [`encode`](Self::encode)
-    /// back into a `Cursor` carrying both its `order_by` and its boundary
-    /// values — no separate [`new`](Self::new)/[`after`](Self::after) call
-    /// needed, unlike building one from scratch.
+    /// back into a `Cursor` carrying its `order_by`, its
+    /// [filter](Self::with_filter) and its boundary values — no separate
+    /// [`new`](Self::new)/[`after`](Self::after) call needed, unlike building
+    /// one from scratch.
     ///
     /// An empty or all-whitespace token is the [empty](Self::is_empty)
     /// cursor, the first page, as AIP-158 reads it.
-    ///
-    /// `request` is the current request's fields, in the order
-    /// [`encode`](Self::encode) was given them — every field but
-    /// `page_token` and `page_size`, e.g. `&[parent, filter, order_by]`.
     ///
     /// # Errors
     ///
     /// [`CursorError::TokenInvalidBase64`] or
     /// [`CursorError::TokenMalformed`] for a token that isn't one this type
-    /// produced, [`CursorError::TokenChecksumMismatch`] for one that was
-    /// corrupted or hand-edited after it was issued, and
-    /// [`CursorError::RequestMismatch`] for one issued for a different
-    /// `request`.
-    pub fn parse(token: &str, request: &[&str]) -> Result<Self, CursorError> {
+    /// produced, and [`CursorError::TokenChecksumMismatch`] for one that was
+    /// corrupted or hand-edited after it was issued.
+    pub fn parse(token: &str) -> Result<Self, CursorError> {
         use base64::Engine as _;
 
         if token.trim().is_empty() {
@@ -179,11 +191,8 @@ impl Cursor {
         let wire: CursorToken =
             postcard::from_bytes(&bytes).map_err(|_| CursorError::TokenMalformed)?;
 
-        if checksum_of(wire.request, &wire.cursor) != wire.checksum {
+        if checksum_of(&wire.cursor) != wire.checksum {
             return Err(CursorError::TokenChecksumMismatch);
-        }
-        if digest_of(request) != wire.request {
-            return Err(CursorError::RequestMismatch);
         }
 
         Ok(wire.cursor)
@@ -193,11 +202,6 @@ impl Cursor {
     /// back to the client as-is. See the module docs for the wire format
     /// and what the checksum does and doesn't guard against.
     ///
-    /// `request` is the fields of the request this page answers — every one
-    /// but `page_token` and `page_size`, e.g. `&[parent, filter, order_by]`.
-    /// [`parse`](Self::parse) only accepts the token back for the same
-    /// fields, in the same order.
-    ///
     /// The [empty](Self::is_empty) cursor encodes as the empty string, the
     /// token that says there is no next page.
     ///
@@ -206,17 +210,15 @@ impl Cursor {
     /// If any key's value is unset — unreachable through this type's public
     /// API, same as [`to_where_clause`](Self::to_where_clause).
     #[must_use]
-    pub fn encode(&self, request: &[&str]) -> String {
+    pub fn encode(&self) -> String {
         use base64::Engine as _;
 
         if self.is_empty() {
             return String::new();
         }
 
-        let request = digest_of(request);
         let token = CursorToken {
-            checksum: checksum_of(request, self),
-            request,
+            checksum: checksum_of(self),
             cursor: self.clone(),
         };
         let bytes = postcard::to_allocvec(&token).expect("CursorToken serialization is infallible");
@@ -448,28 +450,44 @@ fn placeholder_index(keys: &[CursorKey], key: &CursorKey) -> usize {
 
 /// XORed into the checksum on both [`Cursor::encode`] and
 /// [`Cursor::parse`] — see the module docs for what bumping this buys.
-/// Last bumped when [`CursorToken`] gained its `request` digest.
+/// Last bumped when [`Cursor`] gained its filter.
 const CURSOR_TOKEN_CHECKSUM_MASK: u32 = 0x5eed_c0df;
 
-/// The token's checksum, as stored in / verified against a
-/// [`CursorToken`]: a CRC32 of the `postcard` encoding of its `request`
-/// digest and `cursor`, masked by [`CURSOR_TOKEN_CHECKSUM_MASK`].
-/// Deterministic — `postcard`'s output for the same value is always the
-/// same bytes — so [`Cursor::parse`] can recompute this straight from the
-/// decoded fields rather than needing the original payload bytes kept
-/// around separately.
-fn checksum_of(request: u32, cursor: &Cursor) -> u32 {
-    let payload =
-        postcard::to_allocvec(&(request, cursor)).expect("Cursor serialization is infallible");
-    crc32(&payload) ^ CURSOR_TOKEN_CHECKSUM_MASK
+/// [`Cursor`]'s `filter` on the wire: its SQL text and bind values, the
+/// two things a [`WhereClause`] is. Kept here rather than as a `serde`
+/// impl on `WhereClause` itself, so the token stays the only place a
+/// filter is ever serialized.
+mod filter_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::{Value, WhereClause};
+
+    pub(super) fn serialize<S: Serializer>(
+        filter: &WhereClause,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        (filter.sql().as_str(), filter.values()).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<WhereClause, D::Error> {
+        let (sql, values) = <(String, Vec<Value>)>::deserialize(deserializer)?;
+        Ok(values
+            .into_iter()
+            .fold(WhereClause::new(sql), WhereClause::bind_value))
+    }
 }
 
-/// The digest of a request's fields, as stored in a [`CursorToken`]: a
-/// CRC32 of their `postcard` encoding, which prefixes each field with its
-/// length — so `["a b"]`, `["a", "b"]` and `["ab", ""]` all differ.
-fn digest_of(request: &[&str]) -> u32 {
-    let payload = postcard::to_allocvec(request).expect("&str serialization is infallible");
-    crc32(&payload)
+/// `cursor`'s checksum, as stored in / verified against a
+/// [`CursorToken`]: a CRC32 of `cursor`'s own `postcard` encoding, masked
+/// by [`CURSOR_TOKEN_CHECKSUM_MASK`]. Deterministic — `postcard`'s output
+/// for the same value is always the same bytes — so [`Cursor::parse`] can
+/// recompute this straight from the decoded `cursor` field rather than
+/// needing the original payload bytes kept around separately.
+fn checksum_of(cursor: &Cursor) -> u32 {
+    let payload = postcard::to_allocvec(cursor).expect("Cursor serialization is infallible");
+    crc32(&payload) ^ CURSOR_TOKEN_CHECKSUM_MASK
 }
 
 /// IEEE CRC32 (the same variant Go's `hash/crc32.ChecksumIEEE` computes),
@@ -495,10 +513,6 @@ mod tests {
     use base64::Engine as _;
 
     use super::*;
-
-    /// A request's fields other than `page_token` and `page_size`: parent,
-    /// filter, `order_by`.
-    const REQUEST: &[&str] = &["publishers/1", "rank > 0", "rank desc"];
 
     #[test]
     fn builds_tuple_comparison_for_two_keys() {
@@ -553,10 +567,33 @@ mod tests {
             .after(vec![Value::Int(42), Value::String("alice".into())])
             .unwrap();
 
-        let parsed = Cursor::parse(&cursor.encode(REQUEST), REQUEST).unwrap();
+        let parsed = Cursor::parse(&cursor.encode()).unwrap();
 
         assert_eq!(parsed.to_order_by_clause(), order_by);
         assert_eq!(parsed.to_where_clause(), cursor.to_where_clause());
+    }
+
+    /// The filter travels in the token, so the next page can be checked
+    /// against the one this page was cut from.
+    #[test]
+    fn encode_parse_round_trips_the_filter() {
+        let cursor = Cursor::new(OrderByClause::parse("rank desc").unwrap())
+            .with_filter(WhereClause::new("tenant = $1").bind_value("acme"))
+            .with_filter(WhereClause::new("rank > $1").bind_value(10i64))
+            .after(vec![Value::Int(42)])
+            .unwrap();
+
+        let parsed = Cursor::parse(&cursor.encode()).unwrap();
+
+        assert_eq!(parsed.filter(), cursor.filter());
+        assert_eq!(
+            parsed.filter().sql().as_str(),
+            "(tenant = $1) AND (rank > $2)"
+        );
+        assert_eq!(
+            parsed.filter().values(),
+            &[Value::String("acme".into()), Value::Int(10)]
+        );
     }
 
     #[test]
@@ -577,7 +614,7 @@ mod tests {
             ])
             .unwrap();
 
-        let parsed = Cursor::parse(&cursor.encode(REQUEST), REQUEST).unwrap();
+        let parsed = Cursor::parse(&cursor.encode()).unwrap();
 
         assert_eq!(
             parsed.to_where_clause().values(),
@@ -587,14 +624,14 @@ mod tests {
 
     #[test]
     fn parse_rejects_invalid_base64() {
-        let err = Cursor::parse("not valid base64!!", REQUEST).unwrap_err();
+        let err = Cursor::parse("not valid base64!!").unwrap_err();
         assert_eq!(err, CursorError::TokenInvalidBase64);
     }
 
     #[test]
     fn parse_rejects_garbage_bytes() {
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8, 2, 3]);
-        let err = Cursor::parse(&token, REQUEST).unwrap_err();
+        let err = Cursor::parse(&token).unwrap_err();
         assert_eq!(err, CursorError::TokenMalformed);
     }
 
@@ -602,7 +639,7 @@ mod tests {
     fn parse_rejects_corrupted_token() {
         let order_by = OrderByClause::parse("rank desc").unwrap();
         let cursor = Cursor::new(order_by).after(vec![Value::Int(42)]).unwrap();
-        let token = cursor.encode(REQUEST);
+        let token = cursor.encode();
 
         let mut wire = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&token)
@@ -611,7 +648,7 @@ mod tests {
         wire[last] ^= 0xFF;
         let tampered = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&wire);
 
-        let err = Cursor::parse(&tampered, REQUEST).unwrap_err();
+        let err = Cursor::parse(&tampered).unwrap_err();
         assert!(matches!(
             err,
             CursorError::TokenChecksumMismatch | CursorError::TokenMalformed
@@ -623,13 +660,10 @@ mod tests {
     #[test]
     fn the_empty_token_is_the_empty_cursor() {
         for token in ["", "  "] {
-            assert!(
-                Cursor::parse(token, REQUEST).unwrap().is_empty(),
-                "{token:?}"
-            );
+            assert!(Cursor::parse(token).unwrap().is_empty(), "{token:?}");
         }
         assert!(Cursor::default().is_empty());
-        assert_eq!(Cursor::default().encode(REQUEST), "");
+        assert_eq!(Cursor::default().encode(), "");
         assert!(Cursor::default().to_where_clause().is_empty());
         assert!(Cursor::default().to_order_by_clause().keys().is_empty());
 
@@ -637,7 +671,7 @@ mod tests {
             .after(vec![Value::Int(42)])
             .unwrap();
         assert!(!positioned.is_empty());
-        assert!(!positioned.encode(REQUEST).is_empty());
+        assert!(!positioned.encode().is_empty());
     }
 
     #[test]
@@ -655,81 +689,7 @@ mod tests {
         let order_by = OrderByClause::parse("rank desc").unwrap();
         let cursor = Cursor::new(order_by).after(vec![Value::Int(42)]).unwrap();
 
-        let request = digest_of(REQUEST);
-        let payload = postcard::to_allocvec(&(request, &cursor)).unwrap();
-        assert_ne!(checksum_of(request, &cursor), crc32(&payload));
-    }
-
-    fn rank_token(request: &[&str]) -> String {
-        Cursor::new(OrderByClause::parse("rank desc").unwrap())
-            .after(vec![Value::Int(42)])
-            .unwrap()
-            .encode(request)
-    }
-
-    /// AIP-158: every field but `page_token` and `page_size` stays the same
-    /// between pages, so a token is only good for the request it came from.
-    #[test]
-    fn parse_rejects_a_token_issued_for_another_request() {
-        let token = rank_token(REQUEST);
-
-        for request in [
-            &["publishers/1", "rank > 10", "rank desc"][..],
-            &["publishers/2", "rank > 0", "rank desc"],
-            &["publishers/1", "rank > 0"],
-            &[],
-        ] {
-            assert_eq!(
-                Cursor::parse(&token, request).unwrap_err(),
-                CursorError::RequestMismatch,
-                "{request:?}"
-            );
-        }
-    }
-
-    /// The fields are length-prefixed, so moving text across a field
-    /// boundary is a different request, not the same bytes.
-    #[test]
-    fn the_request_digest_keeps_field_boundaries() {
-        let token = rank_token(&["a b", ""]);
-
-        assert!(Cursor::parse(&token, &["a b", ""]).is_ok());
-        for request in [&["a", "b"][..], &["a b"], &["", "a b"], &["a b", "", ""]] {
-            assert_eq!(
-                Cursor::parse(&token, request).unwrap_err(),
-                CursorError::RequestMismatch,
-                "{request:?}"
-            );
-        }
-    }
-
-    /// Rewriting the token's request digest to match another request is
-    /// corruption like any other edit: the checksum covers it.
-    #[test]
-    fn parse_rejects_a_rewritten_request_digest() {
-        let token = rank_token(REQUEST);
-        let other = &["publishers/1", "rank > 10", "rank desc"];
-
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&token)
-            .unwrap();
-        let mut wire: CursorToken = postcard::from_bytes(&bytes).unwrap();
-        wire.request = digest_of(other);
-        let rewritten = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(postcard::to_allocvec(&wire).unwrap());
-
-        assert_eq!(
-            Cursor::parse(&rewritten, other).unwrap_err(),
-            CursorError::TokenChecksumMismatch
-        );
-    }
-
-    /// The first page has no position to carry, so the empty token is good
-    /// for any request.
-    #[test]
-    fn the_empty_token_is_good_for_any_request() {
-        assert!(Cursor::parse("", &["publishers/2", "rank > 10"])
-            .unwrap()
-            .is_empty());
+        let payload = postcard::to_allocvec(&cursor).unwrap();
+        assert_ne!(checksum_of(&cursor), crc32(&payload));
     }
 }

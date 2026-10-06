@@ -51,12 +51,18 @@ pub enum Error {
     #[error("a {name} clause was set, but the base query has no /* query.{name} */ slot")]
     MissingSlot { name: &'static str },
 
-    /// `order_by` was set to something that doesn't match the
-    /// `OrderByClause` the [`Cursor`] passed to
-    /// [`QueryComposer::with_cursor`] was built against — almost always
-    /// means the client changed their sort between the request that
-    /// issued the page token and the one using it.
-    #[error("order_by doesn't match the order_by the cursor was built against")]
+    /// The query's `order_by` or filter doesn't match the one the
+    /// [`Cursor`] passed to [`QueryComposer::with_cursor`] was issued
+    /// under — almost always means the client changed their sort or their
+    /// filter between the request that issued the page token and the one
+    /// using it, which AIP-158 forbids.
+    ///
+    /// An explicit `order_by` must equal the cursor's
+    /// [`to_order_by_clause`](Cursor::to_order_by_clause); the
+    /// [`push_where`](QueryComposer::push_where) clauses, AND-ed together,
+    /// must equal its [`filter`](Cursor::filter) — no clauses at all only
+    /// matches a cursor with no filter.
+    #[error("order_by or filter doesn't match the one the cursor was issued under")]
     CursorMismatch,
 
     /// A base query for a `?`-style dialect contains a numbered `$N`
@@ -171,6 +177,8 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// used directly; if it *is* set, [`compose`](Self::compose) checks the
     /// two match, since a mismatch almost always means the client's sort
     /// changed between the request that issued this cursor and this one.
+    /// The same goes for the filter, always: the `push_where` clauses must
+    /// match the cursor's [`filter`](Cursor::filter).
     /// Only one cursor makes sense per query, so unlike `push_where`/
     /// `push_order_by` this doesn't accumulate — a second call replaces the
     /// first.
@@ -240,8 +248,8 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     ///
     /// # Errors
     ///
-    /// [`Error::CursorMismatch`] if a cursor and an explicit `order_by`
-    /// are both set and disagree; [`Error::UnsupportedPlaceholder`] for a
+    /// [`Error::CursorMismatch`] if a cursor is set and an explicit
+    /// `order_by`, or the `push_where` clauses, disagree with it; [`Error::UnsupportedPlaceholder`] for a
     /// `$N` in a base query whose dialect spells placeholders `?`;
     /// [`Error::BindMismatch`] if the placeholders and the values don't
     /// correspond one-to-one; [`Error::MissingSlot`] for a clause with
@@ -265,7 +273,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
         }
 
         let order_by_sql = self.compose_order_by()?;
-        let (where_by_sql, where_by_values) = self.compose_where(placeholders);
+        let (where_by_sql, where_by_values) = self.compose_where(placeholders)?;
 
         let mut sql = String::with_capacity(self.sql.len());
         let mut last = 0;
@@ -413,13 +421,27 @@ impl<DB: QueryDialect> QueryComposer<DB> {
     /// client-supplied filter, and pagination can all apply at once; none
     /// silently replaces another. Empty ones are dropped, and what's left
     /// is shifted past `offset`, the base query's own placeholders.
-    /// Unlike `order_by`, this can't fail: `where_by` values are always
-    /// AND-ed, never checked for equality against the cursor's.
-    fn compose_where(&self, offset: usize) -> (String, Vec<Value>) {
-        let where_by = self
+    ///
+    /// The cursor's tuple comparison is only meaningful within the filtered
+    /// set it was positioned in, so the `where_by` values, AND-ed together,
+    /// must equal the filter the cursor was issued under. Combined the same
+    /// way [`Cursor::with_filter`] combines them, so the same sequence of
+    /// clauses produces the same clause on both sides.
+    fn compose_where(&self, offset: usize) -> Result<(String, Vec<Value>), Error> {
+        let filter = self
             .where_by
             .iter()
             .cloned()
+            .fold(WhereClause::default(), WhereClause::and);
+
+        if let Some(cursor) = &self.cursor {
+            if *cursor.filter() != filter {
+                return Err(Error::CursorMismatch);
+            }
+        }
+
+        let where_by = Some(filter)
+            .into_iter()
             .chain(self.cursor.as_ref().map(Cursor::to_where_clause))
             .reduce(WhereClause::and)
             .filter(|w| !w.is_empty())
@@ -434,7 +456,7 @@ impl<DB: QueryDialect> QueryComposer<DB> {
             .as_ref()
             .map_or_else(String::new, |w| format!("({})", w.sql().as_str()));
         let values = where_by.map_or_else(Vec::new, |w| w.values().to_vec());
-        (sql, values)
+        Ok((sql, values))
     }
 
     /// The accumulated `order_by` if any `push_order_by()` calls were
