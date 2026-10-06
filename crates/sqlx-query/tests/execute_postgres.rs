@@ -303,12 +303,12 @@ async fn a_cursor_pages_on_a_uuid_key() {
     let token = Cursor::new(order_by)
         .after_row(&rows[0])
         .expect("a uuid key decodes")
-        .encode();
+        .encode(&[]);
 
     let mut second = QueryComposer::<sqlx::Postgres>::new(sql);
     second
         .bind_value(10i64)
-        .with_cursor(Cursor::parse(&token).expect("the token parses"));
+        .with_cursor(Cursor::parse(&token, &[]).expect("the token parses"));
     let rows = second
         .build()
         .expect("composes")

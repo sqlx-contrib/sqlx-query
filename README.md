@@ -237,8 +237,12 @@ into a `Page` — the rows, and the cursor to the next page if that extra row
 came back:
 
 ```rust
+// Every request field but page_token and page_size: a token is only good for
+// the request it was issued for.
+let request = &[parent, filter, order_by_str];
+
 // The request's token; the empty one -- the first page -- is the empty cursor.
-let cursor = Cursor::parse(&page_token)?;
+let cursor = Cursor::parse(&page_token, request)?;
 let pager = Pager::new(Cursor::new(order_by.clone()), 50);
 
 let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
@@ -254,7 +258,7 @@ let page = pager.next_page(rows)?; // Page { rows: at most 50, cursor }
 // The cursor's values come off the page's last row, so no one has to know
 // each key's Rust type. On the last page it is the empty cursor, which
 // encodes as the empty token.
-let next_page_token = page.cursor.encode();
+let next_page_token = page.cursor.encode(request);
 ```
 
 The empty token and the empty cursor are each other's image, as AIP-158 reads
@@ -272,9 +276,14 @@ against the column on the next page.
 
 The token is the cursor `postcard`-serialized, checksummed and base64'd,
 following `einride/aip-go`'s `pagination.PageToken` shape — opaque, and cleanly
-rejected if hand-edited. A cursor carries the `order_by` it was built against,
-so it doesn't have to be repeated; if it *is* set and disagrees, `compose()`
-fails rather than paging through a different sort than the token was cut for.
+rejected if hand-edited. It also carries a digest of the request fields it was
+issued for, so a client that changes its `filter` (or anything else but
+`page_token` and `page_size`) between pages gets `CursorError::RequestMismatch`
+rather than a page that matches neither filter, as AIP-158 requires.
+
+A cursor carries the `order_by` it was built against, so it doesn't have to be
+repeated; if it *is* set and disagrees, `compose()` fails rather than paging
+through a different sort than the token was cut for.
 
 ## Binding
 

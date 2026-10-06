@@ -155,13 +155,13 @@ async fn a_page_token_round_trips_into_a_running_query() {
     let token = Cursor::new(order_by)
         .after_row(rows.last().expect("a row"))
         .expect("cursor")
-        .encode();
+        .encode(&["acme"]);
 
     let mut second = QueryComposer::<sqlx::Sqlite>::new(LIST_ORDERS);
     second
         .bind_value("acme")
         .bind_value(1i64)
-        .with_cursor(Cursor::parse(&token).expect("token parses"));
+        .with_cursor(Cursor::parse(&token, &["acme"]).expect("token parses"));
     let rows = second
         .build()
         .expect("composes")
@@ -349,7 +349,7 @@ async fn pages(pool: &SqlitePool, size: usize) -> Vec<Vec<i64>> {
             .bind_value("acme")
             .bind_value(pager.limit())
             .push_order_by(order_by.clone())
-            .with_cursor(Cursor::parse(&token).expect("the token parses"));
+            .with_cursor(Cursor::parse(&token, &["acme"]).expect("the token parses"));
 
         let rows = query
             .build()
@@ -360,7 +360,7 @@ async fn pages(pool: &SqlitePool, size: usize) -> Vec<Vec<i64>> {
         let page = pager.next_page(rows).expect("the row carries every key");
 
         seen.push(page.rows.iter().map(|row| row.get("id")).collect());
-        token = page.cursor.encode();
+        token = page.cursor.encode(&["acme"]);
         if token.is_empty() {
             return seen;
         }

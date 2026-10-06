@@ -438,7 +438,7 @@ fn an_empty_cursor_is_no_cursor() {
     let mut first = QueryComposer::<sqlx::Postgres>::new(sql);
     first
         .push_order_by(OrderByClause::parse("rank desc").unwrap())
-        .with_cursor(Cursor::parse("").unwrap());
+        .with_cursor(Cursor::parse("", &[]).unwrap());
     let mut untouched = QueryComposer::<sqlx::Postgres>::new(sql);
     untouched.push_order_by(OrderByClause::parse("rank desc").unwrap());
 
