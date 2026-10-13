@@ -33,4 +33,4 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 # The filter syntax only. `default-features = false` drops the interpreter's
 # regex/chrono support: this parses CEL and never evaluates it.
-cel = { version = "0.14", default-features = false }
+cel = { version = "0.15", default-features = false }
