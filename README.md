@@ -239,12 +239,15 @@ came back:
 ```rust
 // The request's token; the empty one -- the first page -- is the empty cursor.
 let cursor = Cursor::parse(&page_token)?;
-let pager = Pager::new(Cursor::new(order_by.clone()), 50);
+// The next page's cursor carries a checksum of the filter, so that page can be
+// checked against it.
+let pager = Pager::new(Cursor::new(order_by.clone()).with_filter(filter.clone()), 50);
 
 let mut query = QueryComposer::<Postgres>::new(LIST_USERS);
 query
     .bind_value(tenant_id)
     .bind_value(pager.limit()) // 51: one past the page
+    .push_where(filter)
     .push_order_by(order_by)
     .with_cursor(cursor); // where the previous page left off, if anywhere
 
@@ -275,6 +278,14 @@ following `einride/aip-go`'s `pagination.PageToken` shape — opaque, and cleanl
 rejected if hand-edited. A cursor carries the `order_by` it was built against,
 so it doesn't have to be repeated; if it *is* set and disagrees, `compose()`
 fails rather than paging through a different sort than the token was cut for.
+
+It carries a checksum of the filter too, given with `with_filter` — the same
+clauses passed to `push_where`, in the same order. AIP-158 holds the filter
+fixed between pages, and a cursor is only a position within one filtered set,
+so `compose()` checksums the next page's `push_where` clauses and fails with
+`Error::CursorMismatch` if the client changed, added or dropped a filter,
+rather than returning pages that match neither. Only the checksum travels: the
+filter's SQL never ends up in the token.
 
 ## Binding
 

@@ -347,6 +347,10 @@ fn build_produces_a_query_with_the_composed_sql() {
     assert!(built.sql().as_str().contains("(role = 'admin') AND TRUE"));
 }
 
+fn rank_filter() -> WhereClause {
+    WhereClause::new("(rank) > ($1)").bind_value(10i64)
+}
+
 fn rank_cursor() -> Cursor {
     let order_by = OrderByClause::parse("rank desc, id asc").unwrap();
     Cursor::new(order_by)
@@ -401,15 +405,72 @@ fn cursor_with_mismatched_order_by_is_rejected() {
     ));
 }
 
+/// A cursor is checked against every `push_where` clause, combined the way
+/// `with_filter` combines them: the same clauses in the same order match.
+#[test]
+fn cursor_with_matching_filter_is_accepted() {
+    let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
+    let tenant = WhereClause::new("tenant = $1").bind_value("acme");
+    let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+    query
+        .push_where(tenant.clone())
+        .push_where(WhereClause::default())
+        .push_where(rank_filter())
+        .with_cursor(rank_cursor().with_filter(tenant).with_filter(rank_filter()));
+
+    assert!(query.compose().is_ok());
+}
+
+/// AIP-158: the filter stays the same between pages. A cursor carried into
+/// a different filter -- changed, added or dropped -- would page through a
+/// set it was never positioned in, so it is rejected.
+#[test]
+fn cursor_with_mismatched_filter_is_rejected() {
+    let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
+    let cases = [
+        // The client changed the filter's value.
+        (
+            rank_cursor().with_filter(rank_filter()),
+            vec![WhereClause::new("(rank) > ($1)").bind_value(20i64)],
+        ),
+        // The client added a filter.
+        (rank_cursor(), vec![rank_filter()]),
+        // The client dropped it.
+        (rank_cursor().with_filter(rank_filter()), vec![]),
+        // The caller left the tenant scope off the cursor.
+        (
+            rank_cursor().with_filter(rank_filter()),
+            vec![
+                WhereClause::new("tenant = $1").bind_value("acme"),
+                rank_filter(),
+            ],
+        ),
+    ];
+
+    for (cursor, filters) in cases {
+        let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+        for filter in filters {
+            query.push_where(filter);
+        }
+        query.with_cursor(cursor);
+
+        assert!(matches!(
+            query.compose().unwrap_err(),
+            Error::CursorMismatch
+        ));
+    }
+}
+
 /// A cursor and a plain filter both apply — pagination must not silently
 /// drop a filter the caller also set.
 #[test]
 fn cursor_and_filter_are_combined_with_and() {
     let sql = "SELECT * FROM t WHERE /* query.where AND */ TRUE";
     let mut query = QueryComposer::<sqlx::Postgres>::new(sql);
+    let filter = WhereClause::new("status = $1").bind_value("ACTIVE");
     query
-        .push_where(WhereClause::new("status = $1").bind_value("ACTIVE"))
-        .with_cursor(rank_cursor());
+        .push_where(filter.clone())
+        .with_cursor(rank_cursor().with_filter(filter));
 
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
@@ -525,8 +586,8 @@ fn non_positional_binds_in_textual_order_not_base_then_fragments() {
     query
         .bind_value("acme")
         .bind_value(50i64)
-        .push_where(WhereClause::new("(rank) > ($1)").bind_value(10i64))
-        .with_cursor(rank_cursor());
+        .push_where(rank_filter())
+        .with_cursor(rank_cursor().with_filter(rank_filter()));
 
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
@@ -562,8 +623,8 @@ fn positional_keeps_numbering_and_declaration_order() {
     query
         .bind_value("acme")
         .bind_value(50i64)
-        .push_where(WhereClause::new("(rank) > ($1)").bind_value(10i64))
-        .with_cursor(rank_cursor());
+        .push_where(rank_filter())
+        .with_cursor(rank_cursor().with_filter(rank_filter()));
 
     let statement = query.compose().unwrap();
     let (sql, values) = (statement.sql(), values(&statement));
