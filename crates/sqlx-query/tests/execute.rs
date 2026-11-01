@@ -385,3 +385,51 @@ async fn a_page_that_fills_exactly_has_no_cursor() {
 
     assert_eq!(pages(&pool, 3).await, [vec![1, 2, 3]]);
 }
+
+/// The pager's cursor carries the filter into each page's token, so the
+/// next page is checked against it: the same filter pages on, and a
+/// changed one is refused rather than paged through from the old position.
+#[tokio::test]
+async fn a_token_only_pages_on_under_its_own_filter() {
+    let pool = seed().await;
+    let shipped = || WhereClause::new("status = $1").bind_value("SHIPPED");
+    let order_by = OrderByClause::default().asc("id");
+    let pager = Pager::new(Cursor::new(order_by.clone()).with_filter(shipped()), 1);
+
+    let query = |filter: WhereClause, token: &str| {
+        let mut query = QueryComposer::<sqlx::Sqlite>::new(LIST_ORDERS);
+        query
+            .bind_value("acme")
+            .bind_value(pager.limit())
+            .push_where(filter)
+            .push_order_by(order_by.clone())
+            .with_cursor(Cursor::parse(token).expect("the token parses"));
+        query
+    };
+
+    let rows = query(shipped(), "")
+        .build()
+        .expect("composes")
+        .fetch_all(&pool)
+        .await
+        .expect("runs");
+    let page = pager.next_page(rows).expect("the row carries every key");
+    let ids: Vec<i64> = page.rows.iter().map(|row| row.get("id")).collect();
+    assert_eq!(ids, [1]);
+    let token = page.cursor.encode();
+
+    let rows = query(shipped(), &token)
+        .build()
+        .expect("composes")
+        .fetch_all(&pool)
+        .await
+        .expect("runs");
+    let ids: Vec<i64> = rows.iter().map(|row| row.get("id")).collect();
+    assert_eq!(ids, [3], "the next shipped order, skipping the pending one");
+
+    let pending = WhereClause::new("status = $1").bind_value("PENDING");
+    assert!(matches!(
+        query(pending, &token).compose().unwrap_err(),
+        sqlx_query::Error::CursorMismatch
+    ));
+}

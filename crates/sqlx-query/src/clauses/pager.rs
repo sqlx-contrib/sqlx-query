@@ -17,10 +17,16 @@
 //! That checksum only guards against a corrupted or hand-edited token; it
 //! is not a substitute for
 //! [`QueryComposer::compose`](crate::QueryComposer::compose)'s
-//! `CursorOrderByMismatch` check, which is what catches a client paging
-//! with one `order_by` and then switching to another — that check compares
-//! the actual decoded `OrderByClause`, a stronger guarantee than a hash
-//! could give.
+//! [`CursorMismatch`](crate::Error::CursorMismatch) check, which is what
+//! catches a client paging with one `order_by` or filter and then switching
+//! to another. AIP-158 requires both to stay the same between pages: a
+//! cursor positions within one ordering of one filtered set, and carried
+//! into another it would return pages that match neither. The `order_by` is
+//! compared as the actual decoded `OrderByClause` — the cursor needs its
+//! keys anyway, to build its comparison. The filter it never needs, so the
+//! token carries only a checksum of it (see [`Cursor::with_filter`]): enough
+//! to tell a changed filter from the same one, without the filter's SQL
+//! growing every token or travelling to the client.
 //!
 //! [`Cursor::after_row`] fills values straight from a `sqlx::Row` (the
 //! last row of a page, once it's been fetched) instead of requiring the
@@ -78,6 +84,7 @@ struct CursorKey {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cursor {
     keys: Vec<CursorKey>,
+    filter: u32,
 }
 
 /// Errors [`Cursor`]'s methods can return: building one
@@ -117,7 +124,35 @@ impl Cursor {
             .cloned()
             .map(|order| CursorKey { order, value: None })
             .collect();
-        Cursor { keys }
+        Cursor {
+            keys,
+            filter: FILTER_CHECKSUM_SEED,
+        }
+    }
+
+    /// The filter the query this cursor pages through is filtered by —
+    /// everything passed to
+    /// [`QueryComposer::push_where`](crate::QueryComposer::push_where), one
+    /// call per `push_where` call, in the same order. An empty clause counts
+    /// for nothing, as it does there.
+    ///
+    /// Only a checksum of the filter is kept, and the token carries it;
+    /// [`QueryComposer::compose`](crate::QueryComposer::compose) computes
+    /// the same checksum over the next page's own `push_where` clauses, so a
+    /// client that changes its filter between pages gets
+    /// [`Error::CursorMismatch`](crate::Error::CursorMismatch) rather than a
+    /// page from a set the cursor was never positioned in.
+    #[must_use]
+    pub fn with_filter(mut self, filter: impl Into<WhereClause>) -> Self {
+        self.filter = filter_checksum(self.filter, &filter.into());
+        self
+    }
+
+    /// Whether `where_by` — a query's `push_where` clauses, in order — is
+    /// the filter this cursor was issued under. See
+    /// [`with_filter`](Self::with_filter).
+    pub(crate) fn matches_filter(&self, where_by: &[WhereClause]) -> bool {
+        where_by.iter().fold(FILTER_CHECKSUM_SEED, filter_checksum) == self.filter
     }
 
     /// Whether this is the empty cursor: no keys, so no position — the start
@@ -128,9 +163,10 @@ impl Cursor {
     }
 
     /// Decodes a `page_token` string produced by [`encode`](Self::encode)
-    /// back into a `Cursor` carrying both its `order_by` and its boundary
-    /// values — no separate [`new`](Self::new)/[`after`](Self::after) call
-    /// needed, unlike building one from scratch.
+    /// back into a `Cursor` carrying its `order_by`, the checksum of its
+    /// [filter](Self::with_filter) and its boundary values — no separate
+    /// [`new`](Self::new)/[`after`](Self::after) call needed, unlike building
+    /// one from scratch.
     ///
     /// An empty or all-whitespace token is the [empty](Self::is_empty)
     /// cursor, the first page, as AIP-158 reads it.
@@ -414,7 +450,30 @@ fn placeholder_index(keys: &[CursorKey], key: &CursorKey) -> usize {
 
 /// XORed into the checksum on both [`Cursor::encode`] and
 /// [`Cursor::parse`] — see the module docs for what bumping this buys.
-const CURSOR_TOKEN_CHECKSUM_MASK: u32 = 0x5eed_c0de;
+/// Last bumped when [`Cursor`] gained its filter.
+const CURSOR_TOKEN_CHECKSUM_MASK: u32 = 0x5eed_c0df;
+
+/// The checksum of no filter at all: a cursor's before any
+/// [`Cursor::with_filter`] call, and a query's with no `push_where` clauses.
+/// Zero, so it is also what [`Cursor`]'s derived `Default` starts from.
+const FILTER_CHECKSUM_SEED: u32 = 0;
+
+/// `checksum` with one more filter clause folded in: a CRC32 of the
+/// `postcard` encoding of the checksum so far and `clause`'s SQL text and
+/// bind values. Chained rather than computed over the clauses `AND`ed
+/// together, because a checksum can't be `AND`ed onto — so the same
+/// clauses in the same order give the same checksum, on the cursor and in
+/// the composer alike. `postcard` length-prefixes the text, so no two
+/// clauses run together. An [empty](WhereClause::is_empty) clause leaves
+/// it as it was, as `push_where` drops one.
+fn filter_checksum(checksum: u32, clause: &WhereClause) -> u32 {
+    if clause.is_empty() {
+        return checksum;
+    }
+    let payload = postcard::to_allocvec(&(checksum, clause.sql().as_str(), clause.values()))
+        .expect("WhereClause serialization is infallible");
+    crc32(&payload)
+}
 
 /// `cursor`'s checksum, as stored in / verified against a
 /// [`CursorToken`]: a CRC32 of `cursor`'s own `postcard` encoding, masked
@@ -508,6 +567,60 @@ mod tests {
 
         assert_eq!(parsed.to_order_by_clause(), order_by);
         assert_eq!(parsed.to_where_clause(), cursor.to_where_clause());
+    }
+
+    fn tenant() -> WhereClause {
+        WhereClause::new("tenant = $1").bind_value("acme")
+    }
+
+    fn above(rank: i64) -> WhereClause {
+        WhereClause::new("rank > $1").bind_value(rank)
+    }
+
+    fn filtered(filters: Vec<WhereClause>) -> Cursor {
+        filters
+            .into_iter()
+            .fold(
+                Cursor::new(OrderByClause::parse("rank desc").unwrap()),
+                Cursor::with_filter,
+            )
+            .after(vec![Value::Int(42)])
+            .unwrap()
+    }
+
+    /// The filter's checksum travels in the token, so the next page can be
+    /// checked against the filter this page was cut from.
+    #[test]
+    fn encode_parse_round_trips_the_filter_checksum() {
+        let cursor = filtered(vec![tenant(), above(10)]);
+
+        let parsed = Cursor::parse(&cursor.encode()).unwrap();
+
+        assert_eq!(parsed.filter, cursor.filter);
+        assert!(parsed.matches_filter(&[tenant(), above(10)]));
+    }
+
+    /// The same clauses in the same order match, empty ones counting for
+    /// nothing; anything else is a different filter.
+    #[test]
+    fn a_cursor_matches_only_its_own_filter() {
+        let cursor = filtered(vec![tenant(), above(10)]);
+
+        assert!(cursor.matches_filter(&[tenant(), WhereClause::default(), above(10)]));
+        for where_by in [
+            vec![tenant(), above(20)],
+            vec![above(10), tenant()],
+            vec![tenant()],
+            vec![tenant(), above(10), above(10)],
+            vec![tenant().and(above(10))],
+            vec![],
+        ] {
+            assert!(!cursor.matches_filter(&where_by), "{where_by:?}");
+        }
+
+        assert!(Cursor::default().matches_filter(&[]));
+        assert!(Cursor::default().matches_filter(&[WhereClause::default()]));
+        assert!(!Cursor::default().matches_filter(&[tenant()]));
     }
 
     #[test]
