@@ -32,7 +32,7 @@ jobs:
 
 
       - name: Update root flake.lock
-        uses: DeterminateSystems/update-flake-lock@v29
+        uses: nixos-contrib/nix-update@v1
         with:
           token: ${{ steps.app-token.outputs.token }}
           pr-title: "chore(flake): update flake.lock"
