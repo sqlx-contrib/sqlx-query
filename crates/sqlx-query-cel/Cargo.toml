@@ -1,7 +1,7 @@
 [package]
 name = "sqlx-query-cel"
 description = "Reads an AIP-160 filter written in CEL into a sqlx-query WhereClause"
-version = "0.1.0" # literal, not inherited -- see [workspace.package]
+version = "1.0.0" # literal, not inherited -- see [workspace.package]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -28,7 +28,7 @@ uuid = ["dep:uuid", "sqlx-query/uuid"]
 # dependency without one -- the published crate has no sibling directory to
 # resolve, only a registry. release-please's cargo-workspace plugin keeps this
 # in step with sqlx-query's own version.
-sqlx-query = { path = "../sqlx-query", version = "0.1.0", default-features = false }
+sqlx-query = { path = "../sqlx-query", version = "1.0.0", default-features = false }
 cel = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true, optional = true }
